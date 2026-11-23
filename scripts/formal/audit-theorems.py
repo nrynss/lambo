@@ -13,6 +13,8 @@ not model files), records what references it:
 * proof: another declaration's proof or definition uses it, through the
   constants Lean generated for it (real usage, from the environment, not
   name matching);
+* simp: a build probe showed the proofs need it as a `@[simp]` lemma
+  (`formal/audit/simp-used.tsv`);
 * named: another declaration's text names it (a lemma proved by `rfl` and
   handed to `simp` or `dsimp` is applied definitionally and leaves no trace
   in the proof term, so this is textual: its name, outside comments and
@@ -74,7 +76,7 @@ _spec = importlib.util.spec_from_file_location("count_theorems", HERE / "count-t
 ct = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ct)
 
-SIGNALS = ("proof", "named", "example", "anchor", "ledger", "rust", "audit")
+SIGNALS = ("proof", "named", "simp", "example", "anchor", "ledger", "rust", "audit")
 ANCHOR = re.compile(r"\{/\* lean: (?P<body>[^*]*?) \*/\}")
 TICKED = re.compile(r"`([A-Za-z_][\w'.]*)`")
 QUALIFIED = re.compile(r"(?<![\w.])([A-Z][A-Za-z]*)\.([a-z_A-Z][\w']*)")
@@ -331,6 +333,22 @@ def named_refs(m):
     return refs
 
 
+def simp_refs(m):
+    """`@[simp]` lemmas a build probe showed the proofs need
+    (`formal/audit/simp-used.tsv`): `simp` uses them without naming them,
+    and an `rfl` lemma leaves no trace in the proof term."""
+    refs = defaultdict(set)
+    path = m.repo / "formal" / "audit" / "simp-used.tsv"
+    if path.exists():
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.split("#", 1)[0]
+            if line.strip():
+                name = line.split("\t")[0].strip()
+                if name in m.theorems:
+                    refs[name].add("simp-used.tsv")
+    return refs
+
+
 def audit_refs(m):
     refs = defaultdict(set)
     audit = m.repo / "formal" / "LamboProofs" / "Audit.lean"
@@ -430,7 +448,7 @@ def check(m):
     what it guarantees about the Rust. Only the doc comment's presence can be
     checked; what it says is the reviewer's."""
     used = set(m.proof_users())
-    used |= set(named_refs(m))
+    used |= set(named_refs(m)) | set(simp_refs(m))
     bad = []
     for n, d in m.theorems.items():
         if n in used:
@@ -487,7 +505,7 @@ def main(argv=None):
     refs = {k: defaultdict(set) for k in SIGNALS}
     for n, us in m.proof_users().items():
         refs["proof"][n] |= us
-    for k, f in (("named", named_refs), ("example", example_refs), ("anchor", anchor_refs), ("ledger", ledger_refs),
+    for k, f in (("named", named_refs), ("simp", simp_refs), ("example", example_refs), ("anchor", anchor_refs), ("ledger", ledger_refs),
                  ("rust", rust_refs), ("audit", audit_refs)):
         for n, v in f(m).items():
             refs[k][n] |= v

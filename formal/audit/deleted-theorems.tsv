@@ -12,3 +12,15 @@ Lambo.Hotlist.seq_mem_upsert	duplicate: states exactly what mem_upsert states (s
 Lambo.Supersession.recordRefused_nil	dead helper: an undocumented rfl unfolding of recordRefused on [] that nothing uses or names	-
 Lambo.Supersession.decideV_nil	dead helper: an undocumented rfl unfolding of decideV on [] that nothing uses or names	-
 Lambo.Tiered.markStale_d	dead helper: an undocumented rfl unfolding of markStale's durable side that nothing uses or names	-
+Lambo.Registry.holds_ers	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.holds_ern	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.unpl_ers	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.unpl_ern	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_none	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_held	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_failed	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_ers	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_ern	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_erased	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.isHeld_ers	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.isHeld_ern	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-

@@ -1192,8 +1192,6 @@ def run (c : Cfg) (s : St) : List Ev → Option St
 @[simp] theorem holds_det {h : H} {w : Option Nat} : holds (some (.detaching h w)) = 0 := rfl
 @[simp] theorem holds_held {r : Nat} {q : Option (Nat × Nat)} : holds (some (.held r q)) = 0 := rfl
 @[simp] theorem holds_failed : holds (some .failed) = 0 := rfl
-@[simp] theorem holds_ers {h : H} {q : Prior} : holds (some (.erasing (some h) q)) = 0 := rfl
-@[simp] theorem holds_ern {q : Prior} : holds (some (.erasing none q)) = 0 := rfl
 @[simp] theorem holds_erased : holds (some .erased) = 0 := rfl
 
 @[simp] theorem unpl_none : unpl none = 0 := rfl
@@ -1202,19 +1200,11 @@ def run (c : Cfg) (s : St) : List Ev → Option St
 @[simp] theorem unpl_det {h : H} {w : Option Nat} : unpl (some (.detaching h w)) = 0 := rfl
 @[simp] theorem unpl_held {r : Nat} {q : Option (Nat × Nat)} : unpl (some (.held r q)) = 0 := rfl
 @[simp] theorem unpl_failed : unpl (some .failed) = 0 := rfl
-@[simp] theorem unpl_ers {h : H} {q : Prior} : unpl (some (.erasing (some h) q)) = 0 := rfl
-@[simp] theorem unpl_ern {q : Prior} : unpl (some (.erasing none q)) = 0 := rfl
 @[simp] theorem unpl_erased : unpl (some .erased) = 0 := rfl
 
-@[simp] theorem place_none : place none = 0 := rfl
 @[simp] theorem place_att {cr : Bool} {p : Phase} : place (some (.attaching cr p)) = 1 - p.unplaced := rfl
 @[simp] theorem place_live {h : H} : place (some (.live h)) = 1 := rfl
 @[simp] theorem place_det {h : H} {w : Option Nat} : place (some (.detaching h w)) = 1 := rfl
-@[simp] theorem place_held {r : Nat} {q : Option (Nat × Nat)} : place (some (.held r q)) = 0 := rfl
-@[simp] theorem place_failed : place (some .failed) = 0 := rfl
-@[simp] theorem place_ers {h : H} {q : Prior} : place (some (.erasing (some h) q)) = 1 := rfl
-@[simp] theorem place_ern {q : Prior} : place (some (.erasing none q)) = 1 := rfl
-@[simp] theorem place_erased : place (some .erased) = 0 := rfl
 
 @[simp] theorem mem_none : mem none = 0 := rfl
 @[simp] theorem mem_att {cr : Bool} {p : Phase} : mem (some (.attaching cr p)) = p.mem := rfl
@@ -1232,8 +1222,6 @@ def run (c : Cfg) (s : St) : List Ev → Option St
 @[simp] theorem isHeld_det {h : H} {w : Option Nat} : isHeld (some (.detaching h w)) = false := rfl
 @[simp] theorem isHeld_held {r : Nat} {q : Option (Nat × Nat)} : isHeld (some (.held r q)) = true := rfl
 @[simp] theorem isHeld_failed : isHeld (some .failed) = false := rfl
-@[simp] theorem isHeld_ers {h : H} {q : Prior} : isHeld (some (.erasing (some h) q)) = false := rfl
-@[simp] theorem isHeld_ern {q : Prior} : isHeld (some (.erasing none q)) = false := rfl
 @[simp] theorem isHeld_erased : isHeld (some .erased) = false := rfl
 
 
