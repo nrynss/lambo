@@ -1110,13 +1110,15 @@ impl WritePipeline {
                     }
                 };
                 settle_one(&receipts, &job.receipt, answer, (clock)());
+                // Waiters on the receipt wake first; the graph bookkeeping
+                // below is not part of the answer they wait for.
+                settled.notify_waiters();
                 // Settled: a close will not set it aside, so the graph
                 // forgets it as consumed-and-unsettled and as dead-lettered
                 // (#345). After `settle_one`, on its own graph lock hold: a
                 // panic before here leaves both records, and the close
                 // answers a dead-lettered one `close_unflushed`.
                 ctx.graph.write().settled_write(&job.receipt.to_string());
-                settled.notify_waiters();
             }
         })
     }

@@ -6633,7 +6633,14 @@ settled is set aside, and a close whose final flush completed answers it
 * `stepP` (the current Rust): a worker's consume also records the receipt as
   consumed and not yet settled (`Graph::consumed_unsettled`); the settle
   block forgets it from both sets; the note skips a put only when its write
-  is consumed and no longer in that record, that is, settled.
+  is consumed and no longer in that record, that is, settled. The Rust
+  checks "consumed" as "its consume is in the dropped batch or still in the
+  mutation log" (`note_dead_lettered_intents`), not over the whole history
+  as `consumed` does here. The two agree on every put the note sees: a put
+  precedes its consume in log order, and the dropped batch is the flush
+  loop's only pending one, so a consume that already left the log in an
+  earlier batch had its put in that batch or before it, never in the batch
+  being dropped.
   `settlePrune_never_vouches_dropped`: over every trace, a dropped put whose
   write is not settled is in the set, so no close vouches for it, panics
   included. `settlePrune_exact`: for a write not settled, it is in the set
