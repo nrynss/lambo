@@ -11,7 +11,9 @@ import LamboProofs.Names
 import LamboProofs.Lease
 import LamboProofs.Receipts
 import LamboProofs.Reserve
-import LamboProofs.Contract
+import LamboProofs.Contract.Stamp
+import LamboProofs.Contract.Reembed
+import LamboProofs.Contract.Store
 import LamboProofs.Fusion
 import LamboProofs.Confidence
 import LamboProofs.Canonical

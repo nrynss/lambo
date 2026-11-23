@@ -203,17 +203,28 @@ rust = [
   "src/graph/graph/root_goal.rs#set_reservation",
 ]
 
-# Left out: the ordinary write's lines in src/graph/hybrid.rs, cited by line
-# range only; record_action_against is the entry point the header names.
+# The contract, the stamp and the resolve-time checks.
 [[model]]
-lean = "formal/LamboProofs/Contract.lean"
-read_against = "514da8d7"
-read_digest = "v2:sha256:7db5004981589d392314677cb1f95aec9902d396d85b65e3d1ca58cec7303568"
+lean = "formal/LamboProofs/Contract/Stamp.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:9758578be14b614ce145096b55605be45c4425f06f0807f78ed69029d3ef26d0"
 rust = [
   "src/types/mod.rs#EmbeddingContract",
-  "src/graph/graph/embeddings.rs",
+  "src/graph/graph/embeddings.rs#Graph::stamp_embedding",
   "src/resolve.rs#session_embedding_compatibility",
   "src/resolve.rs#check_vector_compatibility",
+]
+
+# The override, re-embed (before and after #296), the quarantine at load, the
+# checked read and the canary. Left out: the ordinary write's lines in
+# src/graph/hybrid.rs, cited by line range only; record_action_against is the
+# entry point the section names.
+[[model]]
+lean = "formal/LamboProofs/Contract/Reembed.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:d5e79eae0743cfea88713f9421204d3f042305583e1cdca976583a4958cd6d10"
+rust = [
+  "src/graph/graph/embeddings.rs",
   "src/memory/builder.rs#build_attach",
   "src/memory/builder.rs#canary_gate",
   "src/cli/re_embed.rs",
@@ -222,10 +233,19 @@ rust = [
   "src/graph/vector_source.rs#graph_vector_candidates",
   "src/store/sqlite/vector_candidates.rs#checked_vector_candidates",
   "src/main.rs#allow_embedding_mismatch",
+]
+
+# The store applying a re-embed's batch (#322).
+[[model]]
+lean = "formal/LamboProofs/Contract/Store.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:2dd745cab9a41cb84578390630cefbbfdb97375c0a27cf0c5d8efd5b30f38391"
+rust = [
   "src/store/memory.rs#MemoryStore::flush",
   "src/store/batch.rs#plan_flush",
   "src/store/sqlite/write_rows.rs",
   "src/store/pg/write_rows.rs",
+  "src/graph/graph/embeddings.rs#Graph::reembed",
 ]
 
 [[model]]

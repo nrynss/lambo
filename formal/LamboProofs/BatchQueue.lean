@@ -169,7 +169,7 @@ with `CandleEmbedder` and the `Embedder` impl kept in `candle/mod.rs`:
   width, the call failing as a whole (`rowFwd`, `Uniform`).
 * `candle/identity.rs` (`PinnedFile`, `LoadPlan`, `Fingerprint`,
   `weight_sha256`, the identity cache) carries none; the contract the
-  identity feeds is `Contract.lean`'s.
+  identity feeds is `Contract/Stamp.lean`'s.
 * `candle/mod.rs` keeps `embed`, `embed_batch`, `recv_bounded` and
   `Handle::drop`, whose behaviour the events `enqueue`, `enqueueMany`,
   `giveUp`, `shutdown` and `dropShared` and the classes in `Obs.transient`

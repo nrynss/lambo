@@ -1088,7 +1088,7 @@ mod tests {
     /// Mirrors `reembedCmd322_contractless_durable` (every text concept
     /// holds a live vector) and `reembedOrdered_contractless_matches_graph`
     /// (the store is the graph, so the reported coverage is the store's) in
-    /// `formal/LamboProofs/Contract.lean`; the old behaviour is
+    /// `formal/LamboProofs/Contract/Store.lean`; the old behaviour is
     /// `reembed_contractless_durable_loses_vectors`.
     async fn assert_contractless_re_embed_keeps_its_vectors<S: GraphStore + 'static>(
         store: Arc<S>,
@@ -2004,7 +2004,7 @@ mod postgres_live {
 
     /// Mirrors `reembedCmd322_contractless_durable` and
     /// `reembedOrdered_contractless_matches_graph` in
-    /// `formal/LamboProofs/Contract.lean` on Postgres: after `lambo re-embed`
+    /// `formal/LamboProofs/Contract/Store.lean` on Postgres: after `lambo re-embed`
     /// of a pre-contract session, the raw rows hold the live contract and
     /// every new vector. Before the fix the trailing `SetEmbedding`'s
     /// quarantine nulled them (`reembed_contractless_durable_loses_vectors`).
