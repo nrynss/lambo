@@ -21,7 +21,9 @@ write leaves the window (`lapse_of_old`, `lapse_permanent`,
 original writer (`resend_drops_original_writer`); the fixed rule keeps the
 creator and adds the re-sender (`resend_keeps_creator`,
 `resend_adds_resender`) and never loses a conflict the old rule found
-(`conflictAtFixed_of_conflictAt`). Pinned as they are: only one agent need
+(`conflictAtFixed_of_conflictAt`); under either rule the named writer is one
+of the contesting agents (`writer_mem_agents`, `writer_mem_agents_fixed`).
+Pinned as they are: only one agent need
 write inside the window (`old_edge_agent_counts`), an edge written after `now`
 still adds its agent (`future_edge_agent_counts`), ties between edges go to
 the smallest edge id (`writer_order_dependent`), and a writer between an

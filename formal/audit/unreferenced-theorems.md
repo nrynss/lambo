@@ -14,17 +14,22 @@ Precedence: a same-statement twin (b); a result named in a header, the README or
 
 ## Summary
 
-2412 theorems in 33 model files; 265 unreferenced: 265 (a), 0 (b), 0 (c).
+2412 theorems in 54 model files; 265 unreferenced: 265 (a), 0 (b), 0 (c).
 
 | File | Theorems | Used by a proof | Unreferenced | (a) | (b) | (c) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `BatchQueue.lean` | 162 | 119 | 7 | 7 | 0 | 0 |
+| `BatchQueue/Pure.lean` | 96 | 75 | 6 | 6 | 0 | 0 |
+| `BatchQueue/Runs.lean` | 14 | 0 | 1 | 1 | 0 | 0 |
+| `BatchQueue/Worker.lean` | 52 | 44 | 0 | 0 | 0 | 0 |
 | `Canon.lean` | 23 | 4 | 2 | 2 | 0 | 0 |
 | `Canonical.lean` | 108 | 78 | 10 | 10 | 0 | 0 |
 | `Cite.lean` | 37 | 25 | 3 | 3 | 0 | 0 |
 | `Confidence.lean` | 63 | 33 | 8 | 8 | 0 | 0 |
-| `Conflict.lean` | 119 | 56 | 36 | 36 | 0 | 0 |
-| `Contract.lean` | 120 | 48 | 39 | 39 | 0 | 0 |
+| `Conflict/Contradiction.lean` | 41 | 17 | 12 | 12 | 0 | 0 |
+| `Conflict/Detect.lean` | 78 | 39 | 24 | 24 | 0 | 0 |
+| `Contract/Reembed.lean` | 90 | 35 | 33 | 33 | 0 | 0 |
+| `Contract/Stamp.lean` | 10 | 2 | 5 | 5 | 0 | 0 |
+| `Contract/Store.lean` | 20 | 11 | 1 | 1 | 0 | 0 |
 | `Discovery.lean` | 15 | 9 | 0 | 0 | 0 | 0 |
 | `Dispatch.lean` | 85 | 46 | 9 | 9 | 0 | 0 |
 | `Drain/Base.lean` | 47 | 41 | 0 | 0 | 0 | 0 |
@@ -35,21 +40,37 @@ Precedence: a same-statement twin (b); a result named in a header, the README or
 | `Drain/Worker.lean` | 28 | 20 | 0 | 0 | 0 | 0 |
 | `Expand.lean` | 25 | 20 | 2 | 2 | 0 | 0 |
 | `Fit.lean` | 76 | 54 | 7 | 7 | 0 | 0 |
-| `Flush.lean` | 175 | 111 | 5 | 5 | 0 | 0 |
-| `Fusion.lean` | 133 | 97 | 16 | 16 | 0 | 0 |
+| `Flush/Errors.lean` | 49 | 29 | 0 | 0 | 0 | 0 |
+| `Flush/Loop.lean` | 96 | 59 | 5 | 5 | 0 | 0 |
+| `Flush/Retry.lean` | 30 | 23 | 0 | 0 | 0 | 0 |
+| `Fusion/Max.lean` | 66 | 51 | 3 | 3 | 0 | 0 |
+| `Fusion/Rrf.lean` | 67 | 46 | 13 | 13 | 0 | 0 |
 | `Gc.lean` | 20 | 3 | 10 | 10 | 0 | 0 |
-| `Hotlist.lean` | 105 | 72 | 12 | 12 | 0 | 0 |
+| `Hotlist/Cycle.lean` | 20 | 10 | 2 | 2 | 0 | 0 |
+| `Hotlist/List.lean` | 70 | 58 | 5 | 5 | 0 | 0 |
+| `Hotlist/Recall.lean` | 15 | 4 | 5 | 5 | 0 | 0 |
 | `Lease.lean` | 28 | 21 | 5 | 5 | 0 | 0 |
 | `Names.lean` | 9 | 6 | 1 | 1 | 0 | 0 |
 | `Order.lean` | 41 | 29 | 8 | 8 | 0 | 0 |
-| `Policy.lean` | 114 | 53 | 29 | 29 | 0 | 0 |
+| `Policy/Score.lean` | 47 | 16 | 15 | 15 | 0 | 0 |
+| `Policy/Sessions.lean` | 36 | 24 | 8 | 8 | 0 | 0 |
+| `Policy/Support.lean` | 31 | 13 | 6 | 6 | 0 | 0 |
 | `Receipts.lean` | 24 | 10 | 5 | 5 | 0 | 0 |
-| `Registry.lean` | 173 | 79 | 1 | 1 | 0 | 0 |
+| `Registry/Pure.lean` | 23 | 6 | 0 | 0 | 0 | 0 |
+| `Registry/Runs.lean` | 5 | 2 | 0 | 0 | 0 | 0 |
+| `Registry/Step.lean` | 145 | 71 | 1 | 1 | 0 | 0 |
 | `Reserve.lean` | 7 | 2 | 0 | 0 | 0 | 0 |
-| `Resolve.lean` | 136 | 60 | 6 | 6 | 0 | 0 |
+| `Resolve/Args.lean` | 9 | 0 | 3 | 3 | 0 | 0 |
+| `Resolve/Auth.lean` | 29 | 3 | 0 | 0 | 0 | 0 |
+| `Resolve/Construction.lean` | 58 | 36 | 2 | 2 | 0 | 0 |
+| `Resolve/Serve.lean` | 40 | 21 | 1 | 1 | 0 | 0 |
 | `Score.lean` | 40 | 18 | 19 | 19 | 0 | 0 |
-| `Supersession.lean` | 112 | 66 | 15 | 15 | 0 | 0 |
-| `Tiered.lean` | 127 | 79 | 4 | 4 | 0 | 0 |
+| `Supersession/Pass.lean` | 41 | 24 | 5 | 5 | 0 | 0 |
+| `Supersession/Recall.lean` | 13 | 5 | 1 | 1 | 0 | 0 |
+| `Supersession/Suspected.lean` | 58 | 37 | 9 | 9 | 0 | 0 |
+| `Tiered/Machine.lean` | 96 | 74 | 3 | 3 | 0 | 0 |
+| `Tiered/Pure.lean` | 14 | 4 | 1 | 1 | 0 | 0 |
+| `Tiered/Runs.lean` | 17 | 1 | 0 | 0 | 0 | 0 |
 | `TopK.lean` | 55 | 40 | 5 | 5 | 0 | 0 |
 | **Total** | 2412 | 1443 | 265 | 265 | 0 | 0 |
 
@@ -61,20 +82,23 @@ Theorems with the same statement (up to binder names) under two names; one of ea
 
 - `Confidence.keywordOnly_le_noisyOr`, `Confidence.noisyOr_ge_keyword`.
 
-## `BatchQueue.lean`
+## `BatchQueue/Pure.lean`
 
-- (a) `takePrioritized_snd_sublist` (line 705): its doc comment states its Rust guarantee: "`take_prioritized` leaves the requests it does not take queued in arrival order.".
-- (a) `takePrioritized_no_bulk` (line 753): named among the results in the header of `BatchQueue.lean`.
-- (a) `paired_transient_fault_recovers` (line 1419): named among the results in the header of `BatchQueue.lean`.
-- (a) `test_lone_vs_pair` (line 1481): named among the results in the header of `BatchQueue.lean`.
-- (a) `forwardIsolated_empty_quirk` (line 1489): named among the results in the header of `BatchQueue.lean`.
-- (a) `pick_some` (line 1516): its doc comment states its Rust guarantee: "`pick` (`serve_take`) always yields a batch when there is a bulk request or any single to serve.".
-- (a) `test_spawn_failure_wedges` (line 2979): named among the results in the header of `BatchQueue.lean`.
+- (a) `takePrioritized_snd_sublist` (line 396): its doc comment states its Rust guarantee: "`take_prioritized` leaves the requests it does not take queued in arrival order.".
+- (a) `takePrioritized_no_bulk` (line 444): named among the results in the header of `BatchQueue/Pure.lean`.
+- (a) `paired_transient_fault_recovers` (line 1110): named among the results in the header of `BatchQueue/Pure.lean`.
+- (a) `test_lone_vs_pair` (line 1172): named among the results in the header of `BatchQueue/Pure.lean`.
+- (a) `forwardIsolated_empty_quirk` (line 1180): named among the results in the header of `BatchQueue/Pure.lean`.
+- (a) `pick_some` (line 1207): its doc comment states its Rust guarantee: "`pick` (`serve_take`) always yields a batch when there is a bulk request or any single to serve.".
+
+## `BatchQueue/Runs.lean`
+
+- (a) `test_spawn_failure_wedges` (line 211): named among the results in the header of `BatchQueue/Runs.lean`.
 
 ## `Canon.lean`
 
-- (a) `legal_irrefl` (line 60): its doc comment states its Rust guarantee: "`legal_canonization_transition` refuses a transition from a status to itself.".
-- (a) `cycle_idle` (line 224): its doc comment states its Rust guarantee: "An `Evaluator` cycle (`apply`) with no stage flag set leaves a concept's status unchanged.".
+- (a) `legal_irrefl` (line 69): its doc comment states its Rust guarantee: "`legal_canonization_transition` refuses a transition from a status to itself.".
+- (a) `cycle_idle` (line 233): its doc comment states its Rust guarantee: "An `Evaluator` cycle (`apply`) with no stage flag set leaves a concept's status unchanged.".
 
 ## `Canonical.lean`
 
@@ -91,159 +115,171 @@ Theorems with the same statement (up to binder names) under two names; one of ea
 
 ## `Cite.lean`
 
-- (a) `Acyclic.irrefl` (line 172): its doc comment states its Rust guarantee: "On the `Causal`/`Dependency` graph the write gates keep acyclic, no concept depends on itself: `closing_edge` ".
-- (a) `no_mutual_dependency` (line 177): named among the results in the header of `Cite.lean`.
-- (a) `no_dependency_cycle` (line 183): its doc comment states its Rust guarantee: "On the `Causal`/`Dependency` graph the write gates (`closing_edge`) keep acyclic, nothing a concept transitive".
+- (a) `Acyclic.irrefl` (line 158): its doc comment states its Rust guarantee: "On the `Causal`/`Dependency` graph the write gates keep acyclic, no concept depends on itself: `closing_edge` ".
+- (a) `no_mutual_dependency` (line 163): named among the results in the header of `Cite.lean`.
+- (a) `no_dependency_cycle` (line 169): its doc comment states its Rust guarantee: "On the `Causal`/`Dependency` graph the write gates (`closing_edge`) keep acyclic, nothing a concept transitive".
 
 ## `Confidence.lean`
 
-- (a) `keywordTerm_of_nonpos` (line 269): named among the results in the header of `Confidence.lean`.
-- (a) `noisyOrCombine_num` (line 352): named among the results in the header of `Confidence.lean`.
-- (a) `noisyOr_none` (line 435): named among the results in the header of `Confidence.lean`.
-- (a) `noisyOr_inUnit` (line 451): its doc comment states it as a result: "The value is in `[0, 1]`".
-- (a) `noisyOr_ge_vector` (line 462): named among the results in the header of `Confidence.lean`.
-- (a) `keywordOnly_eq_noisyOr_at_null` (line 504): named among the results in the header of `Confidence.lean`.
-- (a) `topLegs_perm` (line 905): named among the results in the header of `Confidence.lean`.
-- (a) `recall_keywordOnly_without_median` (line 1282): named among the results in the header of `Confidence.lean`.
+- (a) `keywordTerm_of_nonpos` (line 259): named among the results in the header of `Confidence.lean`.
+- (a) `noisyOrCombine_num` (line 342): named among the results in the header of `Confidence.lean`.
+- (a) `noisyOr_none` (line 425): its doc comment states its Rust guarantee: "`provisional_confidence`'s two-leg value is `None` for any non-finite input and for a null median at or above ".
+- (a) `noisyOr_inUnit` (line 441): its doc comment states it as a result: "The value is in `[0, 1]`".
+- (a) `noisyOr_ge_vector` (line 452): named among the results in the header of `Confidence.lean`.
+- (a) `keywordOnly_eq_noisyOr_at_null` (line 494): named among the results in the header of `Confidence.lean`.
+- (a) `topLegs_perm` (line 895): named among the results in the header of `Confidence.lean`.
+- (a) `recall_keywordOnly_without_median` (line 1272): named among the results in the header of `Confidence.lean`.
 
-## `Conflict.lean`
+## `Conflict/Contradiction.lean`
 
-- (a) `conflictAt_two_agents` (line 703): named among the results in the header of `Conflict.lean`.
-- (a) `writer_mem_agents` (line 715): named among the results in the header of `Conflict.lean`.
-- (a) `window_lower_inclusive` (line 742): named among the results in the header of `Conflict.lean`.
-- (a) `window_upper_inclusive` (line 750): named among the results in the header of `Conflict.lean`.
-- (a) `future_excluded` (line 767): named among the results in the header of `Conflict.lean`.
-- (a) `unbounded_window_qualifies_iff` (line 775): named among the results in the header of `Conflict.lean`.
-- (a) `secondsAgo_le_window` (line 781): named among the results in the header of `Conflict.lean`.
-- (a) `conflictAt_perm_isSome` (line 805): named among the results in the header of `Conflict.lean`.
-- (a) `conflictAt_perm_agents` (line 814): named among the results in the header of `Conflict.lean`.
-- (a) `writer_perm_of_unique` (line 834): named among the results in the header of `Conflict.lean`.
-- (a) `lapse_of_old` (line 871): named among the results in the header of `Conflict.lean`.
-- (a) `secondsAgo_advances` (line 911): named among the results in the header of `Conflict.lean`.
-- (a) `same_instant_both_join` (line 992): a closed statement about a concrete case (a worked example).
-- (a) `old_edge_agent_counts` (line 1006): named among the results in the header of `Conflict.lean`.
-- (a) `future_edge_agent_counts` (line 1017): named among the results in the header of `Conflict.lean`.
-- (a) `writer_order_dependent` (line 1056): named among the results in the header of `Conflict.lean`.
-- (a) `agentsOf_sub_fixed` (line 1191): its doc comment states its Rust guarantee: "The fixed attribution of a re-sent write (`edge_writers`, test `a_resend_by_another_agent_keeps_the_original_w".
-- (a) `single_agent_never_conflicts_fixed` (line 1314): named among the results in the header of `Conflict.lean`.
-- (a) `secondsAgo_le_window_fixed` (line 1343): named among the results in the header of `Conflict.lean`.
-- (a) `conflictAtFixed_perm_isSome` (line 1356): named among the results in the header of `Conflict.lean`.
-- (a) `conflictAtFixed_perm_agents` (line 1365): named among the results in the header of `Conflict.lean`.
-- (a) `writer_perm_of_unique_fixed` (line 1387): named among the results in the header of `Conflict.lean`.
-- (a) `excluded_edge_irrelevant_fixed` (line 1410): named among the results in the header of `Conflict.lean`.
-- (a) `resend_keeps_original_writer` (line 1511): named among the results in the header of `Conflict.lean`.
-- (a) `declaredAt_le_aboutTime` (line 1681): its doc comment states its Rust guarantee: "`declared_at` never dates a declaration later than its event time.".
-- (a) `declaredAt_mono` (line 1704): named among the results in the header of `Conflict.lean`.
-- (a) `cutoff_none_of_out_of_range` (line 1774): its doc comment states its Rust guarantee: "When `now - min_age` falls below `MIN_UTC`, `checked_sub_signed` gives `contradiction.rs` no age cutoff, so no".
-- (a) `unrepresentable_minAge` (line 1797): named among the results in the header of `Conflict.lean`.
-- (a) `not_written_not_admissible` (line 1890): named among the results in the header of `Conflict.lean`.
-- (a) `admissible_of_more_evidence` (line 1965): named among the results in the header of `Conflict.lean`.
-- (a) `same_instant_evidence_outweighs` (line 2157): a closed statement about a concrete case (a worked example).
-- (a) `thirty_days_ahead_clamped` (line 2170): a closed statement about a concrete case (a worked example).
-- (a) `backdated_citation_waits` (line 2181): a closed statement about a concrete case (a worked example).
-- (a) `backdated_contradiction` (line 2209): a closed statement about a concrete case (a worked example).
-- (a) `own_citation_does_not_silence` (line 2227): a closed statement about a concrete case (a worked example).
-- (a) `written_after_now` (line 2253): a closed statement about a concrete case (a worked example).
+- (a) `declaredAt_le_aboutTime` (line 158): its doc comment states its Rust guarantee: "`declared_at` never dates a declaration later than its event time.".
+- (a) `declaredAt_mono` (line 181): its doc comment states its Rust guarantee: "`declared_at` (`contradiction.rs`) is monotone: a later write time and a later event time never give an earlie".
+- (a) `cutoff_none_of_out_of_range` (line 251): its doc comment states its Rust guarantee: "When `now - min_age` falls below `MIN_UTC`, `checked_sub_signed` gives `contradiction.rs` no age cutoff, so no".
+- (a) `unrepresentable_minAge` (line 274): named among the results in the header of `Conflict/Contradiction.lean`.
+- (a) `not_written_not_admissible` (line 367): its doc comment states its Rust guarantee: "PR #154 review: a declaration written after `now` is not admissible, whatever its event time.".
+- (a) `admissible_of_more_evidence` (line 442): named among the results in the header of `Conflict/Contradiction.lean`.
+- (a) `same_instant_evidence_outweighs` (line 634): a closed statement about a concrete case (a worked example).
+- (a) `thirty_days_ahead_clamped` (line 647): a closed statement about a concrete case (a worked example).
+- (a) `backdated_citation_waits` (line 658): a closed statement about a concrete case (a worked example).
+- (a) `backdated_contradiction` (line 686): a closed statement about a concrete case (a worked example).
+- (a) `own_citation_does_not_silence` (line 704): a closed statement about a concrete case (a worked example).
+- (a) `written_after_now` (line 730): a closed statement about a concrete case (a worked example).
 
-## `Contract.lean`
+## `Conflict/Detect.lean`
 
-- (a) `first_stamp_wins` (line 131): its doc comment ties it to the Rust (quotes the source or names a Rust test).
-- (a) `classify_unrecorded_iff` (line 153): its doc comment states its Rust guarantee: "`session_embedding_compatibility` treats a session as a wildcard (`Unrecorded`) exactly when it has no recorde".
-- (a) `classify_compatible_iff` (line 171): its doc comment states its Rust guarantee: "`session_embedding_compatibility` answers `Compatible` for a recorded contract exactly when it equals the live".
-- (a) `vector_check_store_authoritative` (line 197): its doc comment states its Rust guarantee: "When the store declares a vector width, `check_vector_compatibility` passes only an embedder of exactly that w".
-- (a) `vector_check_zero` (line 204): its doc comment states its Rust guarantee: "`check_vector_compatibility` refuses a zero-width embedder whatever the store declares.".
-- (a) `attach_follows_classify` (line 691): its doc comment states its Rust guarantee: "`build_attach` follows `session_embedding_compatibility`: a compatible session passes unchanged, an unrecorded".
-- (a) `attach_ok_contract_live` (line 729): its doc comment states its Rust guarantee: "Every successful writer attach (`build_attach`), with or without `--allow-embedding-mismatch`, leaves the sess".
-- (a) `attach_override_width_refused` (line 759): its doc comment states its Rust guarantee: "`build_attach` refuses a width change even with `--allow-embedding-mismatch`: the override never relabels a se".
-- (a) `attach_override_cross_kind_refused` (line 768): its doc comment states its Rust guarantee: "`build_attach` refuses even with `--allow-embedding-mismatch` a kind change while any concept carries a vector".
-- (a) `attach_override_records` (line 779): its doc comment states its Rust guarantee: "A successful `--allow-embedding-mismatch` attach (`build_attach`) emits exactly one `SetEmbedding` of the live".
-- (a) `write_refuses_other_space` (line 823): its doc comment states its Rust guarantee: "An ordinary write of a vector from another embedding space into a stamped session is refused (`Graph::stamp_em".
-- (a) `backfill_no_setEmbedding` (line 843): its doc comment ties it to the Rust (quotes the source or names a Rust test).
-- (a) `reembed_contract_last` (line 972): its doc comment ties it to the Rust (quotes the source or names a Rust test).
-- (a) `read_refuses_mismatch` (line 1170): its doc comment states its Rust guarantee: "The checked vector read (`graph_vector_candidates` / `checked_vector_candidates`) refuses a session under anot".
-- (a) `quarantine_no_vectors` (line 1206): its doc comment states its Rust guarantee: "`quarantine_legacy_vectors` leaves a session loaded with no contract holding no vector, so the first stamp aft".
-- (a) `attach_override_no_vectors_oneSpace` (line 1255): its doc comment states its Rust guarantee: "An `--allow-embedding-mismatch` attach on a session holding no vector mixes nothing: the relabel is a re-stamp".
-- (a) `reembedCmd_refuses_override` (line 1266): its doc comment states its Rust guarantee: "`lambo re-embed` refuses `--allow-embedding-mismatch` on every session: a migration never relabels instead of ".
-- (a) `reembedCmd_full_one_space` (line 1286): its doc comment states its Rust guarantee: "A successful full `re-embed` leaves the session in one space under the live contract.".
-- (a) `canary_refuses_iff` (line 1327): its doc comment states its Rust guarantee: "`canary_gate` refuses a writer attach exactly under `canary = "verify"` with a drifted embedder and no `--allo".
-- (a) `writerAttach_verify_drift` (line 1356): its doc comment states its Rust guarantee: "Under `canary = "verify"` with a drifted embedder, `canary_gate` refuses every ordinary writer attach (`build_".
-- (a) `example_rename` (line 1421): a closed statement about a concrete case (a worked example).
-- (a) `example_override_refusals` (line 1429): a closed statement about a concrete case (a worked example).
-- (a) `example_warn_without_relabel` (line 1436): a closed statement about a concrete case (a worked example).
-- (a) `override_mixes_reads` (line 1442): a closed statement about a concrete case (a worked example).
-- (a) `example_no_override_no_mix` (line 1450): a closed statement about a concrete case (a worked example).
-- (a) `example_reembed` (line 1458): a closed statement about a concrete case (a worked example).
-- (a) `example_reembed_coverage` (line 1466): a closed statement about a concrete case (a worked example).
-- (a) `example_reembed_images` (line 1474): a closed statement about a concrete case (a worked example).
-- (a) `example_drift_not_reembeddable_in_place` (line 1483): a closed statement about a concrete case (a worked example).
-- (a) `example_rename_hop` (line 1494): named as a result in `formal/README.md`.
-- (a) `example_silent_repin` (line 1504): a closed statement about a concrete case (a worked example).
-- (a) `example_drifted_backfill` (line 1513): its doc comment states it as a result: "The drifted backfill".
-- (a) `example_same_kind_relabel` (line 1521): a closed statement about a concrete case (a worked example).
-- (a) `example_backfill` (line 1527): a closed statement about a concrete case (a worked example).
-- (a) `example_write_after_override` (line 1535): a closed statement about a concrete case (a worked example).
-- (a) `missingOnly_fixed_verify_drift_writes_nothing` (line 1839): its doc comment states its Rust guarantee: "Since #296, `lambo re-embed --missing-only` under `canary = "verify"` with a drifted embedder writes nothing t".
-- (a) `runAll2_ordinary_keeps` (line 1999): its doc comment states its Rust guarantee: "Since #296, no sequence of ordinary operations (writes, stamps, the canary-gated `--missing-only` backfill) ch".
-- (a) `example_pins_written` (line 2136): a closed statement about a concrete case (a worked example).
-- (a) `example_contractless_bug` (line 2694): its doc comment states it as a result: "The #322 scenario.".
+- (a) `conflictAt_two_agents` (line 572): its doc comment states its Rust guarantee: "`conflict_at` fires only when at least two distinct agents contest the node, each listed once in `ConflictHit:".
+- (a) `writer_mem_agents` (line 584): named among the results in the header of `Conflict/Detect.lean`.
+- (a) `window_lower_inclusive` (line 611): its doc comment states its Rust guarantee: "`conflict_at` counts a write made exactly one recency window before `now` (test `window_boundaries_are_inclusi".
+- (a) `window_upper_inclusive` (line 619): its doc comment states its Rust guarantee: "`conflict_at` counts a write made exactly at `now` (test `window_boundaries_are_inclusive`).".
+- (a) `future_excluded` (line 636): its doc comment states its Rust guarantee: "A write dated after `now` (a mocked clock) is outside `conflict_at`'s window, the unrepresentable window inclu".
+- (a) `unbounded_window_qualifies_iff` (line 644): its doc comment states its Rust guarantee: "An unrepresentable window (`Duration::MAX`) covers all of time up to `now` (`an_unrepresentable_window_saturat".
+- (a) `secondsAgo_le_window` (line 650): its doc comment states its Rust guarantee: "`ConflictHit::seconds_ago` (the newest qualifying write's age) is at most the recency window.".
+- (a) `conflictAt_perm_isSome` (line 674): named as a result in `formal/README.md`.
+- (a) `conflictAt_perm_agents` (line 683): named as a result in `formal/README.md`.
+- (a) `writer_perm_of_unique` (line 703): its doc comment states its Rust guarantee: "`ConflictHit::writer` does not depend on `incident_edges` order as long as no two qualifying writes at one ins".
+- (a) `lapse_of_old` (line 740): named among the results in the header of `Conflict/Detect.lean`.
+- (a) `secondsAgo_advances` (line 780): named among the results in the header of `Conflict/Detect.lean`.
+- (a) `same_instant_both_join` (line 861): a closed statement about a concrete case (a worked example).
+- (a) `old_edge_agent_counts` (line 875): named among the results in the header of `Conflict/Detect.lean`.
+- (a) `future_edge_agent_counts` (line 886): named among the results in the header of `Conflict/Detect.lean`.
+- (a) `writer_order_dependent` (line 925): named among the results in the header of `Conflict/Detect.lean`.
+- (a) `agentsOf_sub_fixed` (line 1060): its doc comment states its Rust guarantee: "The fixed attribution of a re-sent write (`edge_writers`, test `a_resend_by_another_agent_keeps_the_original_w".
+- (a) `single_agent_never_conflicts_fixed` (line 1183): its doc comment states its Rust guarantee: "Under the fixed attribution, a node every qualifying edge of which has one candidate writer never yields a `Co".
+- (a) `secondsAgo_le_window_fixed` (line 1212): its doc comment states its Rust guarantee: "Under the fixed attribution, `ConflictHit::seconds_ago` is still at most the recency window.".
+- (a) `conflictAtFixed_perm_isSome` (line 1225): its doc comment states its Rust guarantee: "Whether the fixed `conflict_at_with` fires does not depend on `incident_edges` order.".
+- (a) `conflictAtFixed_perm_agents` (line 1234): its doc comment states its Rust guarantee: "The fixed `conflict_at_with`'s agent set does not depend on `incident_edges` order.".
+- (a) `writer_perm_of_unique_fixed` (line 1256): its doc comment states its Rust guarantee: "Nor does the named writer, under the same uniqueness condition as `writer_perm_of_unique`.".
+- (a) `excluded_edge_irrelevant_fixed` (line 1279): its doc comment states its Rust guarantee: "Under the fixed attribution a `Contradicts` or `SuspectedSupersedes` edge still never changes `conflict_at`'s ".
+- (a) `resend_keeps_original_writer` (line 1380): a closed statement about a concrete case (a worked example).
+
+## `Contract/Reembed.lean`
+
+- (a) `attach_follows_classify` (line 523): its doc comment states its Rust guarantee: "`build_attach` follows `session_embedding_compatibility`: a compatible session passes unchanged, an unrecorded".
+- (a) `attach_ok_contract_live` (line 561): its doc comment states its Rust guarantee: "Every successful writer attach (`build_attach`), with or without `--allow-embedding-mismatch`, leaves the sess".
+- (a) `attach_override_width_refused` (line 591): its doc comment states its Rust guarantee: "`build_attach` refuses a width change even with `--allow-embedding-mismatch`: the override never relabels a se".
+- (a) `attach_override_cross_kind_refused` (line 600): its doc comment states its Rust guarantee: "`build_attach` refuses even with `--allow-embedding-mismatch` a kind change while any concept carries a vector".
+- (a) `attach_override_records` (line 611): its doc comment states its Rust guarantee: "A successful `--allow-embedding-mismatch` attach (`build_attach`) emits exactly one `SetEmbedding` of the live".
+- (a) `write_refuses_other_space` (line 655): its doc comment states its Rust guarantee: "An ordinary write of a vector from another embedding space into a stamped session is refused (`Graph::stamp_em".
+- (a) `backfill_no_setEmbedding` (line 675): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+- (a) `reembed_contract_last` (line 804): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+- (a) `read_refuses_mismatch` (line 1002): its doc comment states its Rust guarantee: "The checked vector read (`graph_vector_candidates` / `checked_vector_candidates`) refuses a session under anot".
+- (a) `quarantine_no_vectors` (line 1038): its doc comment states its Rust guarantee: "`quarantine_legacy_vectors` leaves a session loaded with no contract holding no vector, so the first stamp aft".
+- (a) `attach_override_no_vectors_oneSpace` (line 1087): its doc comment states its Rust guarantee: "An `--allow-embedding-mismatch` attach on a session holding no vector mixes nothing: the relabel is a re-stamp".
+- (a) `reembedCmd_refuses_override` (line 1098): its doc comment states its Rust guarantee: "`lambo re-embed` refuses `--allow-embedding-mismatch` on every session: a migration never relabels instead of ".
+- (a) `reembedCmd_full_one_space` (line 1118): its doc comment states its Rust guarantee: "A successful full `re-embed` leaves the session in one space under the live contract.".
+- (a) `canary_refuses_iff` (line 1159): its doc comment states its Rust guarantee: "`canary_gate` refuses a writer attach exactly under `canary = "verify"` with a drifted embedder and no `--allo".
+- (a) `writerAttach_verify_drift` (line 1188): its doc comment states its Rust guarantee: "Under `canary = "verify"` with a drifted embedder, `canary_gate` refuses every ordinary writer attach (`build_".
+- (a) `example_rename` (line 1253): a closed statement about a concrete case (a worked example).
+- (a) `example_override_refusals` (line 1261): a closed statement about a concrete case (a worked example).
+- (a) `example_warn_without_relabel` (line 1268): a closed statement about a concrete case (a worked example).
+- (a) `override_mixes_reads` (line 1274): named among the results in the header of `Contract/Reembed.lean`.
+- (a) `example_no_override_no_mix` (line 1282): a closed statement about a concrete case (a worked example).
+- (a) `example_reembed` (line 1290): a closed statement about a concrete case (a worked example).
+- (a) `example_reembed_coverage` (line 1298): a closed statement about a concrete case (a worked example).
+- (a) `example_reembed_images` (line 1306): a closed statement about a concrete case (a worked example).
+- (a) `example_drift_not_reembeddable_in_place` (line 1315): a closed statement about a concrete case (a worked example).
+- (a) `example_rename_hop` (line 1326): named as a result in `formal/README.md`.
+- (a) `example_silent_repin` (line 1336): a closed statement about a concrete case (a worked example).
+- (a) `example_drifted_backfill` (line 1345): its doc comment states it as a result: "The drifted backfill".
+- (a) `example_same_kind_relabel` (line 1353): a closed statement about a concrete case (a worked example).
+- (a) `example_backfill` (line 1359): a closed statement about a concrete case (a worked example).
+- (a) `example_write_after_override` (line 1367): a closed statement about a concrete case (a worked example).
+- (a) `missingOnly_fixed_verify_drift_writes_nothing` (line 1671): its doc comment states its Rust guarantee: "Since #296, `lambo re-embed --missing-only` under `canary = "verify"` with a drifted embedder writes nothing t".
+- (a) `runAll2_ordinary_keeps` (line 1831): its doc comment states its Rust guarantee: "Since #296, no sequence of ordinary operations (writes, stamps, the canary-gated `--missing-only` backfill) ch".
+- (a) `example_pins_written` (line 1968): a closed statement about a concrete case (a worked example).
+
+## `Contract/Stamp.lean`
+
+- (a) `first_stamp_wins` (line 103): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+- (a) `classify_unrecorded_iff` (line 125): named as a result in `formal/README.md`.
+- (a) `classify_compatible_iff` (line 143): its doc comment states its Rust guarantee: "`session_embedding_compatibility` answers `Compatible` for a recorded contract exactly when it equals the live".
+- (a) `vector_check_store_authoritative` (line 169): named as a result in `formal/README.md`.
+- (a) `vector_check_zero` (line 176): its doc comment states its Rust guarantee: "`check_vector_compatibility` refuses a zero-width embedder whatever the store declares.".
+
+## `Contract/Store.lean`
+
+- (a) `example_contractless_bug` (line 497): named among the results in the header of `Contract/Store.lean`.
 
 ## `Dispatch.lean`
 
-- (a) `classify_general_iff` (line 240): its doc comment states its Rust guarantee: "`classify` answers General exactly when no marker occurs in the lowercased query.".
-- (a) `classify_each_marker` (line 270): named among the results in the header of `Dispatch.lean`.
-- (a) `unsafe_to_delete_structural` (line 298): named among the results in the header of `Dispatch.lean`.
-- (a) `somewhat_uses_structural` (line 308): named among the results in the header of `Dispatch.lean`.
-- (a) `ranked_concepts` (line 1071): named among the results in the header of `Dispatch.lean`.
-- (a) `anchor_not_mem_ranked` (line 1077): named among the results in the header of `Dispatch.lean`.
-- (a) `ranked_weight_desc` (line 1125): named among the results in the header of `Dispatch.lean`.
-- (a) `traversal_sorted` (line 1240): named among the results in the header of `Dispatch.lean`.
-- (a) `general_blends` (line 1493): named among the results in the header of `Dispatch.lean`.
+- (a) `classify_general_iff` (line 232): its doc comment states its Rust guarantee: "`classify` answers General exactly when no marker occurs in the lowercased query.".
+- (a) `classify_each_marker` (line 262): named among the results in the header of `Dispatch.lean`.
+- (a) `unsafe_to_delete_structural` (line 290): named among the results in the header of `Dispatch.lean`.
+- (a) `somewhat_uses_structural` (line 300): named among the results in the header of `Dispatch.lean`.
+- (a) `ranked_concepts` (line 1063): named among the results in the header of `Dispatch.lean`.
+- (a) `anchor_not_mem_ranked` (line 1069): named among the results in the header of `Dispatch.lean`.
+- (a) `ranked_weight_desc` (line 1117): named among the results in the header of `Dispatch.lean`.
+- (a) `traversal_sorted` (line 1232): named among the results in the header of `Dispatch.lean`.
+- (a) `general_blends` (line 1485): named among the results in the header of `Dispatch.lean`.
 
 ## `Drain/History.lean`
 
-- (a) `close_final` (line 259): its doc comment states its Rust guarantee: "And settled for good: no later settle attempt changes any receipt after a close (`Receipts.settleAll_fixed`). ".
+- (a) `close_final` (line 264): its doc comment states its Rust guarantee: "And settled for good: no later settle attempt changes any receipt after a close (`Receipts.settleAll_fixed`). ".
 
 ## `Expand.lean`
 
-- (a) `expand_prefix_of_nodup` (line 443): its doc comment states its Rust guarantee: "With distinct candidate ids, `expand` returns the candidates first, in their input order.".
-- (a) `expand_depth_zero` (line 454): its doc comment states its Rust guarantee: "`expand` (`src/recall/expand.rs`) at `depth = 0` returns the de-duplicated candidates and nothing else.".
+- (a) `expand_prefix_of_nodup` (line 444): its doc comment states its Rust guarantee: "With distinct candidate ids, `expand` returns the candidates first, in their input order.".
+- (a) `expand_depth_zero` (line 455): its doc comment states its Rust guarantee: "`expand` (`src/recall/expand.rs`) at `depth = 0` returns the de-duplicated candidates and nothing else.".
 
 ## `Fit.lean`
 
-- (a) `fit_of_nothing_fits` (line 298): its doc comment states its Rust guarantee: "When no prefix fits the budget, `fit` renders no whole block.".
-- (a) `fit_of_all_fit` (line 310): its doc comment states its Rust guarantee: "When every prefix fits the budget, `fit` renders every block.".
-- (a) `bsearch_fuel` (line 530): named among the results in the header of `Fit.lean`.
-- (a) `fitBlocks_empty` (line 874): named among the results in the header of `Fit.lean`.
-- (a) `rust_bytes_steady` (line 1334): named among the results in the header of `Fit.lean`.
-- (a) `jumpEst_mono` (line 1519): its doc comment states its Rust guarantee: "The counterexample estimator (length up to `J`, `10^k` more above) is monotone in the length: monotonicity alo".
-- (a) `rjEst_mono` (line 1560): its doc comment states its Rust guarantee: "The counterexample estimator for `fit.rs` (the byte count up to 90 bytes, `10^19` more above) is monotone in t".
+- (a) `fit_of_nothing_fits` (line 294): its doc comment states its Rust guarantee: "When no prefix fits the budget, `fit` renders no whole block.".
+- (a) `fit_of_all_fit` (line 306): its doc comment states its Rust guarantee: "When every prefix fits the budget, `fit` renders every block.".
+- (a) `bsearch_fuel` (line 526): named among the results in the header of `Fit.lean`.
+- (a) `fitBlocks_empty` (line 870): named among the results in the header of `Fit.lean`.
+- (a) `rust_bytes_steady` (line 1330): named among the results in the header of `Fit.lean`.
+- (a) `jumpEst_mono` (line 1515): its doc comment states its Rust guarantee: "The counterexample estimator (length up to `J`, `10^k` more above) is monotone in the length: monotonicity alo".
+- (a) `rjEst_mono` (line 1556): its doc comment states its Rust guarantee: "The counterexample estimator for `fit.rs` (the byte count up to 90 bytes, `10^19` more above) is monotone in t".
 
-## `Flush.lean`
+## `Flush/Loop.lean`
 
-- (a) `checkFence_unfenced` (line 1517): its doc comment states its Rust guarantee: "While the fence is not latched, `drain_and_flush`'s fence check leaves the loop's state unchanged.".
-- (a) `stale_write_erased` (line 1645): its doc comment states its Rust guarantee: "An erased session's stale write latches the fence instead (#23), and the fence check that follows drops the ba".
-- (a) `run_degraded_silent` (line 1776): its doc comment states its Rust guarantee: "A degraded flush loop makes no further store call: `drain_and_flush` keeps the session's writes in memory.".
-- (a) `override_fences_fixed` (line 2394): named among the results in the header of `Flush.lean`.
-- (a) `runGuarded_lift` (line 2949): named among the results in the header of `Flush.lean`.
+- (a) `checkFence_unfenced` (line 714): its doc comment states its Rust guarantee: "While the fence is not latched, `drain_and_flush`'s fence check leaves the loop's state unchanged.".
+- (a) `stale_write_erased` (line 842): its doc comment states its Rust guarantee: "An erased session's stale write latches the fence instead (#23), and the fence check that follows drops the ba".
+- (a) `run_degraded_silent` (line 973): its doc comment states its Rust guarantee: "A degraded flush loop makes no further store call: `drain_and_flush` keeps the session's writes in memory.".
+- (a) `override_fences_fixed` (line 1591): named among the results in the header of `Flush/Loop.lean`.
+- (a) `runGuarded_lift` (line 2146): its doc comment states its Rust guarantee: "The #293 loop is the guarded loop with every call answering.".
 
-## `Fusion.lean`
+## `Fusion/Max.lean`
 
-- (a) `raise_fixes_example` (line 745): a closed statement about a concrete case (a worked example).
-- (a) `raise_ne_assign` (line 859): named among the results in the header of `Fusion.lean`.
-- (a) `full_keeps_wins` (line 984): named among the results in the header of `Fusion.lean`.
-- (a) `term_none` (line 1221): named among the results in the header of `Fusion.lean`.
-- (a) `beats_asymm` (line 1350): its doc comment states its Rust guarantee: "The recall order (score, then `tie_break_by_key`) never puts each of two nodes ahead of the other.".
-- (a) `rrf_le_iff_key` (line 1535): its doc comment states its Rust guarantee: "`fusion.rs` orders two nodes by `rrf` exactly as it orders them by their sort key.".
-- (a) `num_eq_best_of_rank_one` (line 1596): named among the results in the header of `Fusion.lean`.
-- (a) `rrf_two_leg_example` (line 1756): named among the results in the header of `Fusion.lean`.
-- (a) `rrf_recent_example` (line 1783): named among the results in the header of `Fusion.lean`.
-- (a) `rrf_tie_example` (line 1811): named among the results in the header of `Fusion.lean`.
-- (a) `rrf_one_leg_example` (line 1829): a closed statement about a concrete case (a worked example).
-- (a) `legRank_example` (line 1839): named among the results in the header of `Fusion.lean`.
-- (a) `rrf_one_leg_needs_weight` (line 1858): named among the results in the header of `Fusion.lean`.
-- (a) `rrf_name_step_shifts_neighbour` (line 2361): named among the results in the header of `Fusion.lean`.
-- (a) `rrf_name_step_above_floor` (line 2380): named among the results in the header of `Fusion.lean`.
-- (a) `rrf_beyond_cap_example` (line 2420): its doc comment states its Rust guarantee: "Beyond the cap, above the floor (`beyondCapInput3`): `X` (node 0, BM25 `3.2`) joins the leg behind `Z` (node 1".
+- (a) `raise_fixes_example` (line 538): a closed statement about a concrete case (a worked example).
+- (a) `raise_ne_assign` (line 652): named among the results in the header of `Fusion/Max.lean`.
+- (a) `full_keeps_wins` (line 777): named among the results in the header of `Fusion/Max.lean`.
+
+## `Fusion/Rrf.lean`
+
+- (a) `term_none` (line 204): named among the results in the header of `Fusion/Rrf.lean`.
+- (a) `beats_asymm` (line 333): its doc comment states its Rust guarantee: "The recall order (score, then `tie_break_by_key`) never puts each of two nodes ahead of the other.".
+- (a) `rrf_le_iff_key` (line 518): its doc comment states its Rust guarantee: "`fusion.rs` orders two nodes by `rrf` exactly as it orders them by their sort key.".
+- (a) `num_eq_best_of_rank_one` (line 579): named among the results in the header of `Fusion/Rrf.lean`.
+- (a) `rrf_two_leg_example` (line 739): named among the results in the header of `Fusion/Rrf.lean`.
+- (a) `rrf_recent_example` (line 766): named among the results in the header of `Fusion/Rrf.lean`.
+- (a) `rrf_tie_example` (line 794): named among the results in the header of `Fusion/Rrf.lean`.
+- (a) `rrf_one_leg_example` (line 812): a closed statement about a concrete case (a worked example).
+- (a) `legRank_example` (line 822): a closed statement about a concrete case (a worked example).
+- (a) `rrf_one_leg_needs_weight` (line 841): named among the results in the header of `Fusion/Rrf.lean`.
+- (a) `rrf_name_step_shifts_neighbour` (line 1344): named among the results in the header of `Fusion/Rrf.lean`.
+- (a) `rrf_name_step_above_floor` (line 1363): named among the results in the header of `Fusion/Rrf.lean`.
+- (a) `rrf_beyond_cap_example` (line 1403): its doc comment states its Rust guarantee: "Beyond the cap, above the floor (`beyondCapInput3`): `X` (node 0, BM25 `3.2`) joins the leg behind `Z` (node 1".
 
 ## `Gc.lean`
 
@@ -258,32 +294,38 @@ Theorems with the same statement (up to binder names) under two names; one of ea
 - (a) `none_deferred_iff` (line 205): its doc comment states its Rust guarantee: "A GC sweep defers no candidate exactly when the candidates fit in its budget.".
 - (a) `bump_adds_one` (line 237): its doc comment states its Rust guarantee: "Below `i32::MAX`, `bump_gc_survived` adds exactly one survival; it saturates rather than overflow.".
 
-## `Hotlist.lean`
+## `Hotlist/Cycle.lean`
 
-- (a) `enforce_pairwise` (line 631): its doc comment states its Rust guarantee: "`HotList::enforce` keeps its entries in priority order.".
-- (a) `enforce_evicted_other_by_bound` (line 664): its doc comment states its Rust guarantee: "`HotList::enforce`'s contradiction budget evicts contradictions only (#196): an entry of another kind is evict".
-- (a) `enforce_under_budget` (line 708): named among the results in the header of `Hotlist.lean`.
-- (a) `inv_new` (line 959): its doc comment states its Rust guarantee: "A new `HotList` starts with its bound, budget and one-entry-per-condition invariant holding.".
-- (a) `revalidate_inv` (line 1255): its doc comment states its Rust guarantee: "`HotList::revalidate` keeps the hot list's invariant: it only drops entries and rewrites payloads, and priorit".
-- (a) `forcesPayload_of_wf` (line 1327): its doc comment states its Rust guarantee: "A well-formed hot-list entry's payload forces inclusion in recall (`forces_inclusion`) unless it is a contradi".
-- (a) `hotLines_length` (line 1470): its doc comment states its Rust guarantee: "Recall renders one hot-list line per payload the concept carries (`hot_warning`, `contradiction_warning`).".
-- (a) `annot_eq_contradiction_iff` (line 1476): its doc comment states its Rust guarantee: "Recall renders a hot-list payload with the contradiction warning (`contradiction_warning`) exactly when it is ".
-- (a) `annot_eq_conflict_iff` (line 1482): its doc comment states its Rust guarantee: "Recall renders a hot-list payload with the conflict warning exactly when it is a conflict payload.".
-- (a) `forced_has_line` (line 1488): named among the results in the header of `Hotlist.lean`.
-- (a) `enforce_evicts_oldest_in_tier` (line 1514): named among the results in the header of `Hotlist.lean`.
-- (a) `insert_evicted_lowest` (line 1531): named among the results in the header of `Hotlist.lean`.
+- (a) `enforce_evicts_oldest_in_tier` (line 41): its doc comment states it as a result: "Oldest evicted within a tier".
+- (a) `insert_evicted_lowest` (line 58): its doc comment states its Rust guarantee: "What `HotList::insert` evicts ranks at or below everything it keeps, unless it is a contradiction the budget d".
+
+## `Hotlist/List.lean`
+
+- (a) `enforce_pairwise` (line 487): its doc comment states its Rust guarantee: "`HotList::enforce` keeps its entries in priority order.".
+- (a) `enforce_evicted_other_by_bound` (line 520): its doc comment states its Rust guarantee: "`HotList::enforce`'s contradiction budget evicts contradictions only (#196): an entry of another kind is evict".
+- (a) `enforce_under_budget` (line 564): its doc comment states it as a result: "Under the budget nothing is evicted that the bound alone would not evict".
+- (a) `inv_new` (line 815): its doc comment states its Rust guarantee: "A new `HotList` starts with its bound, budget and one-entry-per-condition invariant holding.".
+- (a) `revalidate_inv` (line 1111): its doc comment states its Rust guarantee: "`HotList::revalidate` keeps the hot list's invariant: it only drops entries and rewrites payloads, and priorit".
+
+## `Hotlist/Recall.lean`
+
+- (a) `forcesPayload_of_wf` (line 64): its doc comment states its Rust guarantee: "A well-formed hot-list entry's payload forces inclusion in recall (`forces_inclusion`) unless it is a contradi".
+- (a) `hotLines_length` (line 207): its doc comment states its Rust guarantee: "Recall renders one hot-list line per payload the concept carries (`hot_warning`, `contradiction_warning`).".
+- (a) `annot_eq_contradiction_iff` (line 213): its doc comment states its Rust guarantee: "Recall renders a hot-list payload with the contradiction warning (`contradiction_warning`) exactly when it is ".
+- (a) `annot_eq_conflict_iff` (line 219): its doc comment states its Rust guarantee: "Recall renders a hot-list payload with the conflict warning exactly when it is a conflict payload.".
+- (a) `forced_has_line` (line 225): named among the results in the header of `Hotlist/Recall.lean`.
 
 ## `Lease.lean`
 
-- (a) `takeover_needs_expiry` (line 167): named among the results in the header of `Lease.lean`.
-- (a) `no_token_refused` (line 314): its doc comment states its Rust guarantee: "Once a session is leased, the writer fence refuses a writer that presents no lease token.".
-- (a) `unleased_permits` (line 327): its doc comment states its Rust guarantee: "The writer fence admits any write to a session that was never leased: the seed and fixture bypass.".
-- (a) `beatLatchesOld_le` (line 378): named among the results in the header of `Lease.lean`.
-- (a) `beat_latches_after_takeover` (line 425): its doc comment states its Rust guarantee: "`spawn_lease_heartbeat`'s beat latches the fence on the first beat after any takeover: once the token has move".
+- (a) `takeover_needs_expiry` (line 169): named among the results in the header of `Lease.lean`.
+- (a) `no_token_refused` (line 316): its doc comment states its Rust guarantee: "Once a session is leased, the writer fence refuses a writer that presents no lease token.".
+- (a) `unleased_permits` (line 329): its doc comment states its Rust guarantee: "The writer fence admits any write to a session that was never leased: the seed and fixture bypass.".
+- (a) `beatLatchesOld_le` (line 380): named among the results in the header of `Lease.lean`.
+- (a) `beat_latches_after_takeover` (line 427): its doc comment states its Rust guarantee: "`spawn_lease_heartbeat`'s beat latches the fence on the first beat after any takeover: once the token has move".
 
 ## `Names.lean`
 
-- (a) `declare_idempotent` (line 152): named among the results in the header of `Names.lean`.
+- (a) `declare_idempotent` (line 153): named among the results in the header of `Names.lean`.
 
 ## `Order.lean`
 
@@ -296,113 +338,134 @@ Theorems with the same statement (up to binder names) under two names; one of ea
 - (a) `gatedRankMembers_canonical_first` (line 614): named among the results in the header of `Order.lean`.
 - (a) `gatedRankMembers_below_gate` (line 640): named among the results in the header of `Order.lean`.
 
-## `Policy.lean`
+## `Policy/Score.lean`
 
-- (a) `sessionCount_dup` (line 572): named among the results in the header of `Policy.lean`.
-- (a) `sessionCount_append_self` (line 578): its doc comment states its Rust guarantee: "`separated_session_count` is unchanged when every about-time appears twice: repeated instants never add a sess".
-- (a) `sessionCount_nil` (line 584): named among the results in the header of `Policy.lean`.
-- (a) `sessionCount_le_length` (line 605): named among the results in the header of `Policy.lean`.
-- (a) `sessionCount_le_cons` (line 644): named among the results in the header of `Policy.lean`.
-- (a) `sessionCount_cons_le` (line 666): named among the results in the header of `Policy.lean`.
-- (a) `sessionCount_antitone_gap` (line 684): named among the results in the header of `Policy.lean`.
-- (a) `separation_counts_clusters_once_and_stragglers_each` (line 721): named among the results in the header of `Policy.lean`.
-- (a) `recurrence_mono_edge` (line 845): named among the results in the header of `Policy.lean`.
-- (a) `aboutTime_fallback` (line 867): named among the results in the header of `Policy.lean`.
-- (a) `recurrence_reflush` (line 912): named among the results in the header of `Policy.lean`.
-- (a) `spread_days_doc_and_code` (line 948): named among the results in the header of `Policy.lean`.
-- (a) `causal_touches_are_not_recurrence` (line 983): named among the results in the header of `Policy.lean`.
-- (a) `recurring_burst_once` (line 1004): named among the results in the header of `Policy.lean`.
-- (a) `score10_steps` (line 1497): named among the results in the header of `Policy.lean`.
-- (a) `classify_candidate_iff` (line 1518): named among the results in the header of `Policy.lean`.
-- (a) `classify_venerable_iff` (line 1527): named among the results in the header of `Policy.lean`.
-- (a) `classify_canonical_iff` (line 1536): named among the results in the header of `Policy.lean`.
-- (a) `bulk_ingest_band` (line 1585): named among the results in the header of `Policy.lean`.
-- (a) `revertCount_append` (line 1617): named among the results in the header of `Policy.lean`.
-- (a) `promotion_not_revert` (line 1624): named among the results in the header of `Policy.lean`.
-- (a) `admitsHop_down` (line 1649): named among the results in the header of `Policy.lean`.
-- (a) `admitsHop_mono` (line 1655): named among the results in the header of `Policy.lean`.
-- (a) `solo_admission_climbs_with_the_band` (line 1664): a closed statement about a concrete case (a worked example).
-- (a) `mem_all` (line 1702): named among the results in the header of `Policy.lean`.
-- (a) `policy_cycle_rank_le` (line 1763): named among the results in the header of `Policy.lean`.
-- (a) `parse_asStr` (line 1945): named among the results in the header of `Policy.lean`.
-- (a) `parse_unicode_space` (line 1984): a closed statement about a concrete case (a worked example).
-- (a) `parse_padded` (line 2006): named among the results in the header of `Policy.lean`.
+- (a) `score10_steps` (line 149): named among the results in the header of `Policy/Score.lean`.
+- (a) `classify_candidate_iff` (line 170): its doc comment states its Rust guarantee: "`classify` (`src/canon/policy.rs`) puts a solo score in the Candidate band exactly when it is at least `CANDID".
+- (a) `classify_venerable_iff` (line 179): its doc comment states its Rust guarantee: "`classify` puts a solo score in the Venerable band exactly when it is at least `VENERABLE_BAR` and below `CANO".
+- (a) `classify_canonical_iff` (line 188): its doc comment states its Rust guarantee: "`classify` puts a solo score in the Canonical band exactly when it is at least `CANONICAL_BAR`.".
+- (a) `bulk_ingest_band` (line 237): a closed statement about a concrete case (a worked example).
+- (a) `revertCount_append` (line 269): its doc comment states its Rust guarantee: "`revert_count` counts a recorded status event exactly when it lowers the concept's rank.".
+- (a) `promotion_not_revert` (line 276): its doc comment states its Rust guarantee: "`revert_count` never counts a promotion.".
+- (a) `admitsHop_down` (line 301): its doc comment states its Rust guarantee: "`SoloScorer::admits_hop`: a band that admits a hop to a status admits every hop to a lower one.".
+- (a) `admitsHop_mono` (line 307): its doc comment states its Rust guarantee: "`SoloScorer::admits_hop`: more evidence (sessions, confirmations, dependent interactions, fewer reverts) never".
+- (a) `solo_admission_climbs_with_the_band` (line 316): a closed statement about a concrete case (a worked example).
+- (a) `mem_all` (line 354): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+- (a) `policy_cycle_rank_le` (line 415): its doc comment states its Rust guarantee: "Under either `PromotionPolicy`, one `Evaluator` cycle raises a concept's status by at most one rank.".
+- (a) `parse_asStr` (line 597): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+- (a) `parse_unicode_space` (line 636): a closed statement about a concrete case (a worked example).
+- (a) `parse_padded` (line 658): named among the results in the header of `Policy/Score.lean`.
+
+## `Policy/Sessions.lean`
+
+- (a) `sessionCount_dup` (line 366): named among the results in the header of `Policy/Sessions.lean`.
+- (a) `sessionCount_append_self` (line 372): its doc comment states its Rust guarantee: "`separated_session_count` is unchanged when every about-time appears twice: repeated instants never add a sess".
+- (a) `sessionCount_nil` (line 378): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+- (a) `sessionCount_le_length` (line 399): its doc comment states its Rust guarantee: "`separated_session_count` never counts more sessions than it is given about-times.".
+- (a) `sessionCount_le_cons` (line 438): its doc comment states its Rust guarantee: "Adding an about-time never lowers `separated_session_count`.".
+- (a) `sessionCount_cons_le` (line 460): named among the results in the header of `Policy/Sessions.lean`.
+- (a) `sessionCount_antitone_gap` (line 478): named among the results in the header of `Policy/Sessions.lean`.
+- (a) `separation_counts_clusters_once_and_stragglers_each` (line 515): named among the results in the header of `Policy/Sessions.lean`.
+
+## `Policy/Support.lean`
+
+- (a) `recurrence_mono_edge` (line 154): named among the results in the header of `Policy/Support.lean`.
+- (a) `aboutTime_fallback` (line 176): its doc comment states its Rust guarantee: "`Interaction::about_time` falls back to the flush time (`created_at`) when the interaction carries no event ti".
+- (a) `recurrence_reflush` (line 221): named among the results in the header of `Policy/Support.lean`.
+- (a) `spread_days_doc_and_code` (line 257): named among the results in the header of `Policy/Support.lean`.
+- (a) `causal_touches_are_not_recurrence` (line 292): named among the results in the header of `Policy/Support.lean`.
+- (a) `recurring_burst_once` (line 313): named among the results in the header of `Policy/Support.lean`.
 
 ## `Receipts.lean`
 
-- (a) `first_settle_wins` (line 130): its doc comment states its Rust guarantee: "`Entry::settle`: after a settle with a settled answer, no later settle changes the receipt; the first settled ".
-- (a) `lookupMissing_isSettled` (line 303): its doc comment states its Rust guarantee: "The receipt store answers an id it does not hold with a settled answer, so a caller waiting on it is never tol".
-- (a) `admit_queue_bound` (line 455): named among the results in the header of `Receipts.lean`.
-- (a) `admit_refused_unchanged` (line 470): its doc comment ties it to the Rust (quotes the source or names a Rust test).
-- (a) `dropped_is_settled` (line 486): a closed statement about a concrete case (a worked example).
+- (a) `first_settle_wins` (line 128): its doc comment states its Rust guarantee: "`Entry::settle`: after a settle with a settled answer, no later settle changes the receipt; the first settled ".
+- (a) `lookupMissing_isSettled` (line 301): its doc comment states its Rust guarantee: "The receipt store answers an id it does not hold with a settled answer, so a caller waiting on it is never tol".
+- (a) `admit_queue_bound` (line 453): named among the results in the header of `Receipts.lean`.
+- (a) `admit_refused_unchanged` (line 468): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+- (a) `dropped_is_settled` (line 484): a closed statement about a concrete case (a worked example).
 
-## `Registry.lean`
+## `Registry/Step.lean`
 
-- (a) `stale_release_fences` (line 2554): named among the results in the header of `Registry.lean`.
+- (a) `stale_release_fences` (line 2373): named among the results in the header of `Registry/Step.lean`.
 
-## `Resolve.lean`
+## `Resolve/Args.lean`
 
-- (a) `wrapTier_uncompiled` (line 998): its doc comment states its Rust guarantee: "`wrap_with_recall_tier` refuses `tiered = true` when the `recall-tier` feature is not compiled in: a hard erro".
-- (a) `classificationSource_built` (line 1180): its doc comment states its Rust guarantee: "`resolve_classification_source` builds the source database's store and nothing else.".
-- (a) `session_errors_labelled_store` (line 2042): named among the results in the header of `Resolve.lean`.
-- (a) `construction_examples` (line 3069): a closed statement about a concrete case (a worked example).
-- (a) `width_examples` (line 3083): a closed statement about a concrete case (a worked example).
-- (a) `preflight_examples` (line 3099): a closed statement about a concrete case (a worked example).
+- (a) `construction_examples` (line 165): named among the results in the header of `Resolve/Args.lean`.
+- (a) `width_examples` (line 179): named among the results in the header of `Resolve/Args.lean`.
+- (a) `preflight_examples` (line 195): named among the results in the header of `Resolve/Args.lean`.
+
+## `Resolve/Construction.lean`
+
+- (a) `wrapTier_uncompiled` (line 761): its doc comment states its Rust guarantee: "`wrap_with_recall_tier` refuses `tiered = true` when the `recall-tier` feature is not compiled in: a hard erro".
+- (a) `classificationSource_built` (line 943): its doc comment states its Rust guarantee: "`resolve_classification_source` builds the source database's store and nothing else.".
+
+## `Resolve/Serve.lean`
+
+- (a) `session_errors_labelled_store` (line 430): named among the results in the header of `Resolve/Serve.lean`.
 
 ## `Score.lean`
 
-- (a) `clampDim_mono` (line 86): its doc comment states its Rust guarantee: "On finite inputs `clamp_dim` is monotone.".
-- (a) `clampDim_eq_self` (line 92): its doc comment ties it to the Rust (quotes the source or names a Rust test).
-- (a) `saneWeight_idem` (line 124): its doc comment states its Rust guarantee: "`sanitized` is idempotent (config.rs: "Idempotent").".
-- (a) `rawScore_ge` (line 246): its doc comment states its Rust guarantee: "`score_concept_with`'s composite falls below zero only through the concept-type modifier, and by at most `|MIN".
-- (a) `score_eq_rawScore` (line 255): its doc comment states its Rust guarantee: "With sanitized weights summing to at most 1 and a non-negative composite, `score_concept_with`'s final clamp o".
-- (a) `defaultWeights_total` (line 261): a closed statement about a concrete case (a worked example).
-- (a) `weighted_ignores_frequency_of_bad_weight` (line 292): its doc comment ties it to the Rust (quotes the source or names a Rust test).
-- (a) `liveNumerator_range` (line 315): its doc comment ties it to the Rust (quotes the source or names a Rust test).
-- (a) `weighted_eq_liveNumerator_of_frequency_zero` (line 327): its doc comment states its Rust guarantee: "In exact arithmetic: at `frequency == 0` the full composite's weighted part *is* the live numerator, that is, ".
-- (a) `livePlusFrequency_of_frequency_zero` (line 339): named as a result in `formal/README.md`.
-- (a) `livePlusFrequency_mono` (line 363): its doc comment states its Rust guarantee: "GC's eviction composite (the live score plus the frequency term, `score.rs`) is monotone in the concept's own ".
-- (a) `livePlusFrequency_range` (line 373): its doc comment states its Rust guarantee: "GC's eviction composite stays in the range of every score here, `[0, 1 + MAX_BONUS]`.".
-- (a) `historical_eq_floor` (line 399): named as a result in `formal/README.md`.
-- (a) `historical_in_unit` (line 406): its doc comment states its Rust guarantee: "`score.rs`'s historical recency of a touch inside the session's extent is in `[0, 1]` without help from the cl".
-- (a) `floor_recency_near_one` (line 415): its doc comment ties it to the Rust (quotes the source or names a Rust test).
-- (a) `createdAt_le_lastTouch` (line 433): its doc comment states its Rust guarantee: "The last touch `score_concept_with` dates recency by (`last_accessed`, never before `created_at`) is never ear".
-- (a) `lastTouch_eq_lastAccessed` (line 444): its doc comment states its Rust guarantee: "Identical to `unwrap_or` whenever `last_accessed ≥ created_at` (the comment in `score_concept_with`).".
-- (a) `listMax_mem_or_zero` (line 483): its doc comment ties it to the Rust (quotes the source or names a Rust test).
-- (a) `all_zero_of_listMax_zero` (line 511): its doc comment states its Rust guarantee: "A zero maximum means every count is zero: the `max == 0 → 0.0` guard in `score_concept_with` loses nothing.".
+- (a) `clampDim_mono` (line 100): its doc comment states its Rust guarantee: "On finite inputs `clamp_dim` is monotone.".
+- (a) `clampDim_eq_self` (line 106): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+- (a) `saneWeight_idem` (line 138): named among the results in the header of `Score.lean`.
+- (a) `rawScore_ge` (line 260): its doc comment states its Rust guarantee: "`score_concept_with`'s composite falls below zero only through the concept-type modifier, and by at most `|MIN".
+- (a) `score_eq_rawScore` (line 269): its doc comment states its Rust guarantee: "With sanitized weights summing to at most 1 and a non-negative composite, `score_concept_with`'s final clamp o".
+- (a) `defaultWeights_total` (line 275): named among the results in the header of `Score.lean`.
+- (a) `weighted_ignores_frequency_of_bad_weight` (line 306): named among the results in the header of `Score.lean`.
+- (a) `liveNumerator_range` (line 329): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+- (a) `weighted_eq_liveNumerator_of_frequency_zero` (line 341): its doc comment states its Rust guarantee: "In exact arithmetic: at `frequency == 0` the full composite's weighted part *is* the live numerator, that is, ".
+- (a) `livePlusFrequency_of_frequency_zero` (line 353): named among the results in the header of `Score.lean`.
+- (a) `livePlusFrequency_mono` (line 377): named among the results in the header of `Score.lean`.
+- (a) `livePlusFrequency_range` (line 387): named among the results in the header of `Score.lean`.
+- (a) `historical_eq_floor` (line 413): named among the results in the header of `Score.lean`.
+- (a) `historical_in_unit` (line 420): named among the results in the header of `Score.lean`.
+- (a) `floor_recency_near_one` (line 429): named among the results in the header of `Score.lean`.
+- (a) `createdAt_le_lastTouch` (line 447): named among the results in the header of `Score.lean`.
+- (a) `lastTouch_eq_lastAccessed` (line 458): its doc comment states its Rust guarantee: "Identical to `unwrap_or` whenever `last_accessed ≥ created_at` (the comment in `score_concept_with`).".
+- (a) `listMax_mem_or_zero` (line 497): named among the results in the header of `Score.lean`.
+- (a) `all_zero_of_listMax_zero` (line 525): its doc comment states its Rust guarantee: "A zero maximum means every count is zero: the `max == 0 → 0.0` guard in `score_concept_with` loses nothing.".
 
-## `Supersession.lean`
+## `Supersession/Pass.lean`
 
-- (a) `datedAt_le` (line 234): its doc comment states its Rust guarantee: "A fact is never dated after it was written: a future `event_time` does not make a write the newer one.".
-- (a) `candidate_self` (line 296): named among the results in the header of `Supersession.lean`.
-- (a) `candidate_settled` (line 365): its doc comment states its Rust guarantee: "A settled pair (an `against` or `depends_on` either way) is never suspected.".
-- (a) `recordRefused_extends` (line 473): named among the results in the header of `Supersession.lean`.
-- (a) `suspected_not_both_ways` (line 531): named among the results in the header of `Supersession.lean`.
-- (a) `settle_keeps_other` (line 562): named among the results in the header of `Supersession.lean`.
-- (a) `select_length` (line 714): named among the results in the header of `Supersession.lean`.
-- (a) `select_newer_not_replaced` (line 771): named among the results in the header of `Supersession.lean`.
-- (a) `select_tie_not_newer` (line 804): named among the results in the header of `Supersession.lean`.
-- (a) `counted_at_instant` (line 1467): its doc comment ties it to the Rust (quotes the source or names a Rust test).
-- (a) `outranks_asymm` (line 1530): its doc comment states its Rust guarantee: "`outranks` (newer counted evidence, then the smaller key, then the smaller source id) never ranks each of two ".
-- (a) `probesFor_noSelf` (line 1991): its doc comment states its Rust guarantee: "The supersession pass never probes a concept against itself.".
-- (a) `gather_off` (line 1997): named among the results in the header of `Supersession.lean`.
-- (a) `gatherHolds_off` (line 2000): named among the results in the header of `Supersession.lean`.
-- (a) `neverRedundant_symm` (line 2187): its doc comment states its Rust guarantee: "`never_redundant` (`src/recall/redundancy.rs`) is symmetric in its two concepts.".
+- (a) `counted_at_instant` (line 191): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+- (a) `outranks_asymm` (line 254): its doc comment states its Rust guarantee: "`outranks` (newer counted evidence, then the smaller key, then the smaller source id) never ranks each of two ".
+- (a) `probesFor_noSelf` (line 715): its doc comment states its Rust guarantee: "The supersession pass never probes a concept against itself.".
+- (a) `gather_off` (line 721): its doc comment states it as a result: "Option off: nothing is probed".
+- (a) `gatherHolds_off` (line 724): its doc comment states its Rust guarantee: "With the supersession option off, `gather_holds` returns no probes.".
 
-## `Tiered.lean`
+## `Supersession/Recall.lean`
 
-- (a) `late_success_closes` (line 668): named among the results in the header of `Tiered.lean`.
-- (a) `writing_head` (line 1724): its doc comment states its Rust guarantee: "A repair task at the head of `repair_once` (before it loads a snapshot) has no repair write under any lease to".
-- (a) `writing_idle` (line 1729): its doc comment states its Rust guarantee: "An idle repair task (`run_repairs` waiting for a request) has no repair write under any lease token on the wir".
-- (a) `quiet_of_idle` (line 1974): its doc comment states its Rust guarantee: "Once the lease is past token `t`, a lease row exists, the repair task is idle or at the head of `repair_once`,".
+- (a) `neverRedundant_symm` (line 41): its doc comment states its Rust guarantee: "`never_redundant` (`src/recall/redundancy.rs`) is symmetric in its two concepts.".
+
+## `Supersession/Suspected.lean`
+
+- (a) `datedAt_le` (line 120): its doc comment states its Rust guarantee: "A fact is never dated after it was written: a future `event_time` does not make a write the newer one.".
+- (a) `candidate_self` (line 182): named among the results in the header of `Supersession/Suspected.lean`.
+- (a) `candidate_settled` (line 251): its doc comment states its Rust guarantee: "A settled pair (an `against` or `depends_on` either way) is never suspected.".
+- (a) `recordRefused_extends` (line 359): named among the results in the header of `Supersession/Suspected.lean`.
+- (a) `suspected_not_both_ways` (line 417): its doc comment states its Rust guarantee: "On a well-dated graph the #198 trigger never leaves `SuspectedSupersedes` edges both ways between two concepts".
+- (a) `settle_keeps_other` (line 448): its doc comment states its Rust guarantee: "`settle` removes only `SuspectedSupersedes` edges between the pair; every edge of another type stays.".
+- (a) `select_length` (line 600): named among the results in the header of `Supersession/Suspected.lean`.
+- (a) `select_newer_not_replaced` (line 657): its doc comment states its Rust guarantee: "A candidate marked `newer` is never one the trigger, judged against the edges `E` of the same write, would rec".
+- (a) `select_tie_not_newer` (line 690): its doc comment ties it to the Rust (quotes the source or names a Rust test).
+
+## `Tiered/Machine.lean`
+
+- (a) `writing_head` (line 1085): its doc comment states its Rust guarantee: "A repair task at the head of `repair_once` (before it loads a snapshot) has no repair write under any lease to".
+- (a) `writing_idle` (line 1090): its doc comment states its Rust guarantee: "An idle repair task (`run_repairs` waiting for a request) has no repair write under any lease token on the wir".
+- (a) `quiet_of_idle` (line 1335): its doc comment states its Rust guarantee: "Once the lease is past token `t`, a lease row exists, the repair task is idle or at the head of `repair_once`,".
+
+## `Tiered/Pure.lean`
+
+- (a) `late_success_closes` (line 453): named among the results in the header of `Tiered/Pure.lean`.
 
 ## `TopK.lean`
 
-- (a) `emit_pairwise` (line 175): named among the results in the header of `TopK.lean`.
-- (a) `emit_forced_eq` (line 385): its doc comment states its Rust guarantee: "Recall emits exactly the forced concepts of the ranked list, in order: none is cut and none is added.".
-- (a) `emit_eq_filter` (line 432): named among the results in the header of `TopK.lean`.
-- (a) `emitR_pairwise` (line 743): named among the results in the header of `TopK.lean`.
-- (a) `emitR_all_concepts` (line 800): its doc comment states its Rust guarantee: "Every hit recall emits (`emitted`, with the redundancy filter) is a concept of the graph.".
+- (a) `emit_pairwise` (line 174): named among the results in the header of `TopK.lean`.
+- (a) `emit_forced_eq` (line 384): its doc comment states its Rust guarantee: "Recall emits exactly the forced concepts of the ranked list, in order: none is cut and none is added.".
+- (a) `emit_eq_filter` (line 431): named among the results in the header of `TopK.lean`.
+- (a) `emitR_pairwise` (line 742): named among the results in the header of `TopK.lean`.
+- (a) `emitR_all_concepts` (line 799): its doc comment states its Rust guarantee: "Every hit recall emits (`emitted`, with the redundancy filter) is a concept of the graph.".
 
 ## Deleted
 
