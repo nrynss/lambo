@@ -1,0 +1,276 @@
+# Purpose review of the theorems nothing references (formal/audit/
+# unreferenced-theorems.md): for each, a person read the statement, the doc
+# comment and the Rust it names, and checked the doc comment against the
+# models' rule (formal/README.md, "How the models are written"): it says
+# truthfully, and no more broadly than the statement, what the theorem
+# guarantees about which Rust behaviour. Verdicts: keep; narrowed (kept, the
+# doc comment narrowed to the statement); deleted (also in
+# deleted-theorems.tsv). scripts/formal/audit-theorems.py --check fails on an
+# unreferenced theorem with no keep or narrowed row, and on a stale row. To
+# review a new theorem: read it against the rule, fix or narrow its doc
+# comment if needed, and add a row. Tab-separated: name, verdict, reason.
+Lambo.BatchQueue.takePrioritized_snd_sublist	keep	the doc states what `take_prioritized` does, no more broadly than the statement
+Lambo.BatchQueue.takePrioritized_no_bulk	keep	`take_prioritized` with MAX_BATCH singles queued takes no bulk request (fairness is per take)
+Lambo.BatchQueue.paired_transient_fault_recovers	narrowed	the doc claimed both texts embed; the statement gives each its solo answer when the canary embeds, which the doc now says
+Lambo.BatchQueue.test_lone_vs_pair	keep	`forward_isolated` on concrete texts: a lone text fails under a passing fault, a pair recovers
+Lambo.BatchQueue.forwardIsolated_empty_quirk	keep	`forward_isolated`'s `texts.len() <= 1` guard on an empty batch, a finding (unreachable from `serve_take`)
+Lambo.BatchQueue.pick_some	keep	`serve_take`'s pick always yields a batch while anything is left to serve
+Lambo.BatchQueue.test_spawn_failure_wedges	keep	`supervise` after a failed spawn: only timeouts answer (the test of that name)
+Lambo.Canon.legal_irrefl	keep	mirrors the Rust test `legal_canonization_transition`; the doc states the case the statement checks
+Lambo.Canon.cycle_idle	keep	`apply` (`src/canon/eval.rs`) with no stage flag leaves the status unchanged
+Lambo.Canonical.canonicalKey_syn	keep	the doc states what `canonical_key` does, no more broadly than the statement
+Lambo.Canonical.canonicalKey_no_syn	keep	the doc states what `canonical_key` does, no more broadly than the statement
+Lambo.Canonical.key_lower_of_noLower	keep	`canonical_key` of a spelling with no lowercase letter equals its lowercased key
+Lambo.Canonical.tokens_stopword	narrowed	the doc omitted the no-camelCase-boundary hypothesis; it now states it
+Lambo.Canonical.key_eq_iff_count	narrowed	the doc omitted the Sane-stemmer hypothesis; it now states it and that the real stemmer is not Sane
+Lambo.Canonical.nameKey_some	keep	`name_key`'s key is the canonical key and never empty
+Lambo.Canonical.nameKey_swap	keep	`name_key` (#290): swapped pieces are one name
+Lambo.Canonical.nameKey_stop_segment	keep	`name_key` (#290): a stopword piece does not distinguish names
+Lambo.Canonical.keyF_eq_key_of_sane	keep	the #301 empty-stem filter in `canonical_key` changes nothing for a Sane stemmer
+Lambo.Canonical.dup_not_collapsed	keep	`canonical_key` keeps repeated words (a multiset), on a concrete pair
+Lambo.Cite.Acyclic.irrefl	deleted	a generic consequence of Acyclic for any relation; its doc claimed what refuses_self_loop proves about closing_edge
+Lambo.Cite.no_mutual_dependency	keep	the doc states what `closing_edge` does, no more broadly than the statement
+Lambo.Cite.no_dependency_cycle	deleted	a generic consequence of Acyclic for any relation; its doc claimed what closing_edge does (re-review)
+Lambo.Confidence.keywordTerm_of_nonpos	keep	`keyword_term` counts a non-positive BM25 as none (the Rust doc quoted)
+Lambo.Confidence.noisyOrCombine_num	keep	`noisy_or`'s `1 - (1 - a)(1 - b)` is the noisy-OR `a + b - ab`
+Lambo.Confidence.noisyOr_none	keep	the doc states what `provisional_confidence` does, no more broadly than the statement
+Lambo.Confidence.noisyOr_inUnit	narrowed	the doc now names `noisy_or` (re-review)
+Lambo.Confidence.noisyOr_ge_vector	narrowed	exact arithmetic only, and the doc now names `noisy_or`
+Lambo.Confidence.keywordOnly_eq_noisyOr_at_null	narrowed	exact arithmetic only, and the doc now names `keyword_term` and `noisy_or`
+Lambo.Confidence.topLegs_perm	keep	`top_legs` ignores the HashMap iteration order
+Lambo.Confidence.recall_keywordOnly_without_median	keep	a recall with no vector leg reports the keyword-only value without a median (#256)
+Lambo.Conflict.declaredAt_le_aboutTime	keep	the doc states what `declared_at` does, no more broadly than the statement
+Lambo.Conflict.declaredAt_mono	keep	the doc states what `declared_at` does, no more broadly than the statement
+Lambo.Conflict.cutoff_none_of_out_of_range	narrowed	the doc claimed the no-evidence consequence, which cutoff_none_no_evidence proves; it now states only the missing cutoff
+Lambo.Conflict.unrepresentable_minAge	narrowed	the doc was only a test name; it now states the guarantee (no evidence eligible) the statement proves
+Lambo.Conflict.not_written_not_admissible	keep	`contradiction.rs` ignores a declaration written after `now` (PR #154 review)
+Lambo.Conflict.admissible_of_more_evidence	keep	`contradiction.rs`: more evidence only outweighs, never qualifies a contradiction
+Lambo.Conflict.same_instant_evidence_outweighs	keep	mirrors the Rust test `evidence_at_the_same_instant_outweighs_it`
+Lambo.Conflict.thirty_days_ahead_clamped	keep	mirrors the Rust test `a_contradiction_dated_30_days_ahead_does_not_outrank_earlier_writes`
+Lambo.Conflict.backdated_citation_waits	keep	mirrors the Rust test `a_backdated_citation_does_not_skip_the_age_floor`
+Lambo.Conflict.backdated_contradiction	keep	mirrors the Rust test `a_backdated_contradiction_is_outweighed_by_later_dated_evidence`
+Lambo.Conflict.own_citation_does_not_silence	keep	mirrors the Rust test `a_writer_cannot_outweigh_its_own_contradiction`
+Lambo.Conflict.written_after_now	keep	mirrors the Rust test `a_contradiction_written_after_now_does_not_fire_even_if_backdated`
+Lambo.Conflict.conflictAt_two_agents	keep	the doc states what `conflict_at` does, no more broadly than the statement
+Lambo.Conflict.writer_mem_agents	keep	the doc states what `ConflictHit::writer` does, no more broadly than the statement
+Lambo.Conflict.window_lower_inclusive	keep	mirrors the Rust test `window_boundaries_are_inclusive`; the doc states the case the statement checks
+Lambo.Conflict.window_upper_inclusive	keep	mirrors the Rust test `window_boundaries_are_inclusive`; the doc states the case the statement checks
+Lambo.Conflict.future_excluded	keep	mirrors the Rust test `future_dated_edges_are_outside_the_window`; the doc states the case the statement checks
+Lambo.Conflict.unbounded_window_qualifies_iff	keep	`conflict_at` with an unrepresentable window (`Duration::MAX`) covers all of time up to now
+Lambo.Conflict.secondsAgo_le_window	keep	the doc states what `ConflictHit::seconds_ago` does, no more broadly than the statement
+Lambo.Conflict.conflictAt_perm_isSome	keep	mirrors the Rust test `detect_is_deterministic_and_sorted`; the doc states the case the statement checks
+Lambo.Conflict.conflictAt_perm_agents	keep	the doc states what `conflict_at` does, no more broadly than the statement
+Lambo.Conflict.writer_perm_of_unique	keep	the doc states what `ConflictHit::writer` does, no more broadly than the statement
+Lambo.Conflict.lapse_of_old	keep	mirrors the Rust test `revalidate_ages_a_conflict_out_when_only_the_clock_advances`; the doc states the case the statement checks
+Lambo.Conflict.secondsAgo_advances	keep	the doc states what `HotList::revalidate` does, no more broadly than the statement
+Lambo.Conflict.same_instant_both_join	keep	mirrors the Rust test `same_instant_cross_agent_write_still_conflicts`; the doc states the case the statement checks
+Lambo.Conflict.old_edge_agent_counts	keep	`conflict_at` on the planted shape of `fixtures/session-rest-api.json`: an old edge's agent counts
+Lambo.Conflict.future_edge_agent_counts	keep	`conflict_at` counts the agent of an edge written after `now`, a finding (unlike `written_by`)
+Lambo.Conflict.writer_order_dependent	keep	`conflict_at`'s named writer depends on `incident_edges` order under a tie, a finding
+Lambo.Conflict.agentsOf_sub_fixed	keep	mirrors the Rust test `a_resend_by_another_agent_keeps_the_original_writer`; the doc states the case the statement checks
+Lambo.Conflict.single_agent_never_conflicts_fixed	keep	mirrors the Rust test `single_agent_does_not_fire`; the doc states the case the statement checks
+Lambo.Conflict.secondsAgo_le_window_fixed	keep	the doc states what `ConflictHit::seconds_ago` does, no more broadly than the statement
+Lambo.Conflict.conflictAtFixed_perm_isSome	keep	the doc states what `conflict_at_with` does, no more broadly than the statement
+Lambo.Conflict.conflictAtFixed_perm_agents	keep	the doc states what `conflict_at_with` does, no more broadly than the statement
+Lambo.Conflict.writer_perm_of_unique_fixed	keep	the fixed `conflict_at_with`'s named writer ignores edge order without same-instant ties
+Lambo.Conflict.excluded_edge_irrelevant_fixed	keep	mirrors the Rust test `a_contradiction_writer_does_not_join_the_conflict_agent_set`; the doc states the case the statement checks
+Lambo.Conflict.resend_keeps_original_writer	keep	mirrors the Rust test `resend_drops_original_writer`; the doc states the case the statement checks
+Lambo.Contract.attach_follows_classify	keep	the doc states what `build_attach` does, no more broadly than the statement
+Lambo.Contract.attach_ok_contract_live	keep	the doc states what `build_attach` does, no more broadly than the statement
+Lambo.Contract.attach_override_width_refused	keep	the doc states what `build_attach` does, no more broadly than the statement
+Lambo.Contract.attach_override_cross_kind_refused	keep	the doc states what `build_attach` does, no more broadly than the statement
+Lambo.Contract.attach_override_records	narrowed	the doc claimed the SetEmbedding is flushed before the attach returns, which the model does not model; dropped, and the contract-change hypothesis stated
+Lambo.Contract.write_refuses_other_space	keep	the doc states what `Graph::stamp_embedding` does, no more broadly than the statement
+Lambo.Contract.backfill_no_setEmbedding	keep	`Graph::embed_missing` emits only upserts, no `SetEmbedding`
+Lambo.Contract.reembed_contract_last	keep	`Graph::reembed_all`'s batch before #322: upserts, then one trailing `SetEmbedding`
+Lambo.Contract.read_refuses_mismatch	keep	the doc states what `graph_vector_candidates` does, no more broadly than the statement
+Lambo.Contract.quarantine_no_vectors	keep	mirrors the Rust test `quarantine_legacy_vectors`; the doc states the case the statement checks
+Lambo.Contract.attach_override_no_vectors_oneSpace	keep	`build_attach`'s override on a vector-free session leaves one space
+Lambo.Contract.reembedCmd_refuses_override	keep	`re_embed::run` refuses `--allow-embedding-mismatch`
+Lambo.Contract.reembedCmd_full_one_space	narrowed	the doc omitted the non-empty-session hypothesis; it now states it
+Lambo.Contract.canary_refuses_iff	keep	the doc states what `canary_gate` does, no more broadly than the statement
+Lambo.Contract.writerAttach_verify_drift	keep	the doc states what `canary_gate` does, no more broadly than the statement
+Lambo.Contract.example_rename	keep	the doc states what `build_attach` does, no more broadly than the statement
+Lambo.Contract.example_override_refusals	keep	the doc states what `build_attach` does, no more broadly than the statement
+Lambo.Contract.example_warn_without_relabel	keep	the doc states what `build_attach` does, no more broadly than the statement
+Lambo.Contract.override_mixes_reads	keep	`build_attach`'s override then a write: the checked vector read returns two spaces (#296)
+Lambo.Contract.example_no_override_no_mix	keep	the doc states what `checked_vector_candidates` does, no more broadly than the statement
+Lambo.Contract.example_reembed	keep	`re_embed::run` to another kind rewrites every vector, then swaps the contract
+Lambo.Contract.example_reembed_coverage	keep	`Graph::reembed`'s coverage check refuses duplicate or missing ids
+Lambo.Contract.example_reembed_images	keep	`Graph::reembed` refuses image vectors unless `--drop-images`
+Lambo.Contract.example_drift_not_reembeddable_in_place	keep	`re_embed::run` before #296 refused an in-place re-embed of a drifted session, a finding
+Lambo.Contract.example_rename_hop	keep	`re_embed::run` allows the rename round trip, finding 1 of #296
+Lambo.Contract.example_silent_repin	keep	`re_embed::run` re-pins the canary without the warning, finding 2 of #296
+Lambo.Contract.example_drifted_backfill	keep	`canary_gate` refuses the writer attach while `--missing-only` writes, finding 3 of #296
+Lambo.Contract.example_same_kind_relabel	keep	the doc states what `build_attach` does, no more broadly than the statement
+Lambo.Contract.example_backfill	keep	the doc states what `Graph::embed_missing` does, no more broadly than the statement
+Lambo.Contract.example_write_after_override	keep	the doc states what `record_action_against` does, no more broadly than the statement
+Lambo.Contract.missingOnly_fixed_verify_drift_writes_nothing	keep	`re_embed::run --missing-only` under verify with drift writes nothing since #296
+Lambo.Contract.runAll2_ordinary_keeps	keep	ordinary writes and the gated backfill never change a stamped session's contract since #296
+Lambo.Contract.example_pins_written	keep	the canary pins the fixed `re_embed::run` writes on concrete sessions
+Lambo.Contract.first_stamp_wins	keep	the doc states what `Graph::stamp_embedding` does, no more broadly than the statement
+Lambo.Contract.classify_unrecorded_iff	keep	mirrors the Rust test `session_embedding_compatibility`; the doc states the case the statement checks
+Lambo.Contract.classify_compatible_iff	keep	mirrors the Rust test `session_embedding_compatibility`; the doc states the case the statement checks
+Lambo.Contract.vector_check_store_authoritative	keep	the doc states what `check_vector_compatibility` does, no more broadly than the statement
+Lambo.Contract.vector_check_zero	keep	mirrors the Rust test `check_vector_compatibility`; the doc states the case the statement checks
+Lambo.Contract.example_contractless_bug	keep	the #322 scenario: the old `Graph::reembed` on a contract-less store loses the vectors, the fixed one keeps them
+Lambo.Dispatch.classify_general_iff	keep	`classify` (`src/recall/dispatch.rs`) is General exactly when no marker occurs
+Lambo.Dispatch.classify_each_marker	keep	`classify` answers Structural for each of `STRUCTURAL_MARKERS`
+Lambo.Dispatch.unsafe_to_delete_structural	keep	`classify` on "unsafe to delete": a harmless substring match before #299
+Lambo.Dispatch.somewhat_uses_structural	keep	`classify` matched markers as substrings before #299: a false positive
+Lambo.Dispatch.ranked_concepts	keep	every dependent `dependents_of` returns is a concept, so `try_structural_with`'s `?` never fires
+Lambo.Dispatch.anchor_not_mem_ranked	keep	`dependents_of` never lists the anchor (its doc quoted)
+Lambo.Dispatch.ranked_weight_desc	keep	the doc states what `dependents_of` does, no more broadly than the statement
+Lambo.Dispatch.traversal_sorted	keep	`try_structural_with`'s hits are strictly in `rank_members` order
+Lambo.Dispatch.general_blends	keep	the doc states what `recall_routed` does, no more broadly than the statement
+Lambo.Drain.close_final	keep	`Entry::settle` after the close before #295: no later settle changes a receipt (history)
+Lambo.Expand.expand_prefix_of_nodup	keep	`expand` returns distinct candidates first, in input order
+Lambo.Expand.expand_depth_zero	keep	`expand` at depth 0 returns the de-duplicated candidates only
+Lambo.Fit.fit_of_nothing_fits	keep	`fit_blocks`' whole-block loop renders nothing when no prefix fits
+Lambo.Fit.fit_of_all_fit	keep	`fit_blocks`' whole-block loop renders every block when all fit
+Lambo.Fit.bsearch_fuel	deleted	about the model's fuel parameter, not fit.rs
+Lambo.Fit.fitBlocks_empty	keep	`fit_blocks` with no block rendered returns the empty context
+Lambo.Fit.rust_bytes_steady	keep	the byte estimator `fit.rs`'s tests use is Steady, so the fit results cover it
+Lambo.Fit.jumpEst_mono	deleted	arithmetic about a toy estimator
+Lambo.Fit.rjEst_mono	deleted	arithmetic about the model's own counterexample estimator (re-review)
+Lambo.Flush.checkFence_unfenced	keep	the doc states what `drain_and_flush` does, no more broadly than the statement
+Lambo.Flush.stale_write_erased	keep	`drain_and_flush` on an erased session's stale write: fence latched, batch dropped, loop stopped (#23)
+Lambo.Flush.run_degraded_silent	keep	the doc states what `drain_and_flush` does, no more broadly than the statement
+Lambo.Flush.override_fences_fixed	keep	`spawn_lease_heartbeat` since #293 latches after an operator override, so the flush loop calls the store no more
+Lambo.Flush.runGuarded_lift	keep	the guarded store calls of #301 change nothing when every call answers: the loop is #293's
+Lambo.Fusion.raise_fixes_example	keep	#288's raise in `candidates_with_keyword_leg_as` on the bug input keeps X ahead
+Lambo.Fusion.raise_ne_assign	keep	#288: the raising and assigning name steps differ exactly above BM25 1.0
+Lambo.Fusion.full_keeps_wins	keep	the current exact-name step never makes the named concept lose to a node it beat
+Lambo.Fusion.term_none	keep	`RecallFusion::term`: a leg that did not rank a node adds 0
+Lambo.Fusion.beats_asymm	keep	`rank`'s order (score, then `tie_break_by_key`) never puts each of two nodes ahead of the other
+Lambo.Fusion.rrf_le_iff_key	keep	`rank` under `FusionKind::Rrf` orders by rrf exactly as by its sort key
+Lambo.Fusion.num_eq_best_of_rank_one	keep	mirrors the Rust test `rrf_is_one_for_rank_one_in_every_active_leg_and_ignores_empty_legs`; the doc states the case the statement checks
+Lambo.Fusion.rrf_two_leg_example	keep	mirrors the Rust test `rrf_ranks_two_leg_agreement_above_one_leg_with_a_bigger_raw_score`
+Lambo.Fusion.rrf_recent_example	keep	`rank` under RRF on the recent leg: ranks by recency and values from them
+Lambo.Fusion.rrf_tie_example	keep	mirrors the Rust test `rrf_ties_break_by_canonical_key_and_a_zero_weight_leg_scores_zero`; the doc states the case the statement checks
+Lambo.Fusion.rrf_one_leg_example	keep	`rank` under RRF with one active leg orders as that leg ranks
+Lambo.Fusion.legRank_example	keep	`rank`'s leg ranks on an example: BM25 order, ties by `tie_break_by_key`
+Lambo.Fusion.rrf_one_leg_needs_weight	keep	mirrors the Rust test `rrf_ties_break_by_canonical_key_and_a_zero_weight_leg_scores_zero`; the doc states the case the statement checks
+Lambo.Fusion.rrf_name_step_shifts_neighbour	keep	under RRF the exact-name step in `candidates_with_keyword_leg_as` shifts a neighbour's rank and rrf
+Lambo.Fusion.rrf_name_step_above_floor	keep	under RRF the exact-name step moves nothing above the 1.0 floor, on #288's example
+Lambo.Fusion.rrf_beyond_cap_example	keep	`rank` under RRF: the #288 review fix changes no rank or rrf on the beyond-cap input
+Lambo.Gc.score_cut_only_entities_and_resources	keep	`gc::run`'s score cut never collects an exempt type that is connected and reachable
+Lambo.Gc.exempt_still_collected_structurally	keep	mirrors the Rust test `exempt_types_are_still_collected_as_orphans_and_islands`; the doc states the case the statement checks
+Lambo.Gc.dependents_spare_only_the_score_cut	keep	`gc::run`: dependents spare a Resource from the score cut only (its doc quoted)
+Lambo.Gc.at_or_above_bar_survives	keep	`gc::run`'s bar comparison is strict, so a score on the bar survives
+Lambo.Gc.contradiction_keeps_nothing_alive	keep	`gc::run`: a concept with no GC connection is collected; Contradicts edges do not connect
+Lambo.Gc.only_contradictions_is_orphan	keep	mirrors the Rust test `counts_toward_gc_connectivity`; the doc states the case the statement checks
+Lambo.Gc.cap_ge_floor	narrowed	the doc claimed a sweep can always collect that many; it now says the cap allows that many
+Lambo.Gc.taken_le_budget	deleted	list arithmetic naming no GC definition, and its doc claimed an order it does not state
+Lambo.Gc.none_deferred_iff	deleted	arithmetic naming no GC definition
+Lambo.Gc.bump_adds_one	narrowed	the doc claimed saturation, which no theorem states; it now states the add-one below `i32::MAX` only (re-review)
+Lambo.Hotlist.enforce_evicts_oldest_in_tier	keep	`HotList::enforce` evicts the older of two entries in one tier
+Lambo.Hotlist.insert_evicted_lowest	keep	the doc states what `HotList::insert` does, no more broadly than the statement
+Lambo.Hotlist.enforce_pairwise	keep	the doc states what `HotList::enforce` does, no more broadly than the statement
+Lambo.Hotlist.enforce_evicted_other_by_bound	keep	the doc states what `HotList::enforce` does, no more broadly than the statement
+Lambo.Hotlist.enforce_under_budget	keep	`HotList::enforce` under the contradiction budget evicts only what the bound evicts (#196)
+Lambo.Hotlist.inv_new	keep	`HotList::new` starts with the bound, budget and one-entry-per-condition invariant
+Lambo.Hotlist.revalidate_inv	keep	the doc states what `HotList::revalidate` does, no more broadly than the statement
+Lambo.Hotlist.forcesPayload_of_wf	keep	`forces_inclusion` forces a well-formed payload unless it is a contradiction on a non-pillar
+Lambo.Hotlist.hotLines_length	keep	the doc states what `hot_warning` does, no more broadly than the statement
+Lambo.Hotlist.annot_eq_contradiction_iff	keep	the doc states what `contradiction_warning` does, no more broadly than the statement
+Lambo.Hotlist.annot_eq_conflict_iff	keep	recall's conflict warning line (`hot_warning`) exactly for a conflict payload
+Lambo.Hotlist.forced_has_line	keep	a hit `forces` forces carries at least one hot-list line in recall's output
+Lambo.Lease.takeover_needs_expiry	keep	`acquire`'s upsert gives the row to another identity only once `expires_at <= now`
+Lambo.Lease.no_token_refused	keep	`lease_permits_write` refuses a writer with no token once a session is leased
+Lambo.Lease.unleased_permits	keep	`lease_permits_write` admits any write to a never-leased session (seed and fixtures)
+Lambo.Lease.beatLatchesOld_le	keep	#293's heartbeat latch only adds latches over the old rule
+Lambo.Lease.beat_latches_after_takeover	keep	the doc states what `spawn_lease_heartbeat` does, no more broadly than the statement
+Lambo.Names.declare_idempotent	keep	the doc states what `src/graph/graph/names.rs` does, no more broadly than the statement
+Lambo.Order.Lawful.strict_total	deleted	order theory naming no Rust behaviour
+Lambo.Order.sorted_nodup	deleted	order theory naming no Rust behaviour
+Lambo.Order.promoted_canonical	deleted	about the #280 gated order, a design not in the Rust
+Lambo.Order.clearsGate_mono	deleted	about the #280 gated order, a design not in the Rust
+Lambo.Order.gatedRankMembers_zero	deleted	about the #280 gated order, a design not in the Rust
+Lambo.Order.gatedRankMembers_unreachable	deleted	about the #280 gated order, a design not in the Rust
+Lambo.Order.gatedRankMembers_canonical_first	deleted	about the #280 gated order, a design not in the Rust
+Lambo.Order.gatedRankMembers_below_gate	deleted	about the #280 gated order, a design not in the Rust
+Lambo.Policy.score10_steps	keep	the doc states what `raw_solo_score` does, no more broadly than the statement
+Lambo.Policy.classify_candidate_iff	keep	`classify` (`src/canon/policy.rs`) puts a solo score in the Candidate band exactly between its bars
+Lambo.Policy.classify_venerable_iff	keep	`classify` puts a solo score in the Venerable band exactly between its bars
+Lambo.Policy.classify_canonical_iff	keep	`classify` puts a solo score in the Canonical band exactly from `CANONICAL_BAR`
+Lambo.Policy.bulk_ingest_band	keep	`SoloScorer` on the bulk-ingest corpus: Candidate on event time, none on flush time, why the solo terms read `about_time`
+Lambo.Policy.revertCount_append	keep	the doc states what `revert_count` does, no more broadly than the statement
+Lambo.Policy.promotion_not_revert	keep	the doc states what `revert_count` does, no more broadly than the statement
+Lambo.Policy.admitsHop_down	keep	the doc states what `SoloScorer::admits_hop` does, no more broadly than the statement
+Lambo.Policy.admitsHop_mono	keep	the doc states what `SoloScorer::admits_hop` does, no more broadly than the statement
+Lambo.Policy.solo_admission_climbs_with_the_band	keep	mirrors the Rust test `solo_admission_climbs_with_the_band`; the doc states the case the statement checks
+Lambo.Policy.mem_all	keep	mirrors the Rust test `all_covers_every_variant_and_round_trips_through_from_str`; the doc states the case the statement checks
+Lambo.Policy.policy_cycle_rank_le	keep	under either `PromotionPolicy` one `Evaluator` cycle raises a status by at most one rank
+Lambo.Policy.parse_asStr	keep	mirrors the Rust test `all_covers_every_variant_and_round_trips_through_from_str`; the doc states the case the statement checks
+Lambo.Policy.parse_unicode_space	keep	`PromotionPolicy::from_str` trims Unicode spaces too (`str::trim`)
+Lambo.Policy.parse_padded	keep	the doc states what `PromotionPolicy::from_str` does, no more broadly than the statement
+Lambo.Policy.sessionCount_dup	keep	the doc states what `separated_session_count` does, no more broadly than the statement
+Lambo.Policy.sessionCount_append_self	keep	the doc states what `separated_session_count` does, no more broadly than the statement
+Lambo.Policy.sessionCount_nil	keep	mirrors the Rust test `separation_counts_clusters_once_and_stragglers_each`; the doc states the case the statement checks
+Lambo.Policy.sessionCount_le_length	keep	the doc states what `separated_session_count` does, no more broadly than the statement
+Lambo.Policy.sessionCount_le_cons	keep	the doc states what `separated_session_count` does, no more broadly than the statement
+Lambo.Policy.sessionCount_cons_le	keep	the doc states what `separated_session_count` does, no more broadly than the statement
+Lambo.Policy.sessionCount_antitone_gap	keep	`separated_session_count` never counts more with a wider `SESSION_SEPARATION`
+Lambo.Policy.separation_counts_clusters_once_and_stragglers_each	keep	mirrors the Rust test `separation_counts_clusters_once_and_stragglers_each`; the doc states the case the statement checks
+Lambo.Policy.recurrence_mono_edge	keep	the doc states what `recurrence_sessions` does, no more broadly than the statement
+Lambo.Policy.aboutTime_fallback	keep	the doc states what `Interaction::about_time` does, no more broadly than the statement
+Lambo.Policy.recurrence_reflush	keep	the doc states what `recurrence_sessions` does, no more broadly than the statement
+Lambo.Policy.spread_days_doc_and_code	keep	mirrors the Rust test `supporting_interaction_times`; the doc states the case the statement checks
+Lambo.Policy.causal_touches_are_not_recurrence	keep	mirrors the Rust test `causal_touches_are_not_recurrence`; the doc states the case the statement checks
+Lambo.Policy.recurring_burst_once	keep	mirrors the Rust test `solo_admits_the_recurring_fact_and_refuses_the_burst_and_the_one_off`; the doc states the case the statement checks
+Lambo.Receipts.first_settle_wins	keep	the doc states what `Entry::settle` does, no more broadly than the statement
+Lambo.Receipts.lookupMissing_isSettled	keep	the receipt store answers an unknown id with a settled answer
+Lambo.Receipts.admit_queue_bound	keep	admission keeps the queue within `WRITE_QUEUE_MAX`
+Lambo.Receipts.admit_refused_unchanged	keep	`admission.rs`: a refusal changes neither count (its doc quoted)
+Lambo.Receipts.dropped_is_settled	keep	the doc states what `ReceiptAnswer::Dropped` does, no more broadly than the statement
+Lambo.Registry.stale_release_fences	keep	the doc states what `release_abandoned` does, no more broadly than the statement
+Lambo.Resolve.construction_examples	keep	`resolve_for_command` on examples: what each command builds and through which entry point
+Lambo.Resolve.width_examples	keep	`resolve_backends` width checks on examples (pin, echo, Cockroach `VECTOR(1024)`)
+Lambo.Resolve.preflight_examples	keep	`serve_preflight` on examples: the exit codes and the `LAMBO_AUTH_TOKEN` rules
+Lambo.Resolve.wrapTier_uncompiled	keep	the doc states what `wrap_with_recall_tier` does, no more broadly than the statement
+Lambo.Resolve.classificationSource_built	keep	mirrors the Rust test `resolve_classification_source`; the doc states the case the statement checks
+Lambo.Resolve.session_errors_labelled_store	keep	`main` labels a refused `session classify` or `split` "failed to resolve store", a finding
+Lambo.Score.clampDim_mono	keep	the doc states what `clamp_dim` does, no more broadly than the statement
+Lambo.Score.clampDim_eq_self	keep	the doc states what `clamp_dim` does, no more broadly than the statement
+Lambo.Score.saneWeight_idem	keep	`ScoringWeights::sanitized` is idempotent (config.rs quoted)
+Lambo.Score.rawScore_ge	narrowed	the doc claimed the modifier is the only way below zero, which the statement does not prove; it now states the lower bound only
+Lambo.Score.score_eq_rawScore	keep	the doc states what `score_concept_with` does, no more broadly than the statement
+Lambo.Score.defaultWeights_total	keep	the doc states what `ScoringWeights::default` does, no more broadly than the statement
+Lambo.Score.weighted_ignores_frequency_of_bad_weight	keep	a zeroed frequency weight drops the dimension from `score_concept_with` (config.rs quoted)
+Lambo.Score.liveNumerator_range	keep	`score_live_plus_frequency`'s renormalized live part is in [0, 1]
+Lambo.Score.weighted_eq_liveNumerator_of_frequency_zero	keep	`score_concept_with`'s weighted part at frequency 0 is the live numerator, in exact arithmetic
+Lambo.Score.livePlusFrequency_of_frequency_zero	keep	`score_live_plus_frequency` at frequency 0 is the live score (score.rs quoted)
+Lambo.Score.livePlusFrequency_mono	keep	`score_live_plus_frequency` is monotone in the concept's own frequency
+Lambo.Score.livePlusFrequency_range	keep	`score_live_plus_frequency` stays in [0, 1 + MAX_BONUS]
+Lambo.Score.historical_eq_floor	keep	`concept_recency`'s two expressions agree (the module doc's claim), over the session's span
+Lambo.Score.historical_in_unit	keep	`concept_recency`'s historical form is in [0, 1] without the clamp
+Lambo.Score.floor_recency_near_one	keep	`concept_recency` scores every concept near 1 in a session younger than `MIN_RECENCY_SPAN`
+Lambo.Score.createdAt_le_lastTouch	keep	the doc states what `score_concept_with` does, no more broadly than the statement
+Lambo.Score.lastTouch_eq_lastAccessed	keep	`score_concept_with`'s last touch is `last_accessed` whenever it is not before `created_at`
+Lambo.Score.listMax_mem_or_zero	keep	`score_concept_with`'s max-normalized dimensions: the maximum is attained or 0
+Lambo.Score.all_zero_of_listMax_zero	keep	the doc states what `score_concept_with` does, no more broadly than the statement
+Lambo.Supersession.counted_at_instant	keep	mirrors the Rust test `support_at_the_watermark_instant_does_not_count`; the doc states the case the statement checks
+Lambo.Supersession.outranks_asymm	keep	`outranks` never ranks each of two passes over the other
+Lambo.Supersession.probesFor_noSelf	keep	the supersession pass never probes a concept against itself
+Lambo.Supersession.gather_off	keep	the doc states what `gather_holds` does, no more broadly than the statement
+Lambo.Supersession.gatherHolds_off	keep	the doc states what `gather_holds` does, no more broadly than the statement
+Lambo.Supersession.neverRedundant_symm	keep	the doc states what `never_redundant` does, no more broadly than the statement
+Lambo.Supersession.datedAt_le	keep	a future `event_time` never dates a write after it was written, in the #198 trigger
+Lambo.Supersession.candidate_self	keep	the #198 trigger never suspects a concept of superseding itself
+Lambo.Supersession.candidate_settled	keep	the #198 trigger never suspects a pair settled by `against` or `depends_on`
+Lambo.Supersession.recordRefused_extends	keep	the doc states what `record_refused_hits` does, no more broadly than the statement
+Lambo.Supersession.suspected_not_both_ways	keep	`record_refused_hits` never leaves SuspectedSupersedes edges both ways on a well-dated graph
+Lambo.Supersession.settle_keeps_other	keep	`settle` removes only SuspectedSupersedes edges between the pair
+Lambo.Supersession.select_length	keep	the doc states what `REPLACEMENT_CANDIDATE_LIMIT` does, no more broadly than the statement
+Lambo.Supersession.select_newer_not_replaced	keep	a replacement candidate marked newer is never one the trigger records as replaced (the weak form; its doc says so)
+Lambo.Supersession.select_tie_not_newer	keep	replacement candidates: a tie is not marked newer (the Rust doc quoted)
+Lambo.Tiered.writing_head	keep	the doc states what `repair_once` does, no more broadly than the statement
+Lambo.Tiered.writing_idle	keep	the doc states what `run_repairs` does, no more broadly than the statement
+Lambo.Tiered.quiet_of_idle	keep	a lost lease's old holder can land no repair write once `run_repairs` is idle or at the head of `repair_once`
+Lambo.Tiered.late_success_closes	keep	the doc states what `breaker_success` does, no more broadly than the statement
+Lambo.TopK.emit_pairwise	keep	`emitted` keeps every pairwise order of the ranked list, so Canonical-first survives
+Lambo.TopK.emit_forced_eq	keep	`emitted` keeps exactly the forced concepts, in order
+Lambo.TopK.emit_eq_filter	keep	`emitted` cuts nothing when the ordinary concepts fit in `top_k`
+Lambo.TopK.emitR_pairwise	keep	`emitted` with the redundancy skip keeps every pairwise order of the ranked list
+Lambo.TopK.emitR_all_concepts	keep	`emitted` with the redundancy skip emits only concepts of the graph

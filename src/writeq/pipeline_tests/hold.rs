@@ -1,6 +1,6 @@
 //! #295 review: the in-session hold under admission, the caps and the fence.
 //! Each test mirrors a theorem of the event model in
-//! `formal/LamboProofs/Drain.lean` (`stepW`, `runW`).
+//! `formal/LamboProofs/Drain/Worker.lean` (`stepW`, `runW`).
 
 use super::*;
 use crate::writeq::execution::held_retry_backoff;

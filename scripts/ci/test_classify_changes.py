@@ -36,7 +36,7 @@ class PathClassification(unittest.TestCase):
             "evidence/issue-221/runs/qwen3-4b-1024.json",
             "evidence/issue-237/runs/elastic-jina-v3-1024.json",
             # include_str!'d by src/formal_constants_tests.rs (#291).
-            "formal/LamboProofs/Hotlist.lean",
+            "formal/LamboProofs/Hotlist/List.lean",
             # include_str!'d by src/formal_oracle_tests.rs (#291).
             "formal/oracle/Order.json",
         ]

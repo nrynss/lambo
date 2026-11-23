@@ -1,213 +1,40 @@
+import LamboProofs.Contract.Stamp
+
 /-
-# The embedding contract: one vector space per session
+# The operator override, `lambo re-embed` and the checked vector read
 
-Model of `EmbeddingContract::ensure_compatible` (`src/types/mod.rs`),
-`Graph::stamp_embedding` (`src/graph/graph/embeddings.rs`),
-`session_embedding_compatibility` and `check_vector_compatibility`
-(`src/resolve.rs`).
+Models the writer attach's contract check and the `--allow-embedding-mismatch`
+override (`MemoryBuilder::build_attach`, `src/memory/builder.rs`), the canary
+gate (`canary_gate`), ordinary writes with a vector (`record_action_against`),
+`Graph::reembed_all` and `embed_missing`, the `lambo re-embed` verb
+(`src/cli/re_embed.rs`) before and after #296, the legacy-vector quarantine at
+load (`quarantine_legacy_vectors`) and the checked vector read
+(`graph_vector_candidates`, `checked_vector_candidates`). The section below
+lists each item with its lines, and the findings that led to #296.
 
-"One session never mixes two model spaces."
+Results: without the override the writer attach is exactly the stamp
+(`attach_no_override_ok_iff`); with it, a mismatched attach succeeds exactly
+when the widths are equal and either no vector exists or the kind is
+unchanged (`attach_override_ok_iff`), and it relabels, never rewrites a
+vector; no ordinary write changes a stamped contract (`runAll_ordinary_keeps`,
+`contract_change_explicit`); without the override a vector read returns
+vectors of one contract only (`no_mixing_without_override`), with it a rename
+mixes two (`override_mixes_reads`); a full re-embed leaves one space
+(`reembed_one_space`). Findings before #296: drift cannot be re-embedded in
+place (`reembedCmd_refuses_same_contract`), a full re-embed re-pins the
+canary silently (`reembed_repins_without_warning`), the backfill skips the
+canary (`missingOnly_skips_canary`). The fix: an in-place rewrite under the
+live contract, the canary gate on `--missing-only`, a guard on the pin
+(`reembedCmdFixed`, `missingOnly_fixed_refuses_drift`, `runAll2_oneSpace`).
 
-## Model
-
-A contract is `(kind, model, dim)`. `stamp` is `stamp_embedding`: an unstamped
-session takes the offered contract; a stamped one accepts only an equal
-contract and is left unchanged; anything else is an error and the session is
-left unchanged.
-
-The second half (from "The operator override, re-embed and vector reads")
-models what the first half left out: the operator override
-(`--allow-embedding-mismatch`), the `lambo re-embed` migration and backfill,
-the legacy-vector quarantine at load, the checked vector read and the
-embedder canary gate. Its own header lists the Rust items and what it leaves
-out.
-
-The third part (from "The fix for #296") keeps all of that as the previous
-version and adds the fixed `lambo re-embed`: an in-place rewrite for a
-session already under the live contract (the canary-drift repair), the
-canary gate on `--missing-only`, a guard against silently replacing a canary
-pin other sessions rely on, and the override WARN logged only after the
-relabel. Its header lists what each theorem proves.
-
-The fourth part (from "The durable re-embed of a contract-less session") adds
-the store: applying a flushed batch, with the first-stamp legacy quarantine.
-It keeps the old `reembed` and pins #322 against it (a re-embed of a
-contract-less session reports full coverage and leaves the store with the
-live contract and no vector), then adds the fixed batch order
-(`reembedOrdered`, contract first on a contract-less session) and proves the
-store keeps every new vector, matches the graph, and is unchanged for a
-stamped session.
-
-## Results
-
-* `compatible_iff_eq`: compatibility is equality of all three fields; a
-  missing model name is not a wildcard, and "same dim does not mean
-  interchangeable models".
-* `stamp_keeps`, `stampAll_keeps`: once stamped, no sequence of ordinary
-  stamps changes or clears the contract ("ordinary callers cannot clear or
-  replace the contract").
-* `stamp_ok_eq`: every stamp that succeeds on a stamped session offered that
-  very contract, so all vectors accepted into a session share one space.
-* `classify_*`: the attach-time classification; only an unstamped (legacy)
-  session is a wildcard.
-* `vector_check_*`: the resolve-time width check is store-authoritative.
+Boundary: a vector is its producer's contract label; the model does not
+compute embeddings, read the store's rows (that is `Store.lean`) or model
+concurrency between an attach and a re-embed.
 -/
 
 namespace Lambo.Contract
 
-/-- `EmbeddingContract`. `K` is the provider kind, `M` the model identity. -/
-structure Contract (K M : Type) where
-  kind : K
-  model : Option M
-  dim : Nat
-  deriving DecidableEq
-
 variable {K M : Type} [DecidableEq K] [DecidableEq M]
-
-/-- `ensure_compatible`: errors iff `dim`, `kind` or `model` differs. -/
-def compatible (a b : Contract K M) : Bool :=
-  decide (a.dim = b.dim) && decide (a.kind = b.kind) && decide (a.model = b.model)
-
-/-- Compatibility is plain equality. -/
-theorem compatible_iff_eq (a b : Contract K M) : compatible a b = true ↔ a = b := by
-  cases a with
-  | mk ak am ad =>
-    cases b with
-    | mk bk bm bd =>
-      by_cases hd : ad = bd <;> by_cases hk : ak = bk <;> by_cases hm : am = bm <;>
-        simp [compatible, hd, hk, hm]
-
-/-- Same width, different model: incompatible. -/
-theorem same_dim_not_enough (a b : Contract K M) (hm : a.model ≠ b.model) :
-    compatible a b = false := by
-  cases hc : compatible a b with
-  | false => rfl
-  | true =>
-    have e : a = b := (compatible_iff_eq a b).mp hc
-    rw [e] at hm
-    exact absurd rfl hm
-
-/-- `stamp_embedding`: the session's contract afterwards, and whether the
-stamp was accepted. -/
-def stamp (stored : Option (Contract K M)) (offered : Contract K M) :
-    Option (Contract K M) × Bool :=
-  match stored with
-  | none => (some offered, true)
-  | some c => if c = offered then (some c, true) else (some c, false)
-
-/-- **A stamped contract stays.** Whatever is offered, a stamped session keeps
-exactly the contract it had. -/
-theorem stamp_keeps (c offered : Contract K M) : (stamp (some c) offered).1 = some c := by
-  show (if c = offered then (some c, true) else (some c, false)).1 = some c
-  by_cases h : c = offered
-  · rw [ite_eq_left h] <;> rfl
-  · rw [ite_eq_right h] <;> rfl
-
-/-- A stamp on a stamped session succeeds only for the stored contract. -/
-theorem stamp_ok_eq (c offered : Contract K M) (h : (stamp (some c) offered).2 = true) :
-    offered = c := by
-  by_cases he : c = offered
-  · exact he.symm
-  · have e : stamp (some c) offered = (some c, false) := by
-      show (if c = offered then (some c, true) else (some c, false)) = (some c, false)
-      rw [ite_eq_right he]
-    rw [e] at h
-    have h' : false = true := h
-    exact absurd h' (by decide)
-
-/-- The first stamp on an unstamped session records the offered contract. -/
-theorem stamp_first (offered : Contract K M) : stamp none offered = (some offered, true) := rfl
-
-/-- A sequence of stamp attempts, keeping only the stored contract. -/
-def stampAll (stored : Option (Contract K M)) : List (Contract K M) → Option (Contract K M)
-  | [] => stored
-  | offered :: rest => stampAll (stamp stored offered).1 rest
-
-/-- **One space per session.** After the session is stamped, no sequence of
-stamp attempts changes or clears its contract. -/
-theorem stampAll_keeps (c : Contract K M) :
-    ∀ (attempts : List (Contract K M)), stampAll (some c) attempts = some c := by
-  intro attempts
-  induction attempts with
-  | nil => rfl
-  | cons offered rest ih =>
-    show stampAll (stamp (some c) offered).1 rest = some c
-    rw [stamp_keeps c offered]
-    exact ih
-
-/-- Whoever stamps first decides: "only the winner may stamp its vector
-space". -/
-theorem first_stamp_wins (first : Contract K M) (later : List (Contract K M)) :
-    stampAll none (first :: later) = some first := by
-  show stampAll (stamp none first).1 later = some first
-  exact stampAll_keeps first later
-
-/-! ## Attach-time classification -/
-
-/-- `SessionEmbeddingCompatibility`. -/
-inductive Compat where
-  | unrecorded
-  | compatible
-  | mismatch
-  deriving DecidableEq, Repr
-
-/-- `session_embedding_compatibility`. -/
-def classify (stored : Option (Contract K M)) (live : Contract K M) : Compat :=
-  match stored with
-  | none => .unrecorded
-  | some s => if s = live then .compatible else .mismatch
-
-/-- The only wildcard is a session with no recorded contract. -/
-theorem classify_unrecorded_iff (stored : Option (Contract K M)) (live : Contract K M) :
-    classify stored live = .unrecorded ↔ stored = none := by
-  cases stored with
-  | none => exact ⟨fun _ => rfl, fun _ => rfl⟩
-  | some s =>
-    constructor
-    · intro h
-      have h' : (if s = live then Compat.compatible else Compat.mismatch) = .unrecorded := h
-      by_cases hs : s = live
-      · rw [ite_eq_left hs] at h'
-        exact Compat.noConfusion h'
-      · rw [ite_eq_right hs] at h'
-        exact Compat.noConfusion h'
-    · intro h
-      cases h
-
-/-- A recorded contract is `Compatible` exactly when it equals the live one. -/
-theorem classify_compatible_iff (s live : Contract K M) :
-    classify (some s) live = .compatible ↔ s = live := by
-  constructor
-  · intro h
-    have h' : (if s = live then Compat.compatible else Compat.mismatch) = .compatible := h
-    by_cases hs : s = live
-    · exact hs
-    · rw [ite_eq_right hs] at h'
-      exact Compat.noConfusion h'
-  · intro hs
-    show (if s = live then Compat.compatible else Compat.mismatch) = .compatible
-    rw [ite_eq_left hs]
-
-/-! ## Store-authoritative vector width -/
-
-/-- `check_vector_compatibility`: a zero-width embedder is refused; a store
-that declares a width must match the embedder; a store that declares none
-passes. -/
-def vectorCheck (storeDim : Option Nat) (embedderDim : Nat) : Bool :=
-  match storeDim with
-  | none => decide (embedderDim ≠ 0)
-  | some d => decide (embedderDim ≠ 0) && decide (d = embedderDim)
-
-/-- When the store declares a width, a passing check means the embedder has
-exactly that width: the store's `VECTOR(n)` column is the authority. -/
-theorem vector_check_store_authoritative (d embedderDim : Nat)
-    (h : vectorCheck (some d) embedderDim = true) : embedderDim = d ∧ embedderDim ≠ 0 := by
-  simp [vectorCheck] at h
-  omega
-
-/-- A zero-width embedder never passes. -/
-theorem vector_check_zero (storeDim : Option Nat) : vectorCheck storeDim 0 = false := by
-  cases storeDim <;> simp [vectorCheck]
 
 /-! # The operator override, re-embed and vector reads
 
@@ -690,8 +517,9 @@ def runAll (s : Session K M) : List (Op K M) → Session K M
 
 /-! ### The writer attach -/
 
-/-- The attach follows `classify`: compatible passes unchanged, unrecorded is
-stamped, a mismatch without the override is refused. -/
+/-- `build_attach` follows `session_embedding_compatibility`: a compatible
+session passes unchanged, an unrecorded one is stamped, and a mismatch without
+the override is refused. -/
 theorem attach_follows_classify (s : Session K M) (live : Contract K M) (allow : Bool) :
     (classify s.contract live = .compatible → attach s live allow = some (s, [])) ∧
     (classify s.contract live = .unrecorded →
@@ -727,8 +555,9 @@ theorem attach_no_override_contract (s s' : Session K M) (live : Contract K M)
     · simp [he]
     · exact absurd (hmis e hc he).1 (by simp)
 
-/-- Any successful writer attach, override on or off, leaves the session
-under the live contract. -/
+/-- Every successful writer attach (`build_attach`), with or without
+`--allow-embedding-mismatch`, leaves the session under the live embedder's
+contract. -/
 theorem attach_ok_contract_live (s s' : Session K M) (live : Contract K M) (allow : Bool)
     (m : List (Mut K M)) (h : attach s live allow = some (s', m)) :
     s'.contract = some live :=
@@ -756,7 +585,9 @@ theorem attach_override_ok_iff (s : Session K M) (e live : Contract K M)
     | false => simp [hne, hd]
   · simp [hne, hd]
 
-/-- **Refused even with the override:** a width change. -/
+/-- `build_attach` refuses a width change even with
+`--allow-embedding-mismatch`: the override never relabels a session to a
+contract of another `dim`. -/
 theorem attach_override_width_refused (s : Session K M) (e live : Contract K M) (allow : Bool)
     (hc : s.contract = some e) (hd : e.dim ≠ live.dim) : attach s live allow = none := by
   unfold attach
@@ -764,8 +595,8 @@ theorem attach_override_width_refused (s : Session K M) (e live : Contract K M) 
   have hne : e ≠ live := fun h => hd (h ▸ rfl)
   simp [hne, hd]
 
-/-- **Refused even with the override:** a kind change while any concept
-carries a vector. -/
+/-- `build_attach` refuses even with `--allow-embedding-mismatch` a kind
+change while any concept carries a vector. -/
 theorem attach_override_cross_kind_refused (s : Session K M) (e live : Contract K M)
     (allow : Bool) (hc : s.contract = some e) (hv : hasVectors s = true)
     (hk : e.kind ≠ live.kind) : attach s live allow = none := by
@@ -774,9 +605,9 @@ theorem attach_override_cross_kind_refused (s : Session K M) (e live : Contract 
   have hne : e ≠ live := fun h => hk (h ▸ rfl)
   by_cases hd : e.dim = live.dim <;> simp [hne, hd, hv, hk]
 
-/-- **What is recorded.** A successful override emits exactly one
-`SetEmbedding` of the live contract (flushed before the attach returns) and
-logs the WARN. -/
+/-- A successful `--allow-embedding-mismatch` attach (`build_attach`) that
+changes the contract emits exactly one mutation, a `SetEmbedding` of the live
+contract, and logs the override WARN (when it is flushed is not modelled). -/
 theorem attach_override_records (s s' : Session K M) (e live : Contract K M)
     (m : List (Mut K M)) (hc : s.contract = some e) (hne : e ≠ live)
     (h : attach s live true = some (s', m)) :
@@ -818,7 +649,9 @@ theorem write_keeps_contract (s s' : Session K M) (c live : Contract K M) (id : 
       rw [hc]; exact stamp_keeps c live
     · rw [ite_eq_right hs] at h; cases h
 
-/-- A write of a vector from another space into a stamped session is refused. -/
+/-- An ordinary write of a vector from another embedding space into a stamped
+session is refused (`Graph::stamp_embedding` via `record_action_against`), so
+a stamped session's vectors stay in its space. -/
 theorem write_refuses_other_space (s : Session K M) (c live : Contract K M) (id : Nat)
     (image : Bool) (hc : s.contract = some c) (hne : c ≠ live) :
     write s live id image true = none := by
@@ -1163,8 +996,9 @@ theorem runAll_oneSpace :
       exact ih s' (step_oneSpace s s' op m (hops op (by simp)) hs hstep) hrest
     · exact ih s hs hrest
 
-/-- The read refuses a session under another contract; it takes no
-override. -/
+/-- The checked vector read (`graph_vector_candidates` /
+`checked_vector_candidates`) refuses a session under another contract and has
+no override, so recall never ranks vectors of two spaces together. -/
 theorem read_refuses_mismatch (s : Session K M) (c expected : Contract K M)
     (hc : s.contract = some c) (hne : c ≠ expected) : vectorRead s expected = none := by
   unfold vectorRead; rw [hc]; simp [hne]
@@ -1198,8 +1032,9 @@ theorem read_one_space (s : Session K M) (expected : Contract K M) (l : List (Co
     · rw [ite_eq_right he] at h; cases h
 
 omit [DecidableEq K] [DecidableEq M] in
-/-- The legacy quarantine: a session loaded with no contract holds no vector,
-so the stamp that follows cannot label a vector it did not produce. -/
+/-- `quarantine_legacy_vectors` leaves a session loaded with no contract
+holding no vector, so the first stamp after load cannot label a vector the
+live embedder did not produce. -/
 theorem quarantine_no_vectors (s : Session K M) (hc : s.contract = none) :
     hasVectors (quarantine s) = false := by
   unfold quarantine; rw [hc]
@@ -1247,8 +1082,8 @@ theorem attach_override_relabel_mixes (s s' : Session K M) (e live : Contract K 
         · rw [hcon, h1] at h2; exact absurd (Option.some.inj h2) hne
     rw [hv] at hv'; cases hv'
 
-/-- With the override on a session that holds no vector, nothing is mixed:
-the relabel is a re-stamp of an empty space. -/
+/-- An `--allow-embedding-mismatch` attach on a session holding no vector
+mixes nothing: the relabel is a re-stamp of an empty space. -/
 theorem attach_override_no_vectors_oneSpace (s s' : Session K M) (live : Contract K M)
     (m : List (Mut K M)) (hv : hasVectors s = false)
     (h : attach s live true = some (s', m)) : oneSpace s' = true := by
@@ -1258,7 +1093,8 @@ theorem attach_override_no_vectors_oneSpace (s s' : Session K M) (live : Contrac
 
 /-! ### The `re-embed` verb -/
 
-/-- `re-embed` refuses the override flag, whatever the session. -/
+/-- `lambo re-embed` refuses `--allow-embedding-mismatch` on every session: a
+migration never relabels instead of rewriting. -/
 theorem reembedCmd_refuses_override (s : Session K M) (live : Contract K M)
     (missingOnly drop : Bool) : reembedCmd s live true missingOnly drop = none := by
   simp [reembedCmd]
@@ -1277,8 +1113,8 @@ theorem reembedCmd_full (s : Session K M) (live : Contract K M) (drop : Bool)
   unfold reembedCmd
   simp [hne']
 
-/-- A successful full `re-embed` leaves the session in one space under the
-live contract. -/
+/-- A successful full `re-embed` of a session with at least one concept leaves
+it in one space under the live contract. -/
 theorem reembedCmd_full_one_space (s s' : Session K M) (live : Contract K M) (drop : Bool)
     (m : List (Mut K M)) (hne : s.concepts ≠ [])
     (h : reembedCmd s live false false drop = some (s', m)) :
@@ -1318,15 +1154,8 @@ def canaryAdmits (mode : CanaryMode) (drifted allow : Bool) : Bool :=
   | .verify => !drifted || allow
   | _ => true
 
-/-- Under `verify`, a drift refuses the attach unless the override is on. -/
-theorem canary_verify_refuses_drift : canaryAdmits .verify true false = false := rfl
-
-/-- The override admits a drifted embedder in every mode. -/
-theorem canary_override_admits (mode : CanaryMode) (drifted : Bool) :
-    canaryAdmits mode drifted true = true := by
-  cases mode <;> simp [canaryAdmits]
-
-/-- Only `verify` without the override ever refuses. -/
+/-- `canary_gate` refuses a writer attach exactly under `canary = "verify"`
+with a drifted embedder and no `--allow-embedding-mismatch`. -/
 theorem canary_refuses_iff (mode : CanaryMode) (drifted allow : Bool) :
     canaryAdmits mode drifted allow = false ↔
       mode = .verify ∧ drifted = true ∧ allow = false := by
@@ -1354,7 +1183,8 @@ theorem missingOnly_skips_canary (s : Session K M) (live : Contract K M)
     reembedCmdGated s live allow missingOnly drop mode drifted =
       reembedCmdGated s live allow missingOnly drop .off false := rfl
 
-/-- Under `verify` with a drift, every ordinary writer attach is refused. -/
+/-- Under `canary = "verify"` with a drifted embedder, `canary_gate` refuses
+every ordinary writer attach (`build_attach` step 2c). -/
 theorem writerAttach_verify_drift (s : Session K M) (live : Contract K M) :
     writerAttach s live false .verify true = none := by
   unfold writerAttach
@@ -1417,61 +1247,71 @@ def sA : Session Nat Nat := ⟨some cA, [⟨1, false, some cA⟩]⟩
 /-- A session stamped `cA` with no vector. -/
 def sEmpty : Session Nat Nat := ⟨some cA, [⟨1, false, none⟩]⟩
 
-/-- Without the override the rename is refused; with it, it is relabelled
-and recorded. -/
+/-- `build_attach` refuses a rename of the model without
+`--allow-embedding-mismatch`; with it, the session is relabelled, a
+`SetEmbedding` recorded and the WARN logged. -/
 theorem example_rename :
     attach sA cB false = none ∧
     attach sA cB true = some (⟨some cB, sA.concepts⟩, [.setEmbedding (some cB)]) ∧
     attachWarns sA cB true = true := by decide
 
-/-- Refused even with the override: a width change, and a kind change over
-existing vectors. A kind change over an empty space is allowed. -/
+/-- `build_attach` refuses even with `--allow-embedding-mismatch` a width
+change and a kind change over existing vectors, and allows a kind change over
+an empty space. -/
 theorem example_override_refusals :
     attach sA cD true = none ∧ attach sA cC true = none ∧
     (attach sEmpty cC true).isSome = true := by decide
 
-/-- The WARN fires on the cross-kind attempt the relabel then refuses. -/
+/-- `build_attach` logs the override WARN on a cross-kind attempt that the
+relabel then refuses (the WARN before the relabel, which #296 moved after it).
+-/
 theorem example_warn_without_relabel :
     attachWarns sA cC true = true ∧ attach sA cC true = none := by decide
 
-/-- **The override's mixing, end to end.** Rename `cA` to `cB` over an
-existing vector, write one new vector, and read under `cB`: the read returns
-one vector produced under `cA` and one under `cB`. -/
+/-- With `--allow-embedding-mismatch`, renaming the contract over an existing
+vector and writing one new vector makes the checked vector read return vectors
+of two spaces: the override's mixing, end to end (#296). -/
 theorem override_mixes_reads :
     vectorRead (runAll sA [.attach cB true, .write cB 2 false true]) cB = some [cA, cB] := by
   decide
 
-/-- The same operations without the override: the attach and the write are
-refused, and the read under `cB` is refused too. -/
+/-- Without `--allow-embedding-mismatch`, the rename attach and the
+cross-space write are refused, and the checked vector read
+(`checked_vector_candidates`) under the new contract is refused, so no read
+mixes spaces. -/
 theorem example_no_override_no_mix :
     vectorRead (runAll sA [.attach cB false, .write cB 2 false true]) cB = none ∧
     vectorRead (runAll sA [.attach cB false, .write cB 2 false true]) cA = some [cA] := by
   decide
 
-/-- Re-embed from `cA` to `cC` (another kind) rewrites the vector, then
-swaps the contract; the read returns one space. -/
+/-- `lambo re-embed` to a contract of another kind rewrites every vector, then
+swaps the contract, and the checked vector read afterwards returns one space.
+-/
 theorem example_reembed :
     reembedCmd sA cC false false false =
       some (⟨some cC, [⟨1, false, some cC⟩]⟩, [.upsert 1 (some cC), .setEmbedding (some cC)]) ∧
     vectorRead (runAll sA [.reembed cC [1] false]) cC = some [cC] := by decide
 
-/-- Re-embed's coverage check: a duplicate id, or a missing one, is refused. -/
+/-- `lambo re-embed`'s coverage check refuses an id list with a duplicate or a
+missing concept, so a migration rewrites every vector exactly once or not at
+all. -/
 theorem example_reembed_coverage :
     reembed (⟨some cA, [⟨1, false, some cA⟩, ⟨2, false, some cA⟩]⟩ : Session Nat Nat) cC [1, 1]
       false = none ∧
     reembed (⟨some cA, [⟨1, false, some cA⟩, ⟨2, false, some cA⟩]⟩ : Session Nat Nat) cC [1]
       false = none := by decide
 
-/-- Image vectors block a full re-embed unless dropped. -/
+/-- `lambo re-embed` refuses a full re-embed while image vectors remain unless
+`--drop-images` is given, which clears them and swaps the contract. -/
 theorem example_reembed_images :
     reembed (⟨some cA, [⟨1, true, some cA⟩]⟩ : Session Nat Nat) cC [] false = none ∧
     reembed (⟨some cA, [⟨1, true, some cA⟩]⟩ : Session Nat Nat) cC [] true =
       some (⟨some cC, [⟨1, true, none⟩]⟩, [.upsert 1 none, .setEmbedding (some cC)]) := by
   decide
 
-/-- The canary drift case: the session is under the live contract, and
-`re-embed` refuses to rewrite it in place; the override flag is refused too.
-The repair is a rename hop (`example_rename_hop`). -/
+/-- Before #296, `lambo re-embed` refused to rewrite in place a session
+already under the live contract whose canary drifted, and refused the override
+flag too, leaving the rename hop (`example_rename_hop`) as the only repair. -/
 theorem example_drift_not_reembeddable_in_place :
     reembedCmd sA cA false false false = none ∧ reembedCmd sA cA true false false = none ∧
     canaryAdmits .verify true false = false := by decide
@@ -1480,8 +1320,9 @@ theorem example_drift_not_reembeddable_in_place :
 `llama_model`). -/
 def cA' : Contract Nat Nat := ⟨0, some 2, 4⟩
 
-/-- **The undocumented repair** (finding 1): re-embed to an alias of the same
-width succeeds, and re-embed back to the original name succeeds too. -/
+/-- Finding 1 of #296: `lambo re-embed` to a same-width alias of the contract
+succeeds, and re-embedding back to the original name succeeds too, an
+undocumented repair route. -/
 theorem example_rename_hop :
     reembedCmd sA cA' false false false =
       some (⟨some cA', [⟨1, false, some cA'⟩]⟩, [.upsert 1 (some cA'), .setEmbedding (some cA')]) ∧
@@ -1489,9 +1330,9 @@ theorem example_rename_hop :
       some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA), .setEmbedding (some cA)]) := by
   decide
 
-/-- **Silent re-pin, two routes** (finding 2). The round trip's second hop
-(prior `cA'`, live `cA`) and the re-embed of an unrecorded session with a
-text concept (prior none) both re-pin `cA` without the warning. -/
+/-- Finding 2 of #296: the rename round trip's second hop and the re-embed of
+an unrecorded session with a text concept both re-pin the canary without the
+warning (`re_embed.rs:209-215`). -/
 theorem example_silent_repin :
     repins (⟨some cA', [⟨1, false, some cA'⟩]⟩ : Session Nat Nat) cA false false .verify = true ∧
     repinWarns (⟨some cA', [⟨1, false, some cA'⟩]⟩ : Session Nat Nat) cA = false ∧
@@ -1506,20 +1347,23 @@ theorem example_drifted_backfill :
     reembedCmdGated sEmpty cA false true false .verify true =
       some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA)]) := by decide
 
-/-- The weak same-kind guard (finding 5): vectors from model `0` are
-relabelled as model `1` of the same kind and width. -/
+/-- Finding 5 of #296: the override's same-kind guard is weak: `build_attach`
+relabels vectors from model `0` as model `1` of the same kind and width, and
+refuses another kind. -/
 theorem example_same_kind_relabel :
     (attach sA cB true).isSome = true ∧ (attach sA cC true).isSome = false := by decide
 
-/-- A backfill fills a missing vector in the session's own space and keeps
-the contract; from another space it is refused. -/
+/-- `lambo re-embed --missing-only` (`Graph::embed_missing`) fills a missing
+vector in the session's own space and keeps its contract, and refuses a
+backfill from another space. -/
 theorem example_backfill :
     reembedCmd sEmpty cA false true false =
       some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA)]) ∧
     reembedCmd sEmpty cB false true false = none := by decide
 
-/-- An ordinary write after an override keeps the relabelled contract, and
-cannot move it back. -/
+/-- After an override relabel, an ordinary write (`record_action_against` with
+the live embedder's vector) keeps the relabelled contract and cannot move the
+session back to the old one. -/
 theorem example_write_after_override :
     (runAll sA [.attach cB true, .write cA 2 false true]).contract = some cB := by decide
 
@@ -1821,8 +1665,9 @@ theorem missingOnly_fixed_refuses_drift (s : Session K M) (live : Contract K M)
   cases drop <;> cases same <;> cases repin <;>
     simp [reembedCmdFixed, hc, canaryAdmits, PinState.isDrifted]
 
-/-- Under `verify` with a drift the backfill writes nothing, whatever the
-session's contract: it is refused, or it is a no-op. -/
+/-- Since #296, `lambo re-embed --missing-only` under `canary = "verify"` with
+a drifted embedder writes nothing to the store, whatever the session's
+contract: the canary gate refuses it or it is a no-op. -/
 theorem missingOnly_fixed_verify_drift_writes_nothing (s : Session K M) (live : Contract K M)
     (r : Session K M × List (Mut K M))
     (h : reembedCmdFixed s live false true false false false .verify .drifted = some r) :
@@ -1980,7 +1825,9 @@ theorem runAll2_keeps (c : Contract K M) :
       exact ih s' (step2_keeps s s' c op m hc (hops op (by simp)) hstep) hrest
     · exact ih s hc hrest
 
-/-- The ordinary operations alone. -/
+/-- Since #296, no sequence of ordinary operations (writes, stamps, the
+canary-gated `--missing-only` backfill) changes a stamped session's contract;
+only an override attach or a full `lambo re-embed` does. -/
 theorem runAll2_ordinary_keeps (c : Contract K M) (ops : List (Op2 K M)) (s : Session K M)
     (hc : s.contract = some c) (hops : ∀ op ∈ ops, op.ordinary = true) :
     (runAll2 s ops).contract = some c :=
@@ -2113,10 +1960,11 @@ theorem pinAfterFixed_no_silent_replace (s : Session K M) (live : Contract K M)
       · exact ⟨rfl, fixed_repin_unsafe_needs_optin s live false drop same repin mode pin hr hunsafe⟩
       · rw [ite_eq_right hr] at h; exact absurd rfl h
 
-/-- The pins of the concrete cases: the `--missing-only` gate pins an absent
-pin (not under `off`) and leaves a drifted one under `warn`; the drift repair
-replaces the drifted pin; without `--repin-canary` the refused migration
-leaves it. -/
+/-- The canary pins the fixed `lambo re-embed` writes on the concrete
+sessions: the `--missing-only` gate pins an absent pin (not under `canary =
+"off"`) and leaves a drifted one under `warn`, the drift repair replaces the
+drifted pin, and without `--repin-canary` a refused migration leaves it
+(`re_embed.rs`, #296). -/
 theorem example_pins_written :
     pinAfterFixed sEmpty cA false true false false false .warn .absent = .agrees ∧
     pinAfterFixed sEmpty cA false true false false false .off .absent = .absent ∧
@@ -2205,489 +2053,5 @@ theorem example_repin_guard :
 refuses; it still fires on the rename that happens. -/
 theorem example_warn_only_after_relabel :
     attachWarnsFixed sA cC true = false ∧ attachWarnsFixed sA cB true = true := by decide
-
-/-! # The durable re-embed of a contract-less session (#322)
-
-Everything above reads a re-embed's result off the session it returns, which
-is the in-memory graph. The store applies the batch, and the store's rules
-are not the graph's. This part models the store applying a flushed batch.
-
-Rust items modelled (at the fix commit):
-
-* Applying one flushed batch, in its own order (`MemoryStore::flush`,
-  `src/store/memory.rs`; SQLite and Postgres through
-  `crate::store::batch::plan_flush`, which makes every `SetEmbedding` a
-  barrier, `src/store/sqlite/write_rows.rs` and `src/store/pg/write_rows.rs`):
-  `applyBatch`. An upsert replaces the concept's vector (`applyMut`). A
-  `SetEmbedding` of a contract on a store with none is also the **first-stamp
-  legacy quarantine**: every vector in the session is nulled, then the
-  contract is stamped (`memory.rs` `SetEmbedding` arm; SQLite `set_embedding`;
-  Postgres `QUARANTINE_LEGACY_EMBEDDINGS_SQL`), in the same transaction.
-  SQLite also nulls on a width change; a re-embed never changes width
-  (`reembed_refuses_width`), so that rule is left out.
-* `quarantine` (above) is the load: the graph of a session with no durable
-  contract holds no vector, while the store's rows keep theirs.
-* `Graph::reembed` after the fix (`src/graph/graph/embeddings.rs`):
-  `reembedOrdered`. On a session with no contract it emits the
-  `SetEmbedding` **first**, so the store's quarantine runs before the new
-  vectors land; on a stamped session the batch is unchanged (vectors first,
-  contract last).
-* `lambo re-embed` after the fix: `reembedCmd322`, `reembedCmdFixed` with
-  `reembedOrdered` in place of `reembed`.
-
-## The bug (`reembed_contractless_durable_loses_vectors`)
-
-On a contract-less session the old batch is the upserts, then
-`SetEmbedding`. The store writes the new vectors, then the first stamp nulls
-every vector, the new ones included. The graph says every text concept
-carries a vector under the live contract (the coverage report reads the
-graph: N/N); the store holds the live contract and no vector at all
-(`example_contractless_bug`).
-
-## Results
-
-* `reembedOrdered_contractless_durable`, `reembedCmd322_contractless_durable`:
-  after a successful full re-embed of a non-empty contract-less session, the
-  store is under the live contract, holds one space, and every text concept
-  holds a vector of the live contract.
-* `reembedOrdered_contractless_matches_graph`: with distinct node ids (the
-  graph's node map makes them distinct), the store after the batch is exactly
-  the graph the re-embed returns, so the coverage the verb reports is the
-  store's.
-* `reembedOrdered_stamped_eq`, `reembedCmd322_stamped_agrees`: on a session
-  that already has a contract nothing changes, the batch included.
-  `reembedOrdered_graph_eq`: in every case the graph is the old one; only the
-  batch order moved (`reembedBatchOrdered_perm`), with the `SetEmbedding`
-  first on a contract-less session (`reembedOrdered_contract_first`).
-* `missingOnly_contractless_writes_nothing`: `--missing-only` has no such
-  hazard. On a non-empty contract-less session it is refused up front,
-  before anything is embedded or written (the backfill never stamps a
-  contract).
-
-Modelling the store forced one observation: the old theorems are all true of
-the graph, and `reembed_contract_last` ("vectors first, contract last") was
-read as a durability argument. It is one only for a session that already has
-a contract. For the first stamp the order has to be the other way round, the
-same order an ordinary first write already uses (`write` emits its
-`SetEmbedding` before its upsert).
-
-Not modelled: the tier's index (`Tiered.lean`). With the `SetEmbedding`
-first, its projection meets the contract before the upserts and indexes them
-under it, as for any first write.
--/
-
-/-- One mutation applied by the store. A contract stamped on a store with no
-contract nulls every vector first (the first-stamp legacy quarantine). -/
-def applyMut (d : Session K M) : Mut K M → Session K M
-  | .upsert id v =>
-    { d with concepts := d.concepts.map (fun c => if c.id = id then { c with vec := v } else c) }
-  | .setEmbedding c =>
-    { contract := c,
-      concepts := if d.contract.isNone && c.isSome
-        then d.concepts.map (fun x => { x with vec := none }) else d.concepts }
-
-/-- One flushed batch, applied in order in one transaction. -/
-def applyBatch (d : Session K M) (m : List (Mut K M)) : Session K M := m.foldl applyMut d
-
-/-- The fixed batch: on a session with no contract, the contract first. -/
-def reembedBatchOrdered (s : Session K M) (live : Contract K M) (ids : List Nat) (drop : Bool) :
-    List (Mut K M) :=
-  if s.contract = none then
-    .setEmbedding (some live) :: (ids.map (fun i => .upsert i (some live)) ++
-      (if drop then (imageVectorIds s).map (fun i => .upsert i none) else []))
-  else reembedBatch s live ids drop
-
-/-- `Graph::reembed` after the fix: the same checks and graph, the fixed batch. -/
-def reembedOrdered (s : Session K M) (live : Contract K M) (ids : List Nat) (drop : Bool) :
-    Option (Session K M × List (Mut K M)) :=
-  if reembedOk s live ids drop then
-    some (⟨some live, rewrite s.concepts ids live drop⟩, reembedBatchOrdered s live ids drop)
-  else none
-
-/-- `lambo re-embed` after the fix for #322: `reembedCmdFixed` with
-`reembedOrdered`, and `--missing-only` refused up front on a non-empty
-session with no contract (the backfill would refuse it anyway, after
-embedding). -/
-def reembedCmd322 (s : Session K M) (live : Contract K M)
-    (allow missingOnly drop same repin : Bool) (mode : CanaryMode) (pin : PinState) :
-    Option (Session K M × List (Mut K M)) :=
-  if allow then none
-  else if missingOnly && (drop || same || repin) then none
-  else if repin && decide (mode = .off) then none
-  else if missingOnly && decide (s.contract = some live) &&
-      !canaryAdmits mode pin.isDrifted false then none
-  else if !missingOnly && !(imageVectorIds s).isEmpty && !drop then none
-  else if s.concepts.isEmpty then some (s, [])
-  else if missingOnly && decide (s.contract = none) then none
-  else if missingOnly then
-    let ids := (s.concepts.filter (fun c => !c.image && c.vec.isNone)).map (·.id)
-    if ids.isEmpty then some (s, []) else backfill s live ids
-  else if same != decide (s.contract = some live) then none
-  else if !(decide (mode = .off) || repin || pin.safeToReplace) then none
-  else if same then reembedSame s live (textIds s) drop
-  else reembedOrdered s live (textIds s) drop
-
-/-! ### The store applying a batch -/
-
-omit [DecidableEq K] [DecidableEq M] in
-theorem applyBatch_append (d : Session K M) (a b : List (Mut K M)) :
-    applyBatch d (a ++ b) = applyBatch (applyBatch d a) b := by
-  simp [applyBatch, List.foldl_append]
-
-omit [DecidableEq K] [DecidableEq M] in
-/-- Upserts of one vector `v` set it on every listed concept. -/
-theorem applyBatch_upserts (v : Option (Contract K M)) :
-    ∀ (ids : List Nat) (d : Session K M),
-      applyBatch d (ids.map (fun i => .upsert i v)) =
-        ({ d with concepts :=
-            d.concepts.map (fun c => if c.id ∈ ids then { c with vec := v } else c) } :
-          Session K M) := by
-  intro ids
-  induction ids with
-  | nil => intro d; simp [applyBatch]
-  | cons i rest ih =>
-    intro d
-    show applyBatch (applyMut d (.upsert i v)) (rest.map (fun i => .upsert i v)) = _
-    rw [ih]
-    simp only [applyMut, List.map_map]
-    congr 1
-    apply List.map_congr_left
-    intro c _
-    by_cases hi : c.id = i
-    · by_cases hr : c.id ∈ rest <;> simp [hi]
-    · by_cases hr : c.id ∈ rest <;> simp [hi, hr]
-
-omit [DecidableEq K] [DecidableEq M] in
-/-- Upserts never move the store's contract. -/
-theorem applyBatch_upserts_contract :
-    ∀ (l : List (Mut K M)) (d : Session K M), (∀ x ∈ l, x.isUpsert = true) →
-      (applyBatch d l).contract = d.contract := by
-  intro l
-  induction l with
-  | nil => intro d _; rfl
-  | cons x rest ih =>
-    intro d hl
-    show (applyBatch (applyMut d x) rest).contract = _
-    rw [ih _ (fun y hy => hl y (by simp [hy]))]
-    have := hl x (by simp)
-    cases x with
-    | upsert _ _ => rfl
-    | setEmbedding _ => simp [Mut.isUpsert] at this
-
-omit [DecidableEq K] [DecidableEq M] in
-/-- The image-drop upserts of the re-embed batch are upserts. -/
-theorem dropUpserts_isUpsert (s : Session K M) (drop : Bool) :
-    ∀ x ∈ (if drop then (imageVectorIds s).map (fun i => (.upsert i none : Mut K M)) else []),
-      x.isUpsert = true := by
-  intro x hx
-  cases drop with
-  | true =>
-    simp only [ite_true, List.mem_map] at hx
-    obtain ⟨i, _, rfl⟩ := hx
-    rfl
-  | false => simp at hx
-
-omit [DecidableEq K] [DecidableEq M] in
-/-- The graph of a loaded contract-less session holds no image vector. -/
-theorem imageVectorIds_quarantine (d : Session K M) (hd : d.contract = none) :
-    imageVectorIds (quarantine d) = [] := by
-  simp [imageVectorIds, quarantine, hd, List.filter_map, Function.comp_def]
-
-/-- What a successful re-embed's checks give: every text concept is covered
-once. -/
-theorem reembedOk_cover {s : Session K M} {live : Contract K M} {ids : List Nat} {drop : Bool}
-    (hg : reembedOk s live ids drop = true) : ∀ i ∈ textIds s, i ∈ ids := by
-  unfold reembedOk at hg
-  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at hg
-  obtain ⟨⟨⟨⟨_, _⟩, hdist⟩, hlen⟩, hsub⟩ := hg
-  exact cover_of_distinct ids (textIds s) hdist hsub hlen
-
-/-- The graph after a successful re-embed: every text concept carries a
-vector of the live contract (the coverage the verb reports). -/
-theorem reembed_text_full (s s' : Session K M) (live : Contract K M) (ids : List Nat)
-    (drop : Bool) (m : List (Mut K M)) (h : reembed s live ids drop = some (s', m)) :
-    ∀ c ∈ s'.concepts, c.image = false → c.vec = some live := by
-  unfold reembed at h
-  split at h
-  · rename_i hg
-    have hcov := reembedOk_cover hg
-    simp only [Option.some.injEq, Prod.mk.injEq] at h
-    obtain ⟨rfl, rfl⟩ := h
-    intro c' hc' himg'
-    simp only [rewrite, List.mem_map] at hc'
-    obtain ⟨c, hc, rfl⟩ := hc'
-    cases himgc : c.image with
-    | false =>
-      have hct : c.id ∈ textIds s := by
-        simp only [textIds, List.mem_map, List.mem_filter]
-        exact ⟨c, ⟨hc, by simp [himgc]⟩, rfl⟩
-      simp [hcov c.id hct]
-    | true =>
-      cases drop <;> simp [himgc] at himg'
-  · cases h
-
-/-! ### The bug -/
-
-/-- **The bug (#322).** On a non-empty contract-less session (its graph
-loaded through the quarantine), a successful old `re-embed` reports full
-coverage from the graph, every text concept carrying a live vector, while the
-store ends under the live contract with no vector at all. -/
-theorem reembed_contractless_durable_loses_vectors (d s' : Session K M) (live : Contract K M)
-    (drop : Bool) (m : List (Mut K M)) (hd : d.contract = none) (hne : d.concepts ≠ [])
-    (h : reembedCmd (quarantine d) live false false drop = some (s', m)) :
-    (applyBatch d m).contract = some live ∧ hasVectors (applyBatch d m) = false ∧
-      ∀ c ∈ s'.concepts, c.image = false → c.vec = some live := by
-  have hne' : (quarantine d).concepts ≠ [] := by
-    simp [quarantine, hd, hne]
-  rw [reembedCmd_full _ live drop hne'] at h
-  by_cases hi : (!(imageVectorIds (quarantine d)).isEmpty && !drop) = true
-  · rw [ite_eq_left hi] at h; cases h
-  rw [ite_eq_right hi] at h
-  have hfull := reembed_text_full _ s' live _ drop m h
-  unfold reembed at h
-  split at h
-  · simp only [Option.some.injEq, Prod.mk.injEq] at h
-    obtain ⟨rfl, rfl⟩ := h
-    unfold reembedBatch
-    rw [applyBatch_append]
-    have hc : (applyBatch d ((textIds (quarantine d)).map (fun i => .upsert i (some live)) ++
-        (if drop then (imageVectorIds (quarantine d)).map (fun i => .upsert i none) else []))).contract
-        = none := by
-      rw [applyBatch_upserts_contract _ d, hd]
-      intro x hx
-      rw [List.mem_append] at hx
-      rcases hx with hx | hx
-      · simp only [List.mem_map] at hx
-        obtain ⟨i, _, rfl⟩ := hx
-        rfl
-      · exact dropUpserts_isUpsert _ drop x hx
-    refine ⟨rfl, ?_, hfull⟩
-    show hasVectors (applyMut (applyBatch d _) (.setEmbedding (some live))) = false
-    unfold applyMut
-    rw [hc]
-    simp [hasVectors]
-  · cases h
-
-/-! ### The fix -/
-
-/-- **Nothing changes for a stamped session**: the fixed `Graph::reembed` is
-the old one, batch included. -/
-theorem reembedOrdered_stamped_eq (s : Session K M) (live : Contract K M) (ids : List Nat)
-    (drop : Bool) (hc : s.contract ≠ none) : reembedOrdered s live ids drop = reembed s live ids drop := by
-  simp [reembedOrdered, reembed, reembedBatchOrdered, hc]
-
-/-- The fix moves no graph state: the session `re-embed` leaves in memory is
-the old one in every case. -/
-theorem reembedOrdered_graph_eq (s : Session K M) (live : Contract K M) (ids : List Nat)
-    (drop : Bool) :
-    (reembedOrdered s live ids drop).map Prod.fst = (reembed s live ids drop).map Prod.fst := by
-  unfold reembedOrdered reembed
-  split <;> rfl
-
-omit [DecidableEq K] [DecidableEq M] in
-/-- The fixed batch holds the old batch's mutations, reordered. -/
-theorem reembedBatchOrdered_perm (s : Session K M) (live : Contract K M) (ids : List Nat)
-    (drop : Bool) : (reembedBatchOrdered s live ids drop).Perm (reembedBatch s live ids drop) := by
-  unfold reembedBatchOrdered reembedBatch
-  split
-  · exact (List.perm_append_singleton _ _).symm
-  · exact List.Perm.refl _
-
-/-- On a contract-less session the fixed batch stamps the contract first, then
-writes only upserts. -/
-theorem reembedOrdered_contract_first (s s' : Session K M) (live : Contract K M) (ids : List Nat)
-    (drop : Bool) (m : List (Mut K M)) (hc : s.contract = none)
-    (h : reembedOrdered s live ids drop = some (s', m)) :
-    ∃ rest, m = .setEmbedding (some live) :: rest ∧ ∀ x ∈ rest, x.isUpsert = true := by
-  unfold reembedOrdered at h
-  split at h
-  · simp only [Option.some.injEq, Prod.mk.injEq] at h
-    obtain ⟨rfl, rfl⟩ := h
-    refine ⟨ids.map (fun i => .upsert i (some live)) ++
-      (if drop then (imageVectorIds s).map (fun i => .upsert i none) else []),
-      by simp [reembedBatchOrdered, hc], ?_⟩
-    intro x hx
-    rw [List.mem_append] at hx
-    rcases hx with hx | hx
-    · simp only [List.mem_map] at hx
-      obtain ⟨i, _, rfl⟩ := hx
-      rfl
-    · exact dropUpserts_isUpsert _ drop x hx
-  · cases h
-
-/-- The store after the fixed batch on a contract-less session: the live
-contract, every vector nulled by the first stamp, then the listed ones set. -/
-theorem reembedOrdered_contractless_store (d s' : Session K M) (live : Contract K M)
-    (ids : List Nat) (drop : Bool) (m : List (Mut K M)) (hd : d.contract = none)
-    (h : reembedOrdered (quarantine d) live ids drop = some (s', m)) :
-    reembedOk (quarantine d) live ids drop = true ∧
-      s' = ⟨some live, rewrite (quarantine d).concepts ids live drop⟩ ∧
-      applyBatch d m = ⟨some live, d.concepts.map (fun c =>
-        if c.id ∈ ids then { c with vec := some live } else { c with vec := none })⟩ := by
-  have hq : (quarantine d).contract = none := by simp [quarantine, hd]
-  unfold reembedOrdered at h
-  split at h
-  · rename_i hg
-    simp only [Option.some.injEq, Prod.mk.injEq] at h
-    obtain ⟨rfl, rfl⟩ := h
-    refine ⟨hg, rfl, ?_⟩
-    simp only [reembedBatchOrdered, hq, ite_true, imageVectorIds_quarantine d hd, List.map_nil,
-      ite_self, List.append_nil]
-    show applyBatch (applyMut d (.setEmbedding (some live))) _ = _
-    rw [applyBatch_upserts]
-    simp only [applyMut, hd, Option.isNone_none, Option.isSome_some, Bool.and_self, ite_true,
-      List.map_map]
-    rfl
-  · cases h
-
-/-- **The fix (#322).** After a successful fixed re-embed of a contract-less
-session (its graph loaded through the quarantine), the store is under the
-live contract, in one space, and every text concept holds a vector of the
-live contract. -/
-theorem reembedOrdered_contractless_durable (d s' : Session K M) (live : Contract K M)
-    (ids : List Nat) (drop : Bool) (m : List (Mut K M)) (hd : d.contract = none)
-    (h : reembedOrdered (quarantine d) live ids drop = some (s', m)) :
-    (applyBatch d m).contract = some live ∧ oneSpace (applyBatch d m) = true ∧
-      ∀ c ∈ (applyBatch d m).concepts, c.image = false → c.vec = some live := by
-  obtain ⟨hg, _, hs⟩ := reembedOrdered_contractless_store d s' live ids drop m hd h
-  have hcov := reembedOk_cover hg
-  rw [hs]
-  refine ⟨rfl, ?_, ?_⟩
-  · rw [oneSpace_iff]
-    intro c hc
-    simp only [List.mem_map] at hc
-    obtain ⟨c0, _, rfl⟩ := hc
-    by_cases hi : c0.id ∈ ids <;> simp [hi]
-  · intro c hc himg
-    simp only [List.mem_map] at hc
-    obtain ⟨c0, hc0, rfl⟩ := hc
-    have himg0 : c0.image = false := by
-      by_cases hi : c0.id ∈ ids <;> simp_all
-    have hct : c0.id ∈ textIds (quarantine d) := by
-      simp only [textIds, quarantine, hd, List.mem_map, List.mem_filter]
-      exact ⟨{ c0 with vec := none }, ⟨⟨c0, hc0, rfl⟩, by simp [himg0]⟩, rfl⟩
-    simp [hcov c0.id hct]
-
-omit [DecidableEq K] [DecidableEq M] in
-/-- Distinct ids name distinct concepts. -/
-theorem distinct_ids_inj :
-    ∀ (l : List (Concept K M)), distinct (l.map (·.id)) = true →
-      ∀ a ∈ l, ∀ b ∈ l, a.id = b.id → a = b := by
-  intro l
-  induction l with
-  | nil => intro _ a ha; cases ha
-  | cons x t ih =>
-    intro hd a ha b hb hab
-    simp only [List.map_cons, distinct, Bool.and_eq_true, decide_eq_true_eq] at hd
-    obtain ⟨hx, ht⟩ := hd
-    rcases List.mem_cons.mp ha with hax | ha'
-    · rcases List.mem_cons.mp hb with hbx | hb'
-      · rw [hax, hbx]
-      · subst hax; exact (hx (List.mem_map.mpr ⟨b, hb', hab.symm⟩)).elim
-    · rcases List.mem_cons.mp hb with hbx | hb'
-      · subst hbx; exact (hx (List.mem_map.mpr ⟨a, ha', hab⟩)).elim
-      · exact ih ht a ha' b hb' hab
-
-/-- **The coverage report is the store's.** With distinct node ids, the store
-after a successful fixed re-embed of a contract-less session is exactly the
-graph the re-embed returns. -/
-theorem reembedOrdered_contractless_matches_graph (d s' : Session K M) (live : Contract K M)
-    (ids : List Nat) (drop : Bool) (m : List (Mut K M)) (hd : d.contract = none)
-    (hid : distinct (d.concepts.map (·.id)) = true)
-    (h : reembedOrdered (quarantine d) live ids drop = some (s', m)) :
-    applyBatch d m = s' := by
-  obtain ⟨hg, hs', hs⟩ := reembedOrdered_contractless_store d s' live ids drop m hd h
-  have hsub : ∀ i ∈ ids, i ∈ textIds (quarantine d) := by
-    unfold reembedOk at hg
-    simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at hg
-    exact hg.2
-  rw [hs, hs']
-  simp only [quarantine, hd, rewrite, List.map_map]
-  congr 1
-  apply List.map_congr_left
-  intro c hc
-  cases himg : c.image with
-  | false => by_cases hi : c.id ∈ ids <;> simp [himg, hi]
-  | true =>
-    have hni : c.id ∉ ids := by
-      intro hi
-      have ht := hsub c.id hi
-      simp only [textIds, quarantine, hd, List.mem_map, List.mem_filter] at ht
-      obtain ⟨_, ⟨⟨t, ht, rfl⟩, htimg⟩, hteq⟩ := ht
-      have := distinct_ids_inj d.concepts hid t ht c hc hteq
-      subst this
-      simp [himg] at htimg
-    cases drop <;> simp [himg, hni]
-
-/-- The fixed verb on a stamped session is the #296 verb, batch included. -/
-theorem reembedCmd322_stamped_agrees (s : Session K M) (live : Contract K M)
-    (allow missingOnly drop same repin : Bool) (mode : CanaryMode) (pin : PinState)
-    (hc : s.contract ≠ none) :
-    reembedCmd322 s live allow missingOnly drop same repin mode pin =
-      reembedCmdFixed s live allow missingOnly drop same repin mode pin := by
-  have hn : decide (s.contract = none) = false := by simp [hc]
-  unfold reembedCmd322 reembedCmdFixed
-  rw [reembedOrdered_stamped_eq s live _ drop hc, hn, Bool.and_false]
-  simp only [Bool.false_eq_true, ↓reduceIte]
-
-/-- **The fixed verb on a contract-less session.** A successful full run on a
-non-empty contract-less session leaves the store under the live contract, in
-one space, with every text concept holding a live vector. -/
-theorem reembedCmd322_contractless_durable (d s' : Session K M) (live : Contract K M)
-    (drop same repin : Bool) (mode : CanaryMode) (pin : PinState) (m : List (Mut K M))
-    (hd : d.contract = none) (hne : d.concepts ≠ [])
-    (h : reembedCmd322 (quarantine d) live false false drop same repin mode pin = some (s', m)) :
-    (applyBatch d m).contract = some live ∧ oneSpace (applyBatch d m) = true ∧
-      ∀ c ∈ (applyBatch d m).concepts, c.image = false → c.vec = some live := by
-  have hq : (quarantine d).contract = none := by simp [quarantine, hd]
-  have hne' : (quarantine d).concepts.isEmpty = false := by
-    cases hcs : d.concepts with
-    | nil => exact absurd hcs hne
-    | cons _ _ => simp [quarantine, hd, hcs]
-  unfold reembedCmd322 at h
-  cases same <;>
-    simp only [Bool.false_eq_true, ite_false, Bool.false_and, hne', Bool.not_false,
-      Bool.true_and, hq, reduceCtorEq, decide_false, bne_self_eq_false, ite_true] at h
-  · split at h
-    · cases h
-    · split at h
-      · cases h
-      · split at h
-        · cases h
-        · exact reembedOrdered_contractless_durable d s' live _ drop m hd h
-  · simp at h
-
-/-- **`--missing-only` has no such hazard**, and is refused up front: on a
-non-empty contract-less session the fixed verb refuses it before anything is
-embedded or written. (The #296 verb refused it too, through the backfill,
-but only after embedding; this pins the up-front refusal.) -/
-theorem missingOnly_contractless_writes_nothing (s : Session K M) (live : Contract K M)
-    (mode : CanaryMode) (pin : PinState) (hc : s.contract = none) (hne : s.concepts ≠ []) :
-    reembedCmd322 s live false true false false false mode pin = none := by
-  have hne' : s.concepts.isEmpty = false := by
-    cases hcs : s.concepts with
-    | nil => exact absurd hcs hne
-    | cons _ _ => rfl
-  simp [reembedCmd322, hc, hne']
-
-/-- **The #322 scenario.** A contract-less store with a legacy vector on
-concept 1 and none on concept 2; its graph is loaded through the quarantine.
-The old re-embed to `cA` reports both concepts embedded, and the store ends
-under `cA` with no vector. The fixed one leaves both vectors in the store,
-which then equals the graph; a stamped session's batch is unchanged. -/
-theorem example_contractless_bug :
-    let d : Session Nat Nat := ⟨none, [⟨1, false, some cC⟩, ⟨2, false, none⟩]⟩
-    let g : Session Nat Nat := ⟨some cA, [⟨1, false, some cA⟩, ⟨2, false, some cA⟩]⟩
-    (reembedCmd (quarantine d) cA false false false).map Prod.fst = some g ∧
-    (reembedCmd (quarantine d) cA false false false).map (fun r => applyBatch d r.2) =
-      some ⟨some cA, [⟨1, false, none⟩, ⟨2, false, none⟩]⟩ ∧
-    (reembedCmd322 (quarantine d) cA false false false false false .warn .absent).map Prod.fst =
-      some g ∧
-    (reembedCmd322 (quarantine d) cA false false false false false .warn .absent).map
-      (fun r => applyBatch d r.2) = some g ∧
-    reembedCmd322 sA cC false false false false false .warn .absent =
-      reembedCmdFixed sA cC false false false false false .warn .absent := by
-  decide
-
 
 end Lambo.Contract

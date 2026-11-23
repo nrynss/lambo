@@ -22,10 +22,6 @@ the three conditions for one concept, before the per-sweep cap is applied:
 * `below`: `score < bar`;
 * `dependedOn`: a Resource with dependents (`resources_with_dependents`).
 
-Not modelled: how the score and the reachable set are computed, the edge
-cleanup of step 1, and the cascade pass (which applies the same
-"not protected" filter).
-
 ## Results
 
 * `protected_not_collectable`, `venerable_canonical_never_collected`: a
@@ -38,9 +34,13 @@ cleanup of step 1, and the cascade pass (which applies the same
   from the score cut and from nothing else.
 * `contradiction_keeps_nothing_alive`: connectivity is the only structural
   protection, and `Contradicts` edges do not count toward it.
-* `taken_le_budget`, `cap_ge_floor`: a sweep collects at most its cap.
+* `cap_ge_floor`: the collection cap is never below `MIN_COLLECT_CAP`.
 * `bump_mono`, `bump_never_resets`: `gc_survived` only grows.
 * `idle_never_sweeps`: "an idle session never sweeps on time alone".
+
+Boundary: how the score and the reachable set are computed, the edge cleanup
+of step 1 and the cascade pass (which applies the same "not protected"
+filter) are not modelled; the six conditions are inputs per concept.
 -/
 
 namespace Lambo.Gc
@@ -154,8 +154,9 @@ def EdgeType.countsTowardGcConnectivity : EdgeType → Bool
 def hasGcConnection (incident : List EdgeType) : Bool :=
   incident.any EdgeType.countsTowardGcConnectivity
 
-/-- A concept whose only incident edges are contradictions and suspected
-supersessions has no GC connection: it is an orphan. -/
+/-- `counts_toward_gc_connectivity` excludes `Contradicts` and
+`SuspectedSupersedes`, so a concept whose only edges are those is an orphan to
+`gc.rs`. -/
 theorem only_contradictions_is_orphan :
     ∀ (incident : List EdgeType),
       (∀ e, e ∈ incident → e = .contradicts ∨ e = .suspectedSupersedes) →
@@ -183,24 +184,12 @@ theorem only_contradictions_is_orphan :
 /-- `collection_cap`: the larger of the floor and the fractional cap. -/
 def collectionCap (minCollectCap fractional : Nat) : Nat := max minCollectCap fractional
 
+/-- `collection_cap` is never below `MIN_COLLECT_CAP`: the per-sweep cap always
+allows at least that many collections. -/
 theorem cap_ge_floor (minCollectCap fractional : Nat) :
     minCollectCap ≤ collectionCap minCollectCap fractional := by
   unfold collectionCap
   exact Nat.le_max_left minCollectCap fractional
-
-/-- `candidates[..take]` with `take = min(len, budget)`: a sweep removes at
-most its budget, and what it removes is a prefix of the candidate order
-(orphans, then disconnected components, then the score cut's weakest first). -/
-theorem taken_le_budget {ι : Type} (candidates : List ι) (budget : Nat) :
-    (candidates.take (min candidates.length budget)).length ≤ budget := by
-  first
-    | (rw [List.length_take]; omega)
-    | exact Nat.le_trans (List.length_take_le _ _) (Nat.min_le_right _ _)
-
-/-- Nothing is held back exactly when the candidates fit in the budget. -/
-theorem none_deferred_iff {ι : Type} (candidates : List ι) (budget : Nat) :
-    candidates.length - min candidates.length budget = 0 ↔ candidates.length ≤ budget := by
-  omega
 
 /-! ## Survivor bumps -/
 
@@ -228,7 +217,7 @@ theorem bump_never_resets (g : Nat) : ∀ (n : Nat), g ≤ Nat.repeat bump n g :
     show g ≤ bump (Nat.repeat bump n g)
     exact Nat.le_trans ih (bump_mono _)
 
-/-- Below saturation a bump adds exactly one survival. -/
+/-- Below `i32::MAX`, `bump_gc_survived` adds exactly one survival. -/
 theorem bump_adds_one (g : Nat) (h : g < i32Max) : bump g = g + 1 := by
   unfold bump
   exact ite_eq_left h

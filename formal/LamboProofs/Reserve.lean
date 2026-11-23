@@ -20,6 +20,10 @@ Reservations are advisory: they produce a "Reserved by" warning on recall and
 * `active_iff`: "active iff `now < expires_at`".
 * `release_owner_only`: only the holder can release, and it can release its
   own expired lock.
+
+Boundary: one node's reservation alone; how recall renders the "Reserved by"
+warning, the reservation's persistence, and the clock are not modelled (`now`
+is an input).
 -/
 
 namespace Lambo.Reserve

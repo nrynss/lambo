@@ -1397,7 +1397,7 @@ mod tests {
     ///
     /// Mirrors `Policy.reused_action_dependency_is_dated_by_its_writer` (the
     /// scenario) and `Policy.dependentOriginsW_not_own` (own origin is the
-    /// writing turn) in `formal/LamboProofs/Policy.lean`.
+    /// writing turn) in `formal/LamboProofs/Policy/Support.lean`.
     #[test]
     fn a_reused_actions_new_dependency_is_dated_by_the_turn_that_wrote_it() {
         use crate::graph::action::{record_action, Action};
@@ -1487,7 +1487,7 @@ mod tests {
     /// which keeps the dependent-origin dating, still credits day 0.
     ///
     /// Mirrors `Policy.own_origin_is_the_writing_turn` and
-    /// `Policy.dependentOriginsW_not_own` in `formal/LamboProofs/Policy.lean`.
+    /// `Policy.dependentOriginsW_not_own` in `formal/LamboProofs/Policy/Support.lean`.
     #[test]
     fn a_dependence_written_in_the_pillars_own_turn_no_longer_counts() {
         use crate::graph::action::{record_action, Action};

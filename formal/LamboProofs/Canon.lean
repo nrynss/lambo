@@ -24,7 +24,16 @@ the stage predicates (`src/canon/stage1.rs`, `stage2.rs`, `stage3.rs`).
 * `stage3_promotions_le`, `stage3_no_overflow`: Stage 3 promotes at most the
   remaining budget, so "a cycle can never create the overflow it then
   demotes".
-* boundary facts for the three stage predicates.
+* `stage3_boundary`, `no_demotion_no_cooldown`, `cooldown_ends`: the stage
+  predicates' edges (the Stage 3 bar is strict, `None` is not a cooldown, a
+  cooldown ends exactly at `t + cooldown`).
+
+Boundary: whether a concept is a supersession target, on a stage's plan or
+passes it, and whether the budget pass demotes it are inputs (`Flags`), as are
+the stage predicates' arguments (GC survival, dependent interactions,
+coverage, the last demotion, blast radius); how the evaluator gathers and
+computes them is not modelled, nor which concepts the budget pass demotes
+(only how many Stage 3 promotes).
 -/
 
 namespace Lambo.Canon
@@ -55,7 +64,8 @@ def legal : Status → Status → Bool
 
 /-! ## The gate's table -/
 
-/-- Self-loops are rejected. -/
+/-- `legal_canonization_transition` refuses a transition from a status to
+itself. -/
 theorem legal_irrefl (s : Status) : legal s s = false := by
   cases s <;> rfl
 
@@ -77,11 +87,6 @@ theorem canonical_only_from_venerable (a : Status) (h : legal a .canonical = tru
 theorem legal_rank_step (a b : Status) (h : legal a b = true) (hup : a.rank < b.rank) :
     b.rank = a.rank + 1 ∨ (a = .none ∧ b = .venerable) := by
   revert h hup
-  cases a <;> cases b <;> decide
-
-/-- Every legal transition changes the status. -/
-theorem legal_ne (a b : Status) (h : legal a b = true) : a ≠ b := by
-  revert h
   cases a <;> cases b <;> decide
 
 /-- A demotion always lands on `None`, the bottom of the ladder: a demoted
@@ -223,7 +228,8 @@ theorem cycle_superseded_stays_none (f : Flags) (hs : f.supersede = true) :
     cases supersede <;> cases stage1 <;> cases stage2 <;> cases stage3 <;> cases budget <;>
       decide
 
-/-- With no flag set, the cycle changes nothing. -/
+/-- An `Evaluator` cycle (`apply`) with no stage flag set leaves a concept's
+status unchanged. -/
 theorem cycle_idle (s : Status) :
     cycle s ⟨false, false, false, false, false⟩ = s := by
   cases s <;> decide

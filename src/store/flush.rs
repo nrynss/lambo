@@ -167,7 +167,7 @@ fn next_backoff(backoff: Duration) -> Duration {
 }
 
 /// Test-only aliases of the backoff ladder, for `crate::formal_constants_tests`
-/// (#291): `formal/LamboProofs/Flush.lean` hard-codes it in milliseconds.
+/// (#291): `formal/LamboProofs/Flush/Retry.lean` hard-codes it in milliseconds.
 #[cfg(test)]
 pub(crate) mod formal_pins {
     use std::time::Duration;

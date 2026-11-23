@@ -10,21 +10,48 @@ import LamboProofs.Names
 import LamboProofs.Lease
 import LamboProofs.Receipts
 import LamboProofs.Reserve
-import LamboProofs.Contract
-import LamboProofs.Fusion
+import LamboProofs.Contract.Stamp
+import LamboProofs.Contract.Reembed
+import LamboProofs.Contract.Store
+import LamboProofs.Fusion.Max
+import LamboProofs.Fusion.Rrf
 import LamboProofs.Confidence
 import LamboProofs.Canonical
 import LamboProofs.Dispatch
-import LamboProofs.Supersession
-import LamboProofs.Policy
-import LamboProofs.Conflict
-import LamboProofs.Hotlist
-import LamboProofs.Drain
-import LamboProofs.Flush
-import LamboProofs.BatchQueue
-import LamboProofs.Registry
-import LamboProofs.Resolve
-import LamboProofs.Tiered
+import LamboProofs.Supersession.Suspected
+import LamboProofs.Supersession.Pass
+import LamboProofs.Supersession.Recall
+import LamboProofs.Policy.Sessions
+import LamboProofs.Policy.Support
+import LamboProofs.Policy.Score
+import LamboProofs.Conflict.Detect
+import LamboProofs.Conflict.Contradiction
+import LamboProofs.Hotlist.List
+import LamboProofs.Hotlist.Recall
+import LamboProofs.Hotlist.Cycle
+import LamboProofs.Drain.Base
+import LamboProofs.Drain.Replay
+import LamboProofs.Drain.Worker
+import LamboProofs.Drain.Close
+import LamboProofs.Drain.Examples
+import LamboProofs.Drain.History
+import LamboProofs.Flush.Retry
+import LamboProofs.Flush.Loop
+import LamboProofs.Flush.Errors
+import LamboProofs.BatchQueue.Pure
+import LamboProofs.BatchQueue.Worker
+import LamboProofs.BatchQueue.Runs
+import LamboProofs.Registry.Step
+import LamboProofs.Registry.Pure
+import LamboProofs.Registry.Runs
+import LamboProofs.Resolve.Construction
+import LamboProofs.Resolve.Serve
+import LamboProofs.Resolve.Auth
+import LamboProofs.Resolve.Args
+import LamboProofs.Tiered.Pure
+import LamboProofs.Tiered.Machine
+import LamboProofs.Tiered.Runs
+import LamboProofs.Tiered.History
 import LamboProofs.Discovery
 
 /-
@@ -130,20 +157,12 @@ open Lambo
 #print axioms TopK.skipsR_not_emitted
 #print axioms TopK.skipsR_length_le
 #print axioms TopK.skipped_canonical_kept_canonical
--- Gated Canonical-first (#280, design)
-#print axioms Order.gatedRankMembers_off
-#print axioms Order.gatedRankMembers_lawful
-#print axioms Order.gatedRankMembers_separating
-#print axioms Order.gatedRankMembers_promoted_first
-#print axioms Order.gatedRankMembers_below_gate_score
-#print axioms Order.gatedRankMembers_sorted_unique
 -- Recall confidence
 #print axioms Confidence.provisional_inUnit
 #print axioms Confidence.keywordTerm_half
 #print axioms Confidence.keywordTerm_tendsto_one
 #print axioms Confidence.provisional_mono_bm25
 #print axioms Confidence.provisional_mono_cosine
-#print axioms Confidence.noisyOr_ge_keyword
 #print axioms Confidence.noisyOr_eq_one_iff
 #print axioms Confidence.keywordOnly_le_noisyOr
 #print axioms Confidence.provisional_basis_iff
@@ -459,7 +478,6 @@ open Lambo
 #print axioms Lambo.Drain.fixedLoad_agrees
 #print axioms Lambo.Drain.fixed_epoch_seq_order
 #print axioms Lambo.Drain.fixed_agent_order_load
-#print axioms Lambo.Drain.orderInv_nil
 #print axioms Lambo.Drain.orderInv_perm
 #print axioms Lambo.Drain.applyMut_jobs
 #print axioms Lambo.Drain.foldl_jobs

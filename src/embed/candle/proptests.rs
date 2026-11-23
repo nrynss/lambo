@@ -1,5 +1,5 @@
 //! Property tests: [`length_chunks`] against
-//! `formal/LamboProofs/BatchQueue.lean`.
+//! `formal/LamboProofs/BatchQueue/Pure.lean`.
 
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -7,7 +7,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::test_util::props;
 
-/// Lean `BatchQueue.lengthChunks Cfg.rust` (`formal/LamboProofs/BatchQueue.lean`),
+/// Lean `BatchQueue.lengthChunks Cfg.rust` (`formal/LamboProofs/BatchQueue/Pure.lean`),
 /// transcribed: a stable sort of the indices by length (`sortBy`), then
 /// `chunksOf`, which carries the open chunk and its first index and closes
 /// the chunk (`lcAux`) only when it is `FORWARD_WIDTH` wide or the next
@@ -50,7 +50,7 @@ proptest! {
 
     /// `BatchQueue.lengthChunks_perm`, `BatchQueue.lengthChunks_width`,
     /// `BatchQueue.lengthChunks_ne_nil`, `BatchQueue.lengthChunks_sorted` and
-    /// `BatchQueue.chunksOf_slack` (`formal/LamboProofs/BatchQueue.lean`,
+    /// `BatchQueue.chunksOf_slack` (`formal/LamboProofs/BatchQueue/Pure.lean`,
     /// `Cfg.rust`: width `FORWARD_WIDTH`, slack `CHUNK_SLACK_BYTES`), on
     /// random text lengths:
     ///

@@ -21,19 +21,18 @@ queue (`src/writeq/receipts.rs`, `src/writeq/admission.rs`,
 * `admit_lane_bound`, `admit_queue_bound`: admission keeps the lane and queue
   within their caps, and a refusal is born settled.
 
-Not modelled: the one settled-to-settled upgrade `CloseUnflushed →
-IntentRecorded` on a retried close, which bypasses `Entry::settle` by design
-(`drain.rs`); replay; the restart map; the in-serve hold (#295): `hold_one`
-answering a held write `pending_replay`, the held writes in `Lanes::held`, and
-admission's `DropReason::HeldLane` refusal. `Drain.lean` models the hold
-(`hold_then_serve_order`, `sessionW_orderInv`, and the caps in `Caps`), the
-lookup-timeout streak (`Lanes::lookup_streak`, reset at a commit since #346:
-`Drain.streakNew_eq_runSince`), and when a close answers `CloseUnflushed`
-(#345: `Drain.closeD`). The answers' `describe` text is not modelled.
+The admission counts `lane` and `total` are outstanding plus held writes, as
+admission counts them (`lane_outstanding + lane_held`, `outstanding +
+held_count`).
 
-The admission counts `lane` and `total` below are read as outstanding plus
-held writes, as admission counts them (`lane_outstanding + lane_held`,
-`outstanding + held_count`).
+Boundary: not modelled are the one settled-to-settled upgrade `CloseUnflushed
+→ IntentRecorded` on a retried close, which bypasses `Entry::settle` by design
+(`drain.rs`); replay; the restart map; the in-serve hold (#295: `hold_one`,
+`Lanes::held`, `DropReason::HeldLane`); the lookup-timeout streak; and the
+answers' `describe` text. The drain model (`Drain/`) covers the hold
+(`hold_then_serve_order`, `sessionW_orderInv`, the caps in `Caps`), the streak
+(`Drain.streakNew_eq_runSince`) and when a close answers `CloseUnflushed`
+(`Drain.closeD`).
 -/
 
 namespace Lambo.Receipts
@@ -124,8 +123,8 @@ theorem settleAll_fixed : ∀ (attempts : List (Answer × Int)) (e : Entry),
       rw [settle_settled e a now h]
       exact ih e h
 
-/-- The first settle wins: after one settle with a settled answer, the entry
-is whatever that settle produced, forever. -/
+/-- `Entry::settle`: after a settle with a settled answer, no later settle
+changes the receipt; the first settled answer is final. -/
 theorem first_settle_wins (e : Entry) (a : Answer) (now : Int) (ha : a.isSettled = true)
     (later : List (Answer × Int)) :
     settleAll (settle e a now).1 later = (settle e a now).1 :=
@@ -297,8 +296,8 @@ theorem lookupMissing_expired (seq highestSeq : Nat) (h : seq ≤ highestSeq) :
   unfold lookupMissing
   rw [ite_eq_right hne, ite_eq_right hn]
 
-/-- The answer for a missing id is always settled: a caller waiting on it is
-never told to keep waiting. -/
+/-- The receipt store answers an id it does not hold with a settled answer, so
+a caller waiting on it is never told to keep waiting. -/
 theorem lookupMissing_isSettled (sameEpoch : Bool) (seq highestSeq : Nat) :
     (lookupMissing sameEpoch seq highestSeq).isSettled = true := by
   cases sameEpoch with
@@ -417,8 +416,10 @@ with 16 concurrent waits.
 Pinned by `formal_constants_tests::receipts`. -/
 def writeQueueLaneMax : Nat := writeQueueMax / 16
 
+/-- `WRITE_QUEUE_MAX` is 1024 writes. -/
 theorem writeQueueMax_eq : writeQueueMax = 1024 := by decide
 
+/-- `WRITE_QUEUE_LANE_MAX` is 64 writes per agent lane. -/
 theorem writeQueueLaneMax_eq : writeQueueLaneMax = 64 := by decide
 
 /-- Every job that can be outstanding has room for its receipt: the retained
@@ -478,8 +479,8 @@ theorem admit_refused_unchanged (lane total : Nat) (h : (tryAdmit lane total).2.
       have h' : true = false := h
       exact absurd h' (by decide)
 
-/-- The receipt of a refused write is born settled (`Dropped`), so a caller
-that waits on it returns at once. -/
+/-- `ReceiptAnswer::Dropped` is settled, so a caller that waits on a refused
+write's receipt returns at once. -/
 theorem dropped_is_settled : Answer.dropped.isSettled = true := rfl
 
 end Lambo.Receipts

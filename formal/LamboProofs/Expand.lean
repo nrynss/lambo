@@ -12,16 +12,12 @@ frontier. It stops early when a level discovers nothing.
 
 ## Model
 
-* A node is a value of an arbitrary type `ι` with decidable equality.
 * `nbrs x` is the list the two inner loops iterate for a frontier node `x`:
   the concatenation over `TRAVERSAL_ORDER` of `out_neighbors_typed(x, ty)`.
   Which edge types are traversable, and their priority, live entirely inside
   `nbrs`; nothing below depends on them.
 * `visited` and `required` always hold the same nodes, so the model carries one
   list, `req`, for both.
-* Scores are not modelled. Candidates keep their phase-1 score and every other
-  member is stamped `UNSCORED`; that is bookkeeping on top of the membership
-  and order proved here.
 
 ## Results
 
@@ -36,6 +32,11 @@ frontier. It stops early when a level discovers nothing.
 The first three together say the result is *exactly* the `depth`-bounded
 neighbourhood of the candidate set, with no duplicates, for every graph,
 cyclic or not.
+
+Boundary: scores are not modelled (candidates keep their phase-1 score and
+every other member is stamped `UNSCORED`, bookkeeping on top of the membership
+and order proved here); which edge types are traversable and their priority
+are inside `nbrs`, a parameter.
 -/
 
 namespace Lambo.Expand
@@ -438,7 +439,8 @@ theorem expand_prefix (nbrs : ι → List ι) (depth : Nat) (seeds : List ι) :
     ∃ t, expand nbrs depth seeds = discover [] seeds ++ t :=
   levels_prefix nbrs depth (discover [] seeds) (discover [] seeds)
 
-/-- With distinct candidate ids, level 0 is the candidate list itself. -/
+/-- With distinct candidate ids, `expand` returns the candidates first, in
+their input order. -/
 theorem expand_prefix_of_nodup (nbrs : ι → List ι) (depth : Nat) (seeds : List ι)
     (hs : seeds.Pairwise (fun a b => a ≠ b)) : ∃ t, expand nbrs depth seeds = seeds ++ t := by
   have e : discover [] seeds = seeds :=
@@ -448,7 +450,8 @@ theorem expand_prefix_of_nodup (nbrs : ι → List ι) (depth : Nat) (seeds : Li
     rw [e] at ht
     exact ⟨t, ht⟩
 
-/-- `depth = 0` returns the candidates and nothing else. -/
+/-- `expand` (`src/recall/expand.rs`) at `depth = 0` returns the de-duplicated
+candidates and nothing else. -/
 theorem expand_depth_zero (nbrs : ι → List ι) (seeds : List ι) :
     expand nbrs 0 seeds = discover [] seeds := by
   unfold expand

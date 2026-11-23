@@ -1,3 +1,5 @@
+import LamboProofs.Lib.List
+
 /-
 # A recall's top legs and its provisional confidence (#256, #288)
 
@@ -21,7 +23,7 @@ Model of `src/recall/confidence.rs`:
   `KeywordLeg` walk over the ranked search (`best_bm25`, `matched`,
   `exact_name`), the keyword loop cut to `limit * KEYWORD_OVERFETCH`
   (`KEYWORD_OVERFETCH = 4`) and the exact-name step that raises the named
-  concept's keyword slot to `max(BM25, 1.0)` (#288; `Fusion.lean` models
+  concept's keyword slot to `max(BM25, 1.0)` (#288; `Fusion/Max.lean` models
   that step's effect on ranking);
 * the caller in `src/daemon/mod.rs` (`Route::Text` gets `provisional`, the
   other routes `None`) and the median it passes,
@@ -37,16 +39,8 @@ inputs is a set of integers over one common scale `u > 0`: `F64.fin x` is
 separate constructors, so "every input, finite or not" is a quantifier over
 `F64`. `F64.max` is `f64::max` (a `NaN` gives way to the other operand).
 
-A value in `[0, 1]` is an exact fraction `Frac` (`num / den`, `den > 0`),
-compared by cross-multiplication (`Frac.le`, `Frac.eqv`). The fractions are
-the exact values of the Rust expressions:
-
-* `keyword_term`: `s' / (s' + 5u)` with `s' = max(s, 0)`;
-* the rescaled cosine: since `1 - m > 0`, `clamp((c - m) / (1 - m), 0, 1)` is
-  `clamp(c - m, 0, u - m) / (u - m)` (`vectorTerm_spec` gives the three
-  regimes);
-* `1 - (1 - a)(1 - b)` with `a = an / ad`, `b = bn / bd` is
-  `(ad·bd - (ad - an)(bd - bn)) / (ad·bd)` (`noisyOrCombine`).
+A value in `[0, 1]` is the exact fraction the Rust expression computes
+(`Frac`, compared by cross-multiplication).
 
 Not captured: `f64` rounding. Correct rounding makes `fl` monotone in the
 exact result of each operation, and that is all the arguments below use (`-`
@@ -67,8 +61,8 @@ the argument says so).
   `noisyOr_mono_bm25`, `provisional_mono_bm25`); the Rust test checks
   integer steps only.
 * **"Never below either term" and the keyword-only comparison are
-  exact-arithmetic only** (`noisyOr_ge_keyword`, `noisyOr_ge_vector`,
-  `keywordOnly_le_noisyOr`, `keywordOnly_eq_noisyOr_at_null`): in `f64` they
+  exact-arithmetic only** (`keywordOnly_le_noisyOr`, `noisyOr_ge_vector`,
+  `keywordOnly_eq_noisyOr_at_null`): in `f64` they
   can be off by an ulp. For example `noisy_or(1.0, 0.10, 0.36)` is
   `0.16666666666666663`, below `keyword_term(1.0) = 0.16666666666666666`,
   although the cosine is under the median (`b = 0`).
@@ -110,7 +104,7 @@ named are in `src/recall/confidence.rs` (`the_arithmetic_is_the_noisy_or_recorde
   `provisional_mono_bm25`, `provisional_mono_cosine`: **monotone in each leg**
   (the test's "monotone in each leg"), with the basis unchanged. In `f64` the
   cosine statements survive rounding; the BM25 ones hold up to an ulp.
-* `noisyOr_ge_keyword`, `noisyOr_ge_vector`, `noisyOrCombine_num`,
+* `keywordOnly_le_noisyOr`, `noisyOr_ge_vector`, `noisyOrCombine_num`,
   `noisyOrCombine_comm`, `noisyOr_eq_one_iff`: the noisy-OR is never below
   either term, equals `a + b - ab`, is symmetric, and is `1` exactly when the
   cosine is at least `1` ("one at 1 is 1"); keyword evidence alone never
@@ -156,9 +150,7 @@ named are in `src/recall/confidence.rs` (`the_arithmetic_is_the_noisy_or_recorde
   a traversal answer, both of which leave `TopLegs::default()`), and a recall
   by image or vector or a layer's side, report no confidence.
 
-## Left out
-
-The search itself (`search_ranked`, `src/graph/index.rs`, modelled as its
+Boundary: the search itself (`search_ranked`, `src/graph/index.rs`, modelled as its
 ranked list; it is score-descending with only positive scores, assumed as
 `BestFirst` where a theorem needs it), name normalization and lookup (the
 model takes the named concept, already filtered to concepts, as `nameTarget`),
@@ -171,13 +163,15 @@ daemon's `embedding.and_then(|(_, contract)| null_median_cosine(..))`
 (`src/daemon/mod.rs`, the `Route::Text` arm), which passes no median at all
 when the query embed failed, under any contract (harmless: such a recall has
 no vector leg and takes the keyword-only path, which needs none), the
-layered recall's `layer_top_legs`, and the serialized wire shape. The leg
-map is a list of entries with distinct keys standing for the `HashMap`;
-`upsertKeyword` is `entry(id).or_default()` followed by a write to the
-keyword slot. `noisyOr_none` records the `None` cases of `noisy_or`.
+layered recall's `layer_top_legs`, and the serialized wire shape are not
+modelled; the leg map is a list with distinct keys standing for the
+`HashMap`. `f64` rounding is not captured beyond what the number model
+argues.
 -/
 
 namespace Lambo.Confidence
+
+open Lambo.Lib (foldl_max_ge_init foldl_max_ge foldl_max_mem)
 
 /-! ## `f64` values -/
 
@@ -344,7 +338,7 @@ def noisyOr (u : Int) (bm25 cosine median : F64) : Option Frac :=
     else (keywordTerm u bm25).map fun a => noisyOrCombine a (vectorTerm u c m)
   | _, _ => none
 
-/-- The noisy-OR is `a + b - ab`. -/
+/-- `confidence.rs` combines the two legs as the noisy-OR `a + b − ab`. -/
 theorem noisyOrCombine_num (a b : Frac) :
     (noisyOrCombine a b).num = a.num * b.den + b.num * a.den - a.num * b.num := by
   simp only [noisyOrCombine]
@@ -426,7 +420,8 @@ theorem noisyOr_eq_some {u : Int} {bm25 cosine median : F64} {v : Frac}
       | _ => simp [keywordTerm] at h
   · cases h
 
-/-- `None` for any non-finite input or a median at or above `1`. -/
+/-- `noisy_or`'s two-leg value is `None` for any non-finite
+input and for a null median at or above `1`. -/
 theorem noisyOr_none {u : Int} {bm25 cosine median : F64}
     (h : bm25.isFinite = false ∨ cosine.isFinite = false ∨ median.isFinite = false ∨
       ∃ m, median = .fin m ∧ u ≤ m) :
@@ -442,18 +437,15 @@ theorem noisyOr_none {u : Int} {bm25 cosine median : F64}
     · cases h
     · cases hm'; omega
 
-/-- **The value is in `[0, 1]`** whenever it is reported. -/
+/-- **The value is in `[0, 1]`**: `noisy_or`'s two-leg value, whenever it is
+reported. -/
 theorem noisyOr_inUnit {u : Int} (hu : 0 < u) {bm25 cosine median : F64} {v : Frac}
     (h : noisyOr u bm25 cosine median = some v) : v.InUnit := by
   obtain ⟨s, c, m, -, -, -, hm, rfl⟩ := noisyOr_eq_some h
   exact noisyOrCombine_inUnit (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
 
-/-- **Never below the keyword term.** -/
-theorem noisyOr_ge_keyword {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
-    (keywordTermFin u s).le (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) :=
-  le_noisyOrCombine_left (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
-
-/-- **Never below the rescaled cosine.** -/
+/-- **Never below the rescaled cosine**: `noisy_or`'s two-leg value is at least
+its vector term, in exact arithmetic (in `f64` up to an ulp). -/
 theorem noisyOr_ge_vector {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
     (vectorTerm u c m).le (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) :=
   le_noisyOrCombine_right (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
@@ -495,17 +487,21 @@ theorem noisyOr_eq_one_iff {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
     rw [h1, Int.mul_zero, Int.sub_zero]
 
 /-- **The keyword-only value is the two-leg value with `b = 0`**: at a cosine
-at or under the null median the two agree. -/
+at or under the null median, `keyword_term` and `noisy_or` agree, in exact
+arithmetic. -/
 theorem keywordOnly_eq_noisyOr_at_null {u : Int} {s c m : Int} (hm : m < u) (hc : c ≤ m) :
     (keywordTermFin u s).eqv (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) := by
   have h0 := (vectorTerm_spec (c := c) hm).1 hc
   simp only [Frac.eqv, noisyOrCombine, h0, Int.sub_zero]
   grind
 
-/-- **A lower quantity than the two-leg value** for the same store. -/
+/-- **A lower quantity than the two-leg value** for the same store: the
+keyword-only value (`keyword_term`) is never above `noisy_or`'s two-leg value,
+which is so never below its keyword term, in exact arithmetic (in `f64` up to
+an ulp, as the number model shows). -/
 theorem keywordOnly_le_noisyOr {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
     (keywordTermFin u s).le (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) :=
-  noisyOr_ge_keyword hu hm
+  le_noisyOrCombine_left (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
 
 /-! ## `provisional` and the two bases -/
 
@@ -783,34 +779,6 @@ theorem mem_filterMap_finiteOf {l : List F64} {x : Int} :
     subst hx; exact ha
   · intro h; exact ⟨_, h, rfl⟩
 
-theorem foldl_max_ge_init (xs : List Int) (x : Int) : x ≤ xs.foldl max x := by
-  induction xs generalizing x with
-  | nil => simp
-  | cons y ys ih =>
-    simp only [List.foldl_cons]
-    exact Int.le_trans (by omega) (ih (max x y))
-
-theorem foldl_max_ge (xs : List Int) (x y : Int) (hy : y ∈ xs) : y ≤ xs.foldl max x := by
-  induction xs generalizing x with
-  | nil => cases hy
-  | cons z zs ih =>
-    simp only [List.foldl_cons]
-    rcases List.mem_cons.mp hy with rfl | h
-    · exact Int.le_trans (by omega) (foldl_max_ge_init zs (max x y))
-    · exact ih _ h
-
-theorem foldl_max_mem (xs : List Int) (x : Int) : xs.foldl max x ∈ x :: xs := by
-  induction xs generalizing x with
-  | nil => simp
-  | cons y ys ih =>
-    simp only [List.foldl_cons]
-    rcases List.mem_cons.mp (ih (max x y)) with h | h
-    · rw [h]
-      by_cases hxy : x ≤ y
-      · rw [show max x y = y by omega]; simp
-      · rw [show max x y = x by omega]; simp
-    · simp [h]
-
 /-- **The fold is the maximum**: `some x` exactly when `x` is a finite member
 at least every finite member. -/
 theorem finiteMax_eq_some {l : List F64} {x : Int} :
@@ -923,7 +891,8 @@ theorem topLegs_congr {inGraph : ι → Bool} {legs legs' : List (ι × LegSlot)
     topLegs inGraph legs kw = topLegs inGraph legs' kw := by
   simp only [topLegs, finiteMax_congr h]
 
-/-- **Independent of the `HashMap`'s order.** -/
+/-- `TopLegs` (`src/recall/confidence.rs`) does not depend on the candidate
+`HashMap`'s iteration order. -/
 theorem topLegs_perm {inGraph : ι → Bool} {legs legs' : List (ι × LegSlot)} (kw : KeywordLeg)
     (h : legs.Perm legs') : topLegs inGraph legs kw = topLegs inGraph legs' kw :=
   topLegs_congr kw fun _ => ((h.filter _).filterMap _).mem_iff

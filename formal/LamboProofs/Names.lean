@@ -20,10 +20,6 @@ collected."
   removal by garbage collection or alias upgrade. `Graph::remove_node` does not
   touch `names`, so this step leaves them alone.
 
-Not modelled: transaction rollback (which restores the registry to its state
-at the start of the transaction, and is the only thing that removes an entry),
-retired aliases, and the id-shaped spellings `name_key` refuses.
-
 ## Results
 
 * `names_permanent`: once a key is bound to an id, it is bound to that id in
@@ -36,6 +32,11 @@ retired aliases, and the id-shaped spellings `name_key` refuses.
 * `declare_idempotent`: "an identical repeated binding is a no-op".
 * `declare_no_shadow`: a name cannot be given to one concept while it is the
   canonical key of another.
+
+Boundary: transaction rollback (which restores the registry to its state at
+the start of the transaction, and is the only thing that removes an entry),
+retired aliases and the id-shaped spellings `name_key` refuses are not
+modelled; normalization is `Canonical.lean`'s.
 -/
 
 namespace Lambo.Names
@@ -147,7 +148,8 @@ theorem resolve_never_rebinds {a b : Registry κ ι} (h : Steps a b) (k : κ) (i
   · exact Or.inl (resolve_live b k i hb hlive)
   · exact Or.inr (resolve_collected b k i hb hlive)
 
-/-- Re-declaring an existing binding changes no name. -/
+/-- Re-declaring an existing name binding (`src/graph/graph/names.rs`) changes
+no name. -/
 theorem declare_idempotent (s : Registry κ ι) (k : κ) (t : ι) (h : s.names k = some t) (k' : κ) :
     (bind s k t).names k' = s.names k' := by
   by_cases hkk : k' = k

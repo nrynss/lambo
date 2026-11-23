@@ -1641,7 +1641,7 @@ const CANARY_TEXT: &str = "lambo";
 
 /// Test-only aliases of the coalescer's private constants and its chunking,
 /// for `crate::formal_constants_tests` (#291):
-/// `formal/LamboProofs/BatchQueue.lean` hard-codes the constants in `Cfg.rust`
+/// `formal/LamboProofs/BatchQueue/Pure.lean` hard-codes the constants in `Cfg.rust`
 /// and `canary`, and the `2 *` ratio in `lcAux`.
 #[cfg(test)]
 pub(crate) mod formal_pins {

@@ -178,6 +178,25 @@ class Lean(Fixture):
                 self.assertEqual(len(errors), 1, errors)
                 self.assertIn(says, errors[0])
 
+    def test_a_split_model_resolves_across_its_files_but_not_its_history_or_findings(self):
+        self.write("formal/LamboProofs/Split/Base.lean",
+                   "namespace Lambo.Split\ndef base : Nat := 0\nend Lambo.Split\n")
+        self.write("formal/LamboProofs/Split/Close.lean",
+                   "namespace Lambo.Split\ntheorem closes : True := trivial\nend Lambo.Split\n")
+        self.write("formal/LamboProofs/Split/History.lean",
+                   "namespace Lambo.Split\ntheorem old : True := trivial\nend Lambo.Split\n")
+        self.write("formal/LamboProofs/Split/Examples.lean",
+                   "namespace Lambo.Split\ntheorem finding : True := trivial\nend Lambo.Split\n")
+        self.assertEqual(self.errors("{/* lean: Split.base, Split.closes */}"), [])
+        for name in ("old", "finding"):
+            errors = self.errors(f"{{/* lean: Split.{name} */}}")
+            self.assertEqual(len(errors), 1, errors)
+            self.assertIn("formal/LamboProofs/Split/ (outside History.lean and Examples.lean) "
+                          f"declares no {name}", errors[0])
+        errors = self.errors("{/* lean: Split.nope */}")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("declares no nope", errors[0])
+
     def test_one_bad_name_in_a_list_is_reported(self):
         errors = self.errors("{/* lean: Demo.Status, Demo.missing, Demo.Flags */}")
         self.assertEqual(len(errors), 1)

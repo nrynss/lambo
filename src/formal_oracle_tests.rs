@@ -95,6 +95,47 @@ fn oracle() {
     );
 }
 
+/// The model file a vector file names (its `lean` field) is `model`'s: its
+/// `formal/LamboProofs/<model>.lean`, or, for a model split into a directory,
+/// a file under `formal/LamboProofs/<model>/` (the part the vectors
+/// exercise); and the file exists.
+fn check_lean_file(model: &str, lean: &str) -> Result<(), String> {
+    let file = lean
+        .strip_prefix("formal/LamboProofs/")
+        .and_then(|f| f.strip_suffix(".lean"));
+    if !matches!(file, Some(f) if f == model || f.starts_with(&format!("{model}/"))) {
+        return Err(format!("names another model's file: {lean}"));
+    }
+    if !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(lean)
+        .is_file()
+    {
+        return Err(format!("names {lean}, which does not exist"));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_vector_file_names_an_existing_file_of_its_model() {
+    assert_eq!(
+        check_lean_file("Canon", "formal/LamboProofs/Canon.lean"),
+        Ok(())
+    );
+    assert_eq!(
+        check_lean_file("Fusion", "formal/LamboProofs/Fusion/Rrf.lean"),
+        Ok(())
+    );
+    assert!(
+        check_lean_file("Fusion", "formal/LamboProofs/Fusion/Nope.lean")
+            .unwrap_err()
+            .contains("does not exist")
+    );
+    assert!(check_lean_file("Fusion", "formal/LamboProofs/Canon.lean")
+        .unwrap_err()
+        .contains("another model's file"));
+    assert!(check_lean_file("Fus", "formal/LamboProofs/Fusion/Rrf.lean").is_err());
+}
+
 /// One model's vector file, as `OracleExport.Gen.Vectors.render` writes it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -144,7 +185,9 @@ impl Vectors {
             v.model, model,
             "formal/oracle/{model}.json names another model"
         );
-        assert_eq!(v.lean, format!("formal/LamboProofs/{model}.lean"));
+        if let Err(e) = check_lean_file(model, &v.lean) {
+            panic!("formal/oracle/{model}.json: {e}");
+        }
         assert!(
             REPLAYED.iter().any(|(m, _)| *m == model),
             "{model} is not in REPLAYED (src/formal_oracle_tests.rs)"
@@ -198,9 +241,10 @@ impl Vectors {
         }
         if !failures.is_empty() {
             panic!(
-                "{model}: Rust {rust} disagrees with Lean {lean} (formal/LamboProofs/{model}.lean) \
+                "{model}: Rust {rust} disagrees with Lean {lean} ({file}) \
                  on {n} of {total} cases of formal/oracle/{model}.json; the first:\n{first}",
                 model = self.model,
+                file = self.lean,
                 rust = f.rust,
                 n = failures.len(),
                 total = f.cases.len(),

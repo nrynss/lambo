@@ -33,7 +33,7 @@
 //! frozen: no agent id, and reinforcement keeps only the latest time), so a
 //! writer re-sent over by a later write is not attributable: agent-a writes,
 //! agent-b re-sends, agent-a re-sends again, and agent-b drops out.
-//! `formal/LamboProofs/Conflict.lean` models this (`conflictAtFixed`).
+//! `formal/LamboProofs/Conflict/Detect.lean` models this (`conflictAtFixed`).
 //!
 //! Resolving by write time rather than by the source concept's origin is
 //! deliberate: `record_action` reuses an already-canonical concept as the

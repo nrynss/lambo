@@ -1,720 +1,81 @@
+import LamboProofs.Tiered.Pure
+
 /-
 # The tiered store: a SQL store of record beside an Elastic recall index (#18)
 
-Model of `TieredStore` in `src/store/tiered/` (lines as at `ab9b57dc`): a
+Models `TieredStore` in `src/store/tiered/mod.rs` as one state machine: a
 durable store (SQLite, Postgres, Cockroach) that stays the source of truth,
-and an Elasticsearch index mirrored from it that serves the vector leg.
+and an Elasticsearch index mirrored from it that serves the vector leg. The
+mirror (`mirror`, `mirror_unnamed`, `mirror_session`, `mark_unleased`,
+`mirror_ops`, `mark_stale`), the repair (`request_repair`, `run_repairs`,
+`repair_once`, `reconcile`, `repair_if_due`, `sweep`, `ensure_fenced`,
+`recheck_ahead`, `settle_after_load`, `stop_repair_for_erase`), reads
+(`sync_for_read`, `checked_vector_candidates`, `fallback`, `rerank`) and the
+lease (`release_lease`, `erase_session`, `flush`, `load_session`), over
+`Pure.lean`'s pieces; the engine's rules the tier relies on (external
+versions, a conflict counted as success, delete-by-query leaving a tombstone
+one version up) as `index.rs` and `fake.rs` model them; and `rank_by_cosine`
+in `src/store/vector_source.rs`. `St` is one session: the durable side, the
+writer's captured token, the index (documents by contract and node, the sync
+marker), this store's `Tier`, the repair task's position, the in-flight
+mirror, orphaned requests, a half-done load, the read breaker and a log of
+every index write that landed. `step` takes one `Ev`: flushes by this writer
+or another holder, one step of the mirror or the repair, their deadlines, an
+orphaned request landing, the two halves of a load, a read, acquire, refresh,
+release, takeover, operator override, erase, outages and time. Each repair
+step is one request or one lock hold; the mirror's bulk lands item by item and
+a read sees any prefix; chunks are one document (the tests'
+`with_repair_chunk(1)`). `Params.switchRepairs` selects the mirror since #319
+(`true`) or before it; every theorem here holds for both.
 
-* `mod.rs`: the mirror (`mirror` l. 1025, `mirror_unnamed` l. 1047,
-  `mirror_session` l. 1083, `mark_unleased` l. 1134, `mirror_ops` l. 1155,
-  `next_version` l. 547, `mark_stale` l. 567); the repair (`request_repair`
-  l. 797, `run_repairs` l. 819, `repair_once` l. 894, `reconcile` l. 939,
-  `repair_if_due` l. 1015, `sweep` l. 641, `ensure_fenced` l. 610,
-  `check_marker` l. 670, `recheck_ahead` l. 714, `settle_after_load` l. 742,
-  `stop_repair_for_erase` l. 1840); reads (`sync_for_read` l. 1284,
-  `checked_vector_candidates` l. 1329, `fallback` l. 1246, `breaker_admits`,
-  `breaker_success`, `breaker_failure` l. 1205-1243, `knn_fetch` l. 1408,
-  `rerank` l. 1421); lease bookkeeping (`note_lease` l. 1867, `note_refresh`
-  l. 1882 as changed by #293's review, `release_lease` l. 1771,
-  `erase_session` l. 1648, `flush` l. 1507, `load_session` l. 1514).
-* `project.rs`: `mirror_version` (l. 72), `project` (l. 105), `index_doc`
-  (l. 172), `sole_session` (l. 197). Since #319, `project` also reports
-  `switched` (`switches` here) and `mirror_ops` repairs a switching batch
-  instead of mirroring it.
-* `index.rs` and `fake.rs`: the engine's rules the tier relies on (external
-  versions, a conflict counted as success, delete-by-query leaving a
-  tombstone one version up), as the fake models them; `rank_by_cosine` in
-  `src/store/vector_source.rs` (l. 246).
+Results: SQL authority: no index-side event touches the durable session
+(`indexSide_keeps_durable`), an accepted flush is exactly its batch
+(`write_commits`), the one mirror a flush waits for always ends
+(`mirror_ends`, `mirTimeout_ends`), the token never goes back (`lease_mono`,
+`run_lease_mono`) and a fenced write is refused (`fenced_write_refused`).
+Convergence, "stale, never meaningless": a pass that starts under the current
+lease with the marker behind and no further writes leaves the index matching
+the durable store, the marker at the durable epoch and the session in sync
+(`repair_converges`), given version dominance, which is an assumption, not an
+invariant (`nextVersion_gt` gives it only when the store's recorded token is
+at most the pass's); `putAll_eq`, `reconcile_matches`; an overtaken repair is
+not trusted (`finish_overtaken`, `finish_inSync`). While the breaker is open,
+or while not in sync, a read is the durable store's (`read_breaker_open`,
+`read_not_inSync_falls_back`). Fencing (#18, #293): once the lease moved past
+a token and the repair is off its in-flight request, no repair write under
+that token ever lands (`repair_silent_after_loss`, `erase_silences_repair`),
+and a mirror starts only from an accepted flush with this store holding
+exactly the writer's token (`mirror_starts_held`). After a load the session is
+trusted exactly when the re-checked marker is in sync, unless a holder finds
+it behind and asks for a repair (`settle_consistent`, `settle_trusted`). With
+every stored vector returned the engine's scores and order do not matter and
+the answer is `rank_by_cosine` over the candidates (`rerank_ignores_engine`,
+`rerank_exact`); a hit returned without its vector keeps the engine's score
+and can outrank a nearer one (`rerank_partial_not_exact`). Since #319 a batch
+that switches the contract is durable but writes no document or marker into
+any index and leaves the session out of sync, so it falls back and is
+repaired (`mirror_switch_writes_nothing`, `write_switch_writes_nothing`), and
+every batch that does not switch mirrors exactly as before (`write_agrees`,
+`write_agrees_noSet`, `write_agrees_stampFirst`).
 
-## The state machine
-
-`St` is one session: the durable side `d` (vectors by node, contract, epoch,
-erased flag, lease row and token), the writer's captured token `wtok`, the
-index (`rt`: contract index × node → version and document; `mark`: the sync
-marker's version and epoch), this store's `Tier` (`SessionTier`: sync, held
-token, version token and counter, cached contract, committed epoch, failures,
-backoffs, `repairing`, `again`), the repair task's position `rep`, the
-in-flight mirror `mir`, requests orphaned by an abort or a deadline, a
-half-done `load_session`, the read breaker, and a log of every index write
-that landed and who made it. `step` takes one `Ev`: this writer's flush
-(leased or not), another holder's flush (mirrored or not), one step of the
-mirror or of the repair task, their deadlines, an orphaned request landing,
-the two halves of a load, a read, acquire, the heartbeat's refresh, release
-(waiting for the repair or abandoning it), a takeover, the operator override,
-an erase by another process or through this store (stop, then sweep or
-abandon), index and kNN outages, and time. Any interleaving is a list.
-
-Atomicity: each repair step is one request or one lock hold (a fence check,
-one bulk chunk, one sweep pass, the marker); the mirror's bulk lands item by
-item, as the engine applies it, and a read sees the index at any point
-between (a periodic refresh can expose any prefix). Chunks are one document
-(the tests' `with_repair_chunk(1)`; with chunk `k` the one in-flight request
-below is `k` documents). The read path's load and marker check are one step;
-`load_session`'s are two (`loadBegin`, `loadEnd`), the race the #18 ahead-marker
-case exercises.
-
-## Results
-
-* SQL authority. `indexSide_keeps_durable`: no mirror, repair, orphaned
-  request, marker check, read, breaker change or outage touches the durable
-  session. `write_commits`: an accepted flush is exactly the batch applied,
-  whatever the index state; `mirror_ends`, `mirTimeout_ends`: the one mirror a
-  flush waits for always ends. `lease_mono`, `run_lease_mono`: the token never
-  goes back. `fenced_write_refused`.
-* Convergence ("stale, never meaningless"). `repair_converges`: a pass that
-  starts under the current lease with the marker behind and no further writes
-  re-indexes every vector, sweeps the rest, writes the marker at the durable
-  epoch and marks the session in sync, with the index matching the durable
-  store (`Matches`). Version dominance (every document in the index below the
-  pass's version, `hdom`) is an **assumption**, not an invariant:
-  `nextVersion_gt` gives it only when the store's recorded token is at most
-  the pass's, and a stale pass breaks that (`stale_pass_rewinds_version`).
-  `putAll_eq` (first write at a version wins),
-  `reconcile_matches`. `finish_overtaken`, `finish_inSync`: an overtaken repair is not
-  trusted (#18).
-* Breaker (#18). `breaker_trips`, `breaker_counts`,
-  `breaker_open_falls_back`, `breaker_one_probe`, `breaker_probe_outcome`; in the machine,
-  `read_breaker_open` and `read_not_inSync_falls_back`: while open, or while
-  not in sync, a read is the durable store's.
-* Fencing (#18, #293). `repair_silent_after_loss`: once the lease moved
-  past a token and the repair task is off its in-flight request, no repair write under
-  that token ever lands, in any run; `erase_silences_repair` applies it to an
-  erase or takeover. `mirror_starts_held`: a mirror starts only from an
-  accepted flush with this store holding exactly the writer's token.
-  `noteRefresh_never_adopts`, `fenced_iff`.
-* Marker state. `checkMarker_inSync_iff`, `settle_consistent`,
-  `settle_trusted`: after a load the session is trusted exactly when the
-  final (re-checked) marker is in sync, unless a holder finds it behind and
-  asks for a repair.
-* Search (#18). `rerank_ignores_engine`: with every stored
-  vector returned, the engine's scores and order do not matter, and the answer
-  is `rank_by_cosine` over the candidates (`rerank_exact`, close to the
-  definition: the durable store's exact scan run on the same candidates);
-  `knnFetch_bounds`.
-* Versions. `version_holder_first`, `version_counter`, `nextVersion_gt`.
-* The #319 fix (`Params.switchRepairs`; `false` is the previous mirror, kept
-  for the pinned theorems below). `switches` (`Projection::switched`): a
-  `SetEmbedding` that moves the contract in force, where a contract was
-  already set or a vector-bearing upsert came earlier in the batch.
-  `mirror_switch_writes_nothing`, `write_switch_writes_nothing`: such a batch
-  is durable but writes no document or marker into any contract's index (the
-  old one included) and leaves the session out of sync, so the holder falls
-  back (`read_not_inSync_falls_back`) and a repair re-indexes it from the
-  durable snapshot (`repair_converges`, applied to the issue's batch in the
-  runs). `write_agrees`, `write_agrees_noSet`, `write_agrees_stampFirst`:
-  on every batch that does not switch (no `SetEmbedding`; a `SetEmbedding`
-  first that stamps the first contract or keeps the one in force) the flush
-  is exactly the previous version's. `reembed_migration_held_back`,
-  `reembed_migration_repaired`: the issue's batch. Every theorem above holds
-  for both versions (they are stated for any `Params`).
-
-Tests mirrored by `decide` runs: the mirror and served leg, the contract
-refusal, the mirror failure and repair, the #18 cases (overtaken repair, lost lease,
-erase, ahead marker, unleased flush), the #293 re-take, the breaker, the
-overfetch, the exact re-rank and its boundary, the projection table, and the
-#319 migration and relabel.
-
-## What the model shows about the Rust
-
-* Fixed by #319 (pinned on `Pprev`, the previous mirror):
-  `reembed_migration_misindexed`, `project_reembed_into_old_index`: a re-embed
-  **migration** (`lambo re-embed`, `Graph::reembed_all`) drains every
-  `UpsertNode` before the trailing `SetEmbedding`, but `project` switches the
-  contract only for what follows a `SetEmbedding`. Through the tier the new
-  vectors were written into the **old** contract's index, the new contract's
-  index got nothing, the marker advanced and the session stayed in sync: a
-  read under the new contract was served from the index and found no vector,
-  no load repaired it (the marker is in sync), and a reader still holding the
-  old contract ranked old-contract probes against new-model vectors under the
-  old contract's name. The projection's own test and the tier test put
-  `SetEmbedding` first. `relabel_leaves_new_index_empty`, found while
-  modelling the fix: `--allow-embedding-mismatch`'s lone `SetEmbedding` (a
-  same-kind model rename that keeps the vectors) left the new contract's
-  index empty in sync, the same bug with `SetEmbedding` first.
-  Of the fixes the issue offers, projecting the batch's `SetEmbedding` before
-  its upserts (`projectFinal`) misses the relabel (`projectFinal_misses_relabel`)
-  and, on a first stamp, indexes vectors the durable store has just
-  quarantined (`projectFinal_ahead_of_durable`); reordering `reembed_all`
-  changes what the durable store keeps (`reorder_changes_durable`). The fix
-  takes the third: a switching batch is repaired, not mirrored.
-* `reorder_changes_durable` also showed a durable-side hazard outside the
-  tier: re-embedding a session that had no contract yet (`reembed_all` from
-  none) wrote its vectors and then stamped, and every store's first-stamp
-  quarantine nulled them in the same transaction. #322 fixed it on the
-  durable side (`Contract.reembedOrdered_contractless_durable`): such a
-  re-embed now stamps first, which `switches` reads as a first stamp, not a
-  switch.
-* `inplace_reembed_mixes_builds` (the #296 review's case): an in-place
-  re-embed (`--rewrite-same-contract`) is one durable transaction, but the
-  index takes the bulk item by item into the same contract's index while the
-  session stays in sync, so a read in between ranks two builds together. It is
-  brief for the holder (once the bulk and marker land the answer is one build;
-  a bulk that fails part way makes the holder stale and fall back). The
-  durable store never holds the mix.
-* `reader_never_rechecks`, `reader_stays_inSync`: `sync_for_read` re-checks
-  only `Unknown` and `Stale`; a reader that once found the marker in sync
-  trusts the index until it reloads or evicts the session, whatever other
-  processes do. A later failed mirror by the writer (or a partial in-place
-  re-embed) is served from such a store until that reload; a node deleted
-  durably stays in its vector leg meanwhile (recall's assembly drops it, per
-  `a_stale_index_hit_never_reaches_the_assembled_recall`). Real readers bound
-  the window: serve-web reloads on its snapshot TTL (`load_reader_graph` →
-  `load_session` → `settle_after_load`), `lambo recall` is one-shot, and MCP
-  serve layers are pinned holders. The theorem is about the store alone.
-* `mirror_lands_after_erase`: `mirror_session` checks only this store's record
-  of the lease, never the durable row; `ensure_fenced` guards repairs, not
-  mirrors. A writer that stalls past its lease between the commit and the
-  mirror, while another process erases the session (sweep, marker deleted,
-  erase reported done), then writes the erased session's vector and marker
-  back into the index. The repair in the same position writes nothing.
-  The model's `eraseOther` has no lease-liveness gate; the real `erase_gate`
-  answers `Held` while another holder's lease is live, so the erase needs the
-  writer's lease to have lapsed (the stall past its TTL) first.
-* `repair_from_pre_recheck_snapshot`: when `repair_once` finds the marker
-  ahead and `recheck_ahead`'s fresh load finds it behind (another flush in
-  between), it reconciles from the **first**, older snapshot, contrary to
-  #18's "never repair from the older snapshot": it re-indexes a
-  node deleted since and rewinds the marker. The overtaken-repair guard (#18) sends it
-  round again and the rerun repairs it; meanwhile the holder falls back, but an in-sync reader elsewhere
-  serves the deleted node.
-* `edge_only_batch_leaves_marker_behind`: a batch of only `DeleteEdge`s names
-  no session and deletes no node, so `mirror_unnamed` returns before
-  attributing it and the marker stays behind the durable epoch: the holder's
-  next load re-indexes the whole session and a reader falls back until the
-  next mirrored flush.
-* `stale_pass_rewinds_version`: `next_version` (`mod.rs:547-551`) restarts
-  the counter whenever the token differs, an older token included, and
-  `reconcile` calls it before any fence. A repair pass that captured token
-  `T` and reaches `reconcile` after this store re-acquired at `T' > T` and
-  mirrored under `T'` sets the recorded token back to `T`; its next fence
-  stops it. The next `T'` write then restarts at counter 1, repeats a version
-  already in the index, and its bulk and marker are refused as conflicts that
-  count as success. The session ends in sync with the index serving the old
-  vector, and since later mirrors advance the marker, no load repairs it:
-  permanent silent staleness. This is also why `repair_converges` takes
-  version dominance as a hypothesis.
-* `rerank_partial_not_exact`: a hit returned without its vector keeps the
-  engine's score and can outrank a nearer one (documented in `rerank`).
-* `late_success_closes`: an index read admitted before the breaker opened
-  and answering after it closes the breaker (`breaker_success` resets).
-
-## The #273 seams (Track 3)
-
-#273 proposes `tiered/repair.rs`, `tiered/mirror.rs` and `tiered/search.rs`,
-keeping `TieredStore`/`Tier` state and the `GraphStore` delegation in
-`tiered/mod.rs`:
-
-* `tiered/repair.rs` (`request_repair`, `run_repairs`, `repair_once`,
-  `reconcile`, `repair_if_due`, `stop_repair_for_erase`, `check_marker`,
-  `settle_after_load`): `repStep` and `repair_converges`, `putAll_eq`,
-  `reconcile_matches`, `bulk_loop`, `finish_overtaken`, `finish_inSync`,
-  `repair_silent_after_loss`, `step_quiet`, `repStep_writing_imp`,
-  `erase_silences_repair`, `checkMarker_inSync_iff`, `settle_consistent`,
-  `settle_trusted`, and the pinned `repair_from_pre_recheck_snapshot` and
-  `stale_pass_rewinds_version`. `recheck_ahead` and `load_durable` are not in
-  #273's list and belong with it.
-* `tiered/mirror.rs` (`mirror`, `mirror_unnamed`, `mirror_session`,
-  `mirror_ops`, `breaker_*`, `fallback`, `sync_for_read`): `mirStep`,
-  `mirror_starts_held`, `mirror_ends`, `write_commits`,
-  `indexSide_keeps_durable`, the breaker theorems, `read_breaker_open`,
-  `read_not_inSync_falls_back`, `syncForRead_inSync`, `reader_stays_inSync`,
-  `mirror_switch_writes_nothing`, `write_agrees`, and the pinned
-  `inplace_reembed_mixes_builds`, `mirror_lands_after_erase`,
-  `edge_only_batch_leaves_marker_behind`, `reader_never_rechecks`.
-  `project.rs` already holds `project`, `switched` and `mirror_version`
-  (`project_reembed_into_old_index`, `switches`, the version theorems).
-  The breaker and `sync_for_read` are read-path policy; #273 groups them with
-  the mirror, and `read` here spans `mirror.rs` and `search.rs`.
-* `tiered/search.rs` (`VectorCandidateSource`, `knn_fetch`, `rerank`):
-  `rerank_exact`, `rerank_ignores_engine`, `rerank_partial_not_exact`,
-  `knnFetch_bounds`.
-* `tiered/mod.rs` keeps `note_lease`/`note_refresh` (`noteRefresh_never_adopts`),
-  the lease delegation and erase (`lease_mono`, `fenced_write_refused`), and
-  the shared primitives: `sweep` (used by `reconcile`, `mirror_unnamed` and
-  `erase_session`), `ensure_fenced` (the repair's fence, and the mirror's once
-  `mirror_lands_after_erase` is fixed), `next_version` (`nextVersion_gt`,
-  `stale_pass_rewinds_version`) and `mark_stale`.
-
-## What is left out
-
-Exact arithmetic: versions and epochs are naturals (`u64` overflow is the
-`mirror_version` refusal, modelled); scores are exact fixed-point cosines, so
-`f32`/`f64` rounding in `rank_by_cosine` and the engine is outside the model.
-Not modelled: the refresh interval as such (the realtime view stands for
-every view a refresh can expose; delete-by-query is atomic with its refresh,
-so the #18 refresh-first rule and version-conflict retries in
-`sweep` and `erase_session` are assumed, not proved), `ensure_index`, index naming and
-`validate_index_prefix`, widths (`index_doc`'s width check), interactions and
-graph structure, multiple sessions (`mirror` over several sessions is reduced
-to the one-session attribution rule), the eviction bound (#18) and
-`repair_run` (#18), log messages and `last_error`, timeouts as
-durations (a deadline is an event), the primary's own errors, `backfill_recall_index`,
-the unchecked `vector_candidates` surface, and holder derive (#18).
+Boundary: scores are exact fixed-point cosines, so `f32`/`f64` rounding in
+`rank_by_cosine` and the engine is outside the model. The refresh interval is
+not modelled as such (the realtime view stands for every view a refresh can
+expose; delete-by-query is atomic with its refresh, so the #18 refresh-first
+rule and the version-conflict retries in `sweep` and `erase_session` are
+assumed, not proved); nor are `ensure_index`, interactions and graph
+structure, multiple sessions (`mirror` over several sessions is reduced to
+the one-session attribution rule), the eviction bound and `repair_run`, log
+messages and `last_error`, timeouts as durations (a deadline is an event), the
+primary's own errors, `backfill_recall_index`, the unchecked
+`vector_candidates` surface and holder derive. `eraseOther` has no
+lease-liveness gate; the real `erase_gate` answers `Held` while another
+holder's lease is live. #273 Track 3 proposes `tiered/repair.rs`,
+`tiered/mirror.rs` and `tiered/search.rs`; the Rust is not split yet, and the
+invariants here span all three.
 -/
 
 namespace Lambo.Tiered
-
-/-! ## Versions (`project::mirror_version`, `Tier::next_version`) -/
-
-/-- `1 << 32`: the counter's place in an external version.
-Pinned by `formal_constants_tests::tiered` (its Rust side with feature `recall-elastic`). -/
-def shift : Nat := 4294967296
-
-/-- `u32::MAX`.
-Pinned by `formal_constants_tests::tiered` (its Rust side with feature `recall-elastic`). -/
-def u32Max : Nat := 4294967295
-
-/-- `MAX_VERSIONED_TOKEN = (i64::MAX as u64) >> 32`.
-Pinned by `formal_constants_tests::tiered` (its Rust side with feature `recall-elastic`). -/
-def maxTok : Nat := 2147483647
-
-/-- `mirror_version(token, counter)`: `(token << 32) | counter`, or `None` when
-the token does not fit a positive signed 64-bit version. For a counter below
-`1 << 32` (a `u32`) the `|` is `+`. -/
-def mirrorVersion (t c : Nat) : Option Nat :=
-  if t ≤ maxTok then some (t * shift + c) else none
-
-/-- `next_version`: restart the counter for a new token, refuse to wrap it
-(`checked_add`) or to overflow the version. Returns the new `(token, counter)`
-and the version, or `none` (the Rust's error string). -/
-def nextVersion (tok cnt t : Nat) : Option (Nat × Nat × Nat) :=
-  let c := if tok = t then cnt else 0
-  if c + 1 ≤ u32Max then
-    match mirrorVersion t (c + 1) with
-    | some v => some (t, c + 1, v)
-    | none => none
-  else none
-
-theorem mirrorVersion_lt_tok {t t' c c' : Nat} (hc : c < shift) (ht : t < t')
-    (h' : t' ≤ maxTok) : ∃ v v', mirrorVersion t c = some v ∧ mirrorVersion t' c' = some v' ∧
-      v < v' := by
-  refine ⟨t * shift + c, t' * shift + c', ?_, ?_, ?_⟩
-  · simp [mirrorVersion]; omega
-  · simp [mirrorVersion]; omega
-  · have : (t + 1) * shift ≤ t' * shift := Nat.mul_le_mul_right _ ht
-    rw [Nat.add_mul] at this
-    omega
-
-/-- **A new holder outranks every write of an older one** (the doc comment of
-`mirror_version`): whatever the counters, a strictly larger token gives a
-strictly larger version. -/
-theorem version_holder_first {t t' c c' v v' : Nat} (hc : c < shift) (ht : t < t')
-    (hv : mirrorVersion t c = some v) (hv' : mirrorVersion t' c' = some v') : v < v' := by
-  have h' : t' ≤ maxTok := by
-    unfold mirrorVersion at hv'; split at hv' <;> simp_all
-  obtain ⟨w, w', hw, hw', hlt⟩ := mirrorVersion_lt_tok (c' := c') hc ht h'
-  rw [hv] at hw; rw [hv'] at hw'
-  cases hw; cases hw'; exact hlt
-
-/-- Within one holder the counter orders its writes. -/
-theorem version_counter {t c c' v v' : Nat} (hc : c < c')
-    (hv : mirrorVersion t c = some v) (hv' : mirrorVersion t c' = some v') : v < v' := by
-  unfold mirrorVersion at hv hv'
-  split at hv <;> simp_all
-  omega
-
-/-- **`next_version` never repeats or goes back** under one token or a later
-one: the version it hands out is above every version the previous
-`(token, counter)` could have produced, so a holder's writes land in issue
-order and a takeover's writes outrank the old holder's. -/
-theorem nextVersion_gt {tok cnt t t' c' v w : Nat} (hcnt : cnt ≤ u32Max) (ht : tok ≤ t)
-    (hold : mirrorVersion tok cnt = some w) (h : nextVersion tok cnt t = some (t', c', v)) :
-    w < v ∧ t' = t ∧ c' ≤ u32Max := by
-  unfold nextVersion at h
-  by_cases he : tok = t
-  · subst he
-    simp only [ite_true] at h
-    split at h
-    · rename_i hle
-      split at h
-      · rename_i v₀ hv
-        simp only [Option.some.injEq, Prod.mk.injEq] at h
-        obtain ⟨rfl, rfl, rfl⟩ := h
-        exact ⟨version_counter (Nat.lt_succ_self _) hold hv, rfl, hle⟩
-      · simp at h
-    · simp at h
-  · simp only [he, ite_false] at h
-    split at h
-    · rename_i hle
-      split at h
-      · rename_i v₀ hv
-        simp only [Option.some.injEq, Prod.mk.injEq] at h
-        obtain ⟨rfl, rfl, rfl⟩ := h
-        have hlt : tok < t := Nat.lt_of_le_of_ne ht he
-        exact ⟨version_holder_first (by unfold u32Max at hcnt; unfold shift; omega) hlt hold hv,
-          rfl, hle⟩
-      · simp at h
-    · simp at h
-
-/-- The counter refuses to wrap (`an_exhausted_flush_counter_refuses_the_mirror`). -/
-example : nextVersion 7 u32Max 7 = none := by decide
-
-/-- A new token restarts the counter at 1 (`flush_counters_are_kept_per_session`). -/
-example : nextVersion 7 41 8 = some (8, 1, 8 * shift + 1) := by decide
-
-/-- `the_version_orders_holders_before_counters_and_refuses_overflow`. -/
-example : mirrorVersion 1 u32Max = some (shift + u32Max) ∧ shift + u32Max < 2 * shift + 1 ∧
-    mirrorVersion 2 1 = some (2 * shift + 1) ∧ mirrorVersion (maxTok + 1) 1 = none := by decide
-
-/-! ## The over-fetch (`knn_fetch`, `KNN_OVERFETCH`) -/
-
-/-- `MAX_VECTOR_CANDIDATE_LIMIT`.
-Pinned by `formal_constants_tests::tiered`. -/
-def maxLimit : Nat := 2048
-
-/-- `KNN_OVERFETCH`.
-Pinned by `formal_constants_tests::tiered` (its Rust side with feature `recall-elastic`). -/
-def overfetch : Nat := 16
-
-/-- `knn_fetch(limit)`: `limit + 16`, capped at `max(2048, limit)`. -/
-def knnFetch (limit : Nat) : Nat := min (limit + overfetch) (max maxLimit limit)
-
-/-- **The over-fetch bound (#18).** For every limit the store accepts
-(`validate_vector_candidate_limit`: at most 2048), the fetch is at least the
-limit and never above the store-wide candidate limit; below the cap it is
-exactly `limit + 16`. -/
-theorem knnFetch_bounds (limit : Nat) (h : limit ≤ maxLimit) :
-    limit ≤ knnFetch limit ∧ knnFetch limit ≤ maxLimit ∧
-      (limit + overfetch ≤ maxLimit → knnFetch limit = limit + overfetch) := by
-  unfold knnFetch maxLimit overfetch at *
-  refine ⟨?_, ?_, ?_⟩ <;> omega
-
-/-- `the_overfetch_never_exceeds_the_candidate_limit`. -/
-example : knnFetch 5 = 21 ∧ knnFetch 2048 = 2048 ∧ knnFetch 2044 = 2048 := by decide
-
-/-! ## The durable session and the projection (`project::project`) -/
-
-/-- A stored vector: the embedder build that produced it and its value. Only
-the build matters to the theorems (two builds behind one contract name is a
-canary drift, #296); widths are taken as right (`index_doc`'s width check and
-`check_supplied_values` are left out). -/
-abbrev Vec := Nat × Nat
-
-/-- The mutations the projection reads. `upsert n v` is an `UpsertNode` of a
-concept (`v = none`: it carries no vector); `setContract` is `SetEmbedding`;
-`deleteEdge` is `DeleteEdge`; `other` is every other mutation (interactions,
-edges, canonization, names), which the index never sees but which names the
-session (`batch_session_ids`). Contracts are named by a number. One session throughout. -/
-inductive Mut where
-  | upsert (n : Nat) (v : Option Vec)
-  | delete (n : Nat)
-  | setContract (c : Option Nat)
-  | deleteEdge
-  | other
-  deriving DecidableEq, Repr
-
-/-- One index write of a mirror: `(contract, node, document)`, `none` a delete
-(`DocOp::Index` / `DocOp::Delete`), all at the batch's one version. -/
-abbrev Op := Nat × Nat × Option Vec
-
-/-- `project`'s `push`: drop any earlier write for the id, append this one (the
-whole batch is written at one version, so a second write for an id would be
-refused as a conflict). -/
-def pushOp (ops : List Op) (o : Op) : List Op :=
-  ops.filter (fun p => p.2.1 != o.2.1) ++ [o]
-
-/-- `project(session, mutations, contract_before, version)`: the writes and the
-contract after the batch. With no contract in force nothing is written. -/
-def projectGo : List Mut → Option Nat → List Op → List Op × Option Nat
-  | [], cur, ops => (ops, cur)
-  | .setContract c :: ms, _, ops => projectGo ms c ops
-  | .upsert n v :: ms, cur, ops =>
-      match cur with
-      | some c => projectGo ms cur (pushOp ops (c, n, v))
-      | none => projectGo ms cur ops
-  | .delete n :: ms, cur, ops =>
-      match cur with
-      | some c => projectGo ms cur (pushOp ops (c, n, none))
-      | none => projectGo ms cur ops
-  | .deleteEdge :: ms, cur, ops => projectGo ms cur ops
-  | .other :: ms, cur, ops => projectGo ms cur ops
-
-def project (ms : List Mut) (before : Option Nat) : List Op × Option Nat :=
-  projectGo ms before []
-
-/-- `the_projection_follows_the_mutation_table`, on its shape: no contract yet
-writes nothing, the last write for an id wins, a switch moves what follows. -/
-example :
-    project [.upsert 1 (some (0, 10)), .setContract (some 1), .upsert 1 (some (0, 10)),
-      .upsert 2 none, .other, .setContract (some 2), .upsert 1 (some (0, 11)), .delete 2] none
-      = ([(2, 1, some (0, 11)), (2, 2, none)], some 2) := by decide
-
-/-- `a_cleared_contract_stops_writes`. -/
-example : project [.setContract none, .upsert 1 (some (0, 1)), .delete 2] (some 1) = ([], none) := by
-  decide
-
-/-- `Projection::switched` (#319): the batch moves the contract where its
-projection cannot say what the new contract's index must hold. A
-`SetEmbedding` that changes the contract in force counts when a contract was
-already in force (the session's other vectors are now the new contract's:
-`--allow-embedding-mismatch`'s relabel, or a migration) or when a concept
-upsert carrying a vector came earlier in the batch (its vector is the new
-contract's, and a first stamp quarantines it durably; `Graph::reembed_all`
-wrote that order from no contract before #322, and a raw writer still can).
-A first stamp with nothing before it, or a `SetEmbedding` that
-keeps the contract, does not count. -/
-def switchesGo : List Mut → Option Nat → Bool → Bool
-  | [], _, _ => false
-  | .setContract c :: ms, cur, up => (decide (c ≠ cur) && (cur.isSome || up)) || switchesGo ms c up
-  | .upsert _ (some _) :: ms, cur, _ => switchesGo ms cur true
-  | _ :: ms, cur, up => switchesGo ms cur up
-
-def switches (ms : List Mut) (before : Option Nat) : Bool := switchesGo ms before false
-
-/-- The durable side of one session: its concepts' vectors (most recent first,
-one entry per id), its contract, its mutation epoch, whether it was erased,
-and its lease row (`lease` is `current_token`, `row` who holds it). -/
-inductive Row where
-  | none | ours | other | released | erased
-  deriving DecidableEq, Repr
-
-structure Durable where
-  vecs : List (Nat × Vec) := []
-  contract : Option Nat := none
-  epoch : Nat := 0
-  erased : Bool := false
-  lease : Nat := 0
-  row : Row := .none
-  deriving DecidableEq, Repr
-
-/-- The stored vector of concept `n`. -/
-def lookup (n : Nat) (l : List (Nat × Vec)) : Option Vec :=
-  (l.find? (fun p => p.1 == n)).map (·.2)
-
-/-- One mutation applied to the durable rows (the SQL adapters apply a whole
-batch in one transaction). A session's first contract stamp quarantines every
-vector it holds, those written earlier in the same batch included: the legacy
-upgrade of `MemoryStore`'s `SetEmbedding`, the pg family's
-`QUARANTINE_LEGACY_EMBEDDINGS_SQL` and SQLite's `set_embedding` (whose
-width predicate is true for an unstamped session). -/
-def applyMut (d : Durable) : Mut → Durable
-  | .upsert n (some v) => { d with vecs := (n, v) :: d.vecs.filter (fun p => p.1 != n) }
-  | .upsert n none => { d with vecs := d.vecs.filter (fun p => p.1 != n) }
-  | .delete n => { d with vecs := d.vecs.filter (fun p => p.1 != n) }
-  | .setContract c =>
-      { d with contract := c, vecs := if d.contract.isNone && c.isSome then [] else d.vecs }
-  | .deleteEdge | .other => d
-
-/-- A committed batch: every mutation, then the next epoch. -/
-def applyBatch (d : Durable) (ms : List Mut) : Durable :=
-  { ms.foldl applyMut d with epoch := d.epoch + 1 }
-
-/-! ## The sync marker (`check_marker`, `Marker::sync`) -/
-
-inductive Sync where
-  | unknown | inSync | stale
-  deriving DecidableEq, Repr
-
-inductive Marker where
-  | inSync | behind | ahead | unreachable
-  deriving DecidableEq, Repr
-
-def Marker.sync : Marker → Sync
-  | .inSync => .inSync
-  | .behind => .stale
-  | .ahead | .unreachable => .unknown
-
-/-- What a durable load returns: `none` for `SessionNotFound`. -/
-abbrev Snap := Option Durable
-
-def snapEpoch : Snap → Nat
-  | some d => d.epoch
-  | none => 0
-
-/-- `check_marker`'s `indexable`: a contract and at least one concept with a
-vector. -/
-def indexable : Snap → Bool
-  | some d => d.contract.isSome && !d.vecs.isEmpty
-  | none => false
-
-/-- `check_marker(session, snap)`. `mk` is the marker the index holds (its
-version and epoch); `down` an unreachable index. -/
-def checkMarker (down : Bool) (mk : Option (Nat × Nat)) (snap : Snap) : Marker :=
-  if down then .unreachable else
-  match mk with
-  | some (_, e) =>
-      if e = snapEpoch snap then .inSync
-      else if e > snapEpoch snap then .ahead else .behind
-  | none => if indexable snap then .behind else .inSync
-
-/-- A marker read classifies every snapshot one way, and only an `InSync`
-marker is trusted. -/
-theorem checkMarker_inSync_iff (mk : Option (Nat × Nat)) (snap : Snap) :
-    checkMarker false mk snap = .inSync ↔
-      (∃ v, mk = some (v, snapEpoch snap)) ∨ (mk = none ∧ indexable snap = false) := by
-  unfold checkMarker
-  cases mk with
-  | none => cases indexable snap <;> simp
-  | some p =>
-    obtain ⟨v, e⟩ := p
-    simp only [Bool.false_eq_true, ite_false, Option.some.injEq, Prod.mk.injEq, exists_eq_left',
-      reduceCtorEq, false_and, or_false]
-    by_cases h : e = snapEpoch snap
-    · simp [h]
-    · by_cases h' : e > snapEpoch snap <;> simp [h, h']
-
-/-! ## The read breaker (`breaker_admits`, `breaker_success`, `breaker_failure`) -/
-
-/-- `Breaker`: consecutive failures and, once open, until when. -/
-structure Breaker where
-  fails : Nat := 0
-  openUntil : Option Nat := none
-  deriving DecidableEq, Repr
-
-/-- The breaker's two settings (`BREAKER_THRESHOLD = 3`,
-`BREAKER_COOLDOWN = 30s`) and the repair backoff (`REPAIR_BACKOFF = 60s`).
-Times are whole seconds.
-Pinned by `formal_constants_tests::tiered` (its Rust side with feature `recall-elastic`). -/
-structure Params where
-  threshold : Nat := 3
-  cooldown : Nat := 30
-  backoff : Nat := 60
-  /-- The #319 fix: a batch that moves the contract (`switches`) is repaired
-  from the durable store, not mirrored. `false` is the previous mirror, kept
-  for the theorems that pin it. -/
-  switchRepairs : Bool := true
-  deriving DecidableEq, Repr
-
-/-- `breaker_admits`: whether this read may ask the index, and the breaker
-after it. A read past the cool-down is the probe and pushes it forward. -/
-def admits (P : Params) (now : Nat) (b : Breaker) : Bool × Breaker :=
-  match b.openUntil with
-  | some u => if now < u then (false, b) else (true, { b with openUntil := some (now + P.cooldown) })
-  | none => (true, b)
-
-def onSuccess (_b : Breaker) : Breaker := {}
-
-def onFailure (P : Params) (now : Nat) (b : Breaker) : Breaker :=
-  let f := b.fails + 1
-  if f ≥ P.threshold then { fails := f, openUntil := some (now + P.cooldown) }
-  else { b with fails := f }
-
-/-- A read through the breaker: `ok` says whether the index would answer. The
-result is `true` when the index answered, `false` when the read went to the
-durable store (refused by an open breaker, or failed). -/
-def breakerRead (P : Params) (now : Nat) (ok : Bool) (b : Breaker) : Bool × Breaker :=
-  match admits P now b with
-  | (false, b') => (false, b')
-  | (true, b') => if ok then (true, onSuccess b') else (false, onFailure P now b')
-
-/-- Reads at a time, each with whether the index would answer. -/
-def breakerRun (P : Params) : List (Nat × Bool) → Breaker → List Bool × Breaker
-  | [], b => ([], b)
-  | (t, ok) :: rs, b =>
-      let (r, b') := breakerRead P t ok b
-      let (rs', b'') := breakerRun P rs b'
-      (r :: rs', b'')
-
-/-- **The breaker trips** (#18): `threshold` consecutive failures from a closed
-breaker open it for a full cool-down after the last one. -/
-theorem breaker_trips (P : Params) (b : Breaker) (now : Nat) (h : P.threshold ≤ b.fails + 1)
-    (hc : b.openUntil = none) :
-    (breakerRead P now false b).2.openUntil = some (now + P.cooldown) := by
-  simp [breakerRead, admits, hc, onFailure, h]
-
-/-- Below the threshold a failure does not open a closed breaker. -/
-theorem breaker_counts (P : Params) (b : Breaker) (now : Nat) (h : b.fails + 1 < P.threshold)
-    (hc : b.openUntil = none) : (breakerRead P now false b).2.openUntil = none := by
-  simp only [breakerRead, admits, hc, onFailure]
-  have : ¬ (b.fails + 1 ≥ P.threshold) := by omega
-  simp [this]
-
-/-- **While open, reads go to the durable store** and the index is not asked:
-the answer is the fallback whatever the index would say, and the breaker is
-unchanged. -/
-theorem breaker_open_falls_back (P : Params) (b : Breaker) (now u : Nat) (ok : Bool)
-    (hu : b.openUntil = some u) (hlt : now < u) : breakerRead P now ok b = (false, b) := by
-  simp [breakerRead, admits, hu, hlt]
-
-/-- **One probe after the cool-down**: the first read at or past `openUntil`
-asks the index and pushes the cool-down forward, so a concurrent read before
-the probe's outcome still falls back. -/
-theorem breaker_one_probe (P : Params) (b : Breaker) (now u : Nat) (hu : b.openUntil = some u)
-    (hge : u ≤ now) (hP : 0 < P.cooldown) :
-    (admits P now b).1 = true ∧ ∀ ok', (breakerRead P now ok' (admits P now b).2).1 = false := by
-  have hn : ¬ now < u := Nat.not_lt.mpr hge
-  refine ⟨by simp [admits, hu, hn], ?_⟩
-  intro ok'
-  have hlt : now < now + P.cooldown := by omega
-  simp [admits, hu, hn, breakerRead, hlt]
-
-/-- **A successful probe closes the breaker**; a failed one re-opens it for
-another cool-down. -/
-theorem breaker_probe_outcome (P : Params) (b : Breaker) (now u : Nat) (hu : b.openUntil = some u)
-    (hge : u ≤ now) :
-    breakerRead P now true b = (true, {}) ∧
-      (breakerRead P now false b).2.openUntil = some (now + P.cooldown) := by
-  have hn : ¬ now < u := Nat.not_lt.mpr hge
-  simp [breakerRead, admits, hu, hn, onSuccess, onFailure]
-
-/-- `failing_index_reads_open_a_breaker_that_a_probe_closes` (threshold 3,
-cool-down 100 ms as 100 ticks): three failed reads ask the index, the next five
-do not, the probe after the cool-down does and succeeds, and the read after it
-asks again. -/
-example :
-    (breakerRun { threshold := 3, cooldown := 100 }
-      [(0, false), (0, false), (0, false), (1, false), (2, true), (3, true), (4, true), (5, true),
-       (150, true), (151, true)] {}).1
-      = [false, false, false, false, false, false, false, false, true, true] := by decide
-
-/-- `a_hanging_index_read_is_cut_at_the_deadline_and_counts` (threshold 2): two
-timeouts open it, the next two reads are not sent. -/
-example :
-    (breakerRun { threshold := 2, cooldown := 60 } [(0, false), (0, false), (0, false), (0, false)]
-      {}).2.openUntil = some 60 := by decide
-
-/-- A read admitted before the breaker opened and answering after it closes
-the breaker at once: `breaker_success` resets whatever opened it in between. -/
-theorem late_success_closes (b : Breaker) :
-    onSuccess b = {} := rfl
-
-/-! ## Lease bookkeeping (`note_lease`, `note_refresh`, `ensure_fenced`) -/
-
-/-- What an acquire or refresh returned: `Acquired(token)` or `Held`. -/
-inductive LeaseOutcome where
-  | acquired (t : Nat)
-  | held
-  deriving DecidableEq, Repr
-
-/-- `note_lease`: an acquire adopts the token it was given. -/
-def noteLease (_held : Option Nat) : LeaseOutcome → Option Nat
-  | .acquired t => some t
-  | .held => none
-
-/-- `note_refresh` (#293 review): a refresh keeps the token already held and
-never adopts another. -/
-def noteRefresh (held : Option Nat) : LeaseOutcome → Option Nat
-  | .acquired t => if held = some t then some t else none
-  | .held => none
-
-/-- `ensure_fenced(session, token)`: this store's record, then the durable row
-(absent: no durable leases, the first check only). -/
-def fenced (held : Option Nat) (durable : Option Nat) (t : Nat) : Bool :=
-  held == some t && (match durable with | some d => d == t | none => true)
-
-/-- **A refresh never adopts a re-taken token** (#293 review): after
-`note_refresh` the store holds a token only if it already held exactly it. -/
-theorem noteRefresh_never_adopts (held : Option Nat) (o : LeaseOutcome) (t : Nat)
-    (h : noteRefresh held o = some t) : held = some t := by
-  cases o with
-  | acquired t' =>
-    simp only [noteRefresh] at h
-    split at h
-    · rename_i he; cases h; exact he
-    · simp at h
-  | held => simp [noteRefresh] at h
-
-/-- Before #293's review the refresh was noted like an acquire and adopted the
-re-taken token: `a_refresh_that_retakes_the_lease_does_not_adopt_its_token`. -/
-example : noteLease (some 4) (.acquired 5) = some 5 ∧ noteRefresh (some 4) (.acquired 5) = none ∧
-    noteRefresh (some 4) (.acquired 4) = some 4 := by decide
-
-/-- **The fence passes only for the current generation**: under any token
-other than the durable row's it refuses, whatever this store believes. -/
-theorem fenced_iff (held : Option Nat) (d t : Nat) :
-    fenced held (some d) t = true ↔ held = some t ∧ d = t := by
-  simp [fenced]
-
 /-! ## The state machine -/
 
 /-- One document slot of the index: its external version and its document
@@ -1285,7 +646,6 @@ section Authority
 
 variable (P : Params)
 
-theorem markStale_d (s : St) : (markStale s).d = s.d := rfl
 theorem requestRepair_d (s : St) : (requestRepair s).d = s.d := by
   unfold requestRepair; split <;> rfl
 theorem repairIfDue_d (s : St) : (repairIfDue s).d = s.d := by
@@ -1489,6 +849,8 @@ theorem lease_mono (s : St) (e : Ev) : s.d.lease ≤ (step P s e).d.lease := by
     all_goals (repeat' split) <;>
       simp [mirror_d, (applyBatch_lease _ _).1, eraseDurable]
 
+/-- The tiered store's durable lease token never decreases, over any run of
+writes, mirrors, repairs and takeovers. -/
 theorem run_lease_mono (s : St) (evs : List Ev) : s.d.lease ≤ (run P s evs).d.lease := by
   induction evs generalizing s with
   | nil => exact Nat.le_refl _
@@ -1670,9 +1032,6 @@ theorem settle_aux (s : St) (snap : Snap) :
   by_cases h1 : checkMarker s.down s.mark snap = .ahead <;>
     simp only [h1, ite_true, ite_false] <;> split <;> (try split) <;> simp
 
-theorem settle_rep (s : St) (snap : Snap) :
-    (settle P s snap).rep = s.rep ∨ (settle P s snap).rep = .head := (settle_aux P s snap).1
-
 theorem read_aux (exp : Nat) (s : St) :
     ((read P exp s).rep = s.rep ∨ (read P exp s).rep = .head) ∧
       (read P exp s).orphans = s.orphans ∧ (read P exp s).log = s.log := by
@@ -1720,8 +1079,14 @@ theorem read_aux (exp : Nat) (s : St) :
       · exact hsync
       · split <;> (try split) <;> exact hsync
 
-/-- A head or idle repair task is not writing. -/
+/-- A repair task at the head of `repair_once` (before it loads a snapshot)
+has no repair write under any lease token on the wire, so a lost lease has
+nothing of its to fence. -/
 theorem writing_head (t : Nat) : RPc.head.writing t = false := rfl
+
+/-- An idle repair task (`run_repairs` waiting for a request) has no repair
+write under any lease token on the wire, so a lost lease has nothing of its
+to fence. -/
 theorem writing_idle (t : Nat) : RPc.idle.writing t = false := rfl
 
 theorem step_row (s : St) (e : Ev) (h : s.d.row ≠ .none) : (step P s e).d.row ≠ .none := by
@@ -1764,8 +1129,6 @@ structure Frame (s s' : St) : Prop where
 
 theorem frame_same {s s' : St} (h1 : s'.rep = s.rep) (h2 : s'.orphans = s.orphans)
     (h3 : s'.log = s.log) : Frame s s' := ⟨Or.inl h1, Or.inl h2, Or.inl h3⟩
-
-theorem frame_refl (s : St) : Frame s s := frame_same rfl rfl rfl
 
 theorem frame_mirror (s : St) (d : Durable) (ms : List Mut) (t : Option Nat) (d' : Durable) :
     Frame s (mirror P { s with d := d } ms t d') := by
@@ -1966,9 +1329,9 @@ theorem erase_silences_repair (s : St) (t : Nat) (e : Ev)
     exact ⟨by simp [step, hne, eraseDurable]; omega, by simp [step, hne, eraseDurable],
       by simpa [step, hne] using hw, by simpa [step, hne] using ho⟩
 
-/-- The quiet state is reached: after the fence refuses (`passLost`) the
-repair task is idle; with the lease past the token and nothing orphaned, the
-stalled holder is `Quiet`. -/
+/-- Once the lease is past token `t`, a lease row exists, the repair task is
+idle or at the head of `repair_once`, and no request under `t` is orphaned,
+the old holder can land no repair write (`Quiet t`). -/
 theorem quiet_of_idle (s : St) (t : Nat) (hp : t < s.d.lease) (hr : s.d.row ≠ .none)
     (hi : s.rep = .idle ∨ s.rep = .head) (ho : ∀ x ∈ s.orphans, x.1 ≠ .repair t) : Quiet t s :=
   ⟨hp, hr, by rcases hi with h | h <;> rw [h] <;> rfl, ho⟩
@@ -2258,6 +1621,8 @@ theorem mirror_ends (s : St) : (run P s (steps .mirStep s.mir.measure)).mir = .i
       exact ih s (by rw [hi]; exact Nat.zero_le _)
     · exact ih _ (Nat.le_of_lt_succ (Nat.lt_of_lt_of_le (mirStep_measure s hi) h))
 
+/-- A mirror timeout ends the mirror task (`mirror_ops` is abandoned): nothing
+more of that batch is mirrored. -/
 theorem mirTimeout_ends (s : St) : (step P s .mirTimeout).mir = .idle := by
   simp only [step]; split
   · assumption
@@ -2836,466 +2201,5 @@ theorem write_switch_writes_nothing (s : St) (ms : List Mut) (hp : P.switchRepai
   exact ⟨mirror_d P _ _ _ _, h1, h2, h3.trans hm, h4⟩
 
 end Switch
-
-/-! ## Runs from the tests -/
-
-section Runs
-
-/-- The tests' tier: repairs without waiting (`with_repair_backoff(ZERO)`). -/
-def Pt : Params := { backoff := 0 }
-
-/-- What a read returned, at some nodes: `none` when it was not the index. -/
-def Answer.at (a : Answer) (ns : List Nat) : Option (List (Option Vec)) :=
-  match a with
-  | .index _ view => some (ns.map view)
-  | _ => none
-
-def Answer.isFallback : Answer → Bool
-  | .fallback => true
-  | _ => false
-
-def answerAt (s : St) (ns : List Nat) : Option (List (Option Vec)) :=
-  s.answer.bind (·.at ns)
-
-def fellBack (s : St) : Bool := s.answer.any (·.isFallback)
-
-/-- The index document of node `n` in contract `c`. -/
-def docAt (s : St) (c n : Nat) : Option Vec := (s.rt c n).doc
-
-def markerEpoch (s : St) : Option Nat := s.mark.map (·.2)
-
-/-- Acquire, then load (`attach`, the order `Memory` attaches in). -/
-def attachEvs : List Ev := [.acquire, .loadBegin, .loadEnd]
-
-/-- `seed_batch`: contract 1, two vectors of build 0, one concept without. -/
-def seed : List Mut := [.setContract (some 1), .upsert 1 (some (0, 10)), .upsert 2 (some (0, 20)),
-  .upsert 3 none]
-
-/-- Attached, seeded and mirrored: in sync, the index serves nodes 1 and 2. -/
-def seeded : St := run Pt {} (attachEvs ++ [.write seed] ++ steps .mirStep 5)
-
-/-- `a_committed_flush_is_mirrored_and_the_index_serves_the_vector_leg`. -/
-example : seeded.tier.sync = .inSync ∧ markerEpoch seeded = some 1 ∧
-    answerAt (run Pt seeded [.read 1]) [1, 2, 3] = some [some (0, 10), some (0, 20), none] := by
-  decide
-
-/-- `a_contract_mismatch_is_refused_...`: a read expecting another contract is
-refused. -/
-example : (match (run Pt seeded [.read 2]).answer with | some .refused => true | _ => false) = true := by
-  decide
-
-/-- `a_mirror_failure_keeps_the_flush_and_the_next_flush_repairs`: the flush
-is durable while the index is down, reads fall back, and the next flush after
-the index returns repairs the session in full. -/
-def outage : St := run Pt {} (attachEvs ++ [.setDown true, .write seed, .mirStep, .setDown false])
-
-example : outage.d.vecs.length = 2 ∧ outage.tier.sync = .stale ∧ outage.tier.failures = 1 ∧
-    fellBack (run Pt outage [.read 1]) = true := by decide
-
-def outageRepaired : St :=
-  run Pt outage ([.write [.upsert 4 (some (0, 40))]] ++ steps .repStep 20 ++ [.read 1])
-
-example : outageRepaired.tier.sync = .inSync ∧ markerEpoch outageRepaired = some 2 ∧
-    answerAt outageRepaired [1, 2, 3, 4] = some [some (0, 10), some (0, 20), none, some (0, 40)] ∧
-    outageRepaired.rep = .idle := by decide
-
-/-- `repair_converges` applies to the outage test: after the index came back
-and the next flush asked for a repair, the task is at its load with every
-hypothesis met, and the theorem gives the match. -/
-def atLoad : St := run Pt outage [.write [.upsert 4 (some (0, 40))], .repStep]
-
-example : atLoad.rep = .load 1 ∧ atLoad.tier.held = some 1 ∧ atLoad.d.lease = 1 ∧
-    atLoad.d.row = .ours ∧ atLoad.d.erased = false ∧ atLoad.down = false ∧
-    checkMarker false atLoad.mark (some atLoad.d) = .behind ∧
-    nextVersion atLoad.tier.tok atLoad.tier.cnt 1 = some (1, 2, shift + 2) ∧
-    atLoad.mark = none ∧ atLoad.tier.committed ≤ atLoad.d.epoch ∧ atLoad.tier.again = false ∧
-    atLoad.d.vecs.length = 3 := by decide
-
-theorem atLoad_rt : atLoad.rt = Idx.empty := rfl
-
-example : Matches (run Pt atLoad (steps .repStep (2 * 3 + 9))) :=
-  (repair_converges Pt atLoad 1 1 2 (shift + 2) (by decide) (by decide) (by decide)
-    (by decide) (by decide) (by decide) (by decide) (by decide)
-    (by intro c n; rw [atLoad_rt]; simp [Idx.empty, shift])
-    (by intro w e h; simp [show atLoad.mark = none by decide] at h)
-    (by decide) (by decide)).1
-
-/-- `repairs_run_one_at_a_time_per_session` and the #18 test
-(`a_repair_overtaken_by_a_flush_is_not_trusted_until_the_rerun`): a flush that
-commits while a repair runs is not in its snapshot; the pass writes its own
-epoch but does not mark the session in sync, a read falls back, and the rerun
-settles it. -/
-def overtaken : St :=
-  run Pt outage ([.write [.upsert 4 (some (0, 40))]] ++ steps .repStep 12 ++
-    [.write [.upsert 5 (some (0, 50))]] ++ steps .repStep 4)
-
-example : overtaken.rep = .head ∧ markerEpoch overtaken = some 2 ∧ overtaken.tier.sync ≠ .inSync ∧
-    overtaken.tier.repairing = true ∧ fellBack (run Pt overtaken [.read 1]) = true := by decide
-
-example : (run Pt overtaken (steps .repStep 30)).tier.sync = .inSync ∧
-    markerEpoch (run Pt overtaken (steps .repStep 30)) = some 3 ∧
-    docAt (run Pt overtaken (steps .repStep 30)) 1 5 = some (0, 50) := by decide
-
-/-- `a_repair_that_lost_its_lease_stops_writing` (#18): the holder's repair
-lands its first chunk, the lease lapses and another process erases the
-session; the repair's next fence check stops it. One write landed, no marker,
-stale, and the lost lease is not counted as an index failure. -/
-def lostLease : St :=
-  run Pt outage ([.write [.upsert 4 (some (0, 40))]] ++ steps .repStep 6 ++ [.eraseOther] ++
-    steps .repStep 10)
-
-example : lostLease.log.filter (· = .repair 1) = [.repair 1] ∧ lostLease.mark = none ∧
-    lostLease.tier.sync = .stale ∧ lostLease.tier.failures = 1 ∧ lostLease.tier.held = none ∧
-    lostLease.rep = .idle := by decide
-
-/-- `erase_stops_this_stores_repair_before_it_sweeps` (#18): an erase through
-this store fences the repair, waits for it, then sweeps: nothing of the
-session is left and the state is gone. -/
-def erasedHere : St :=
-  run Pt outage ([.write [.upsert 4 (some (0, 40))]] ++ steps .repStep 6 ++ [.eraseStop] ++
-    steps .repStep 10 ++ [.eraseFinish])
-
-example : erasedHere.mark = none ∧ docAt erasedHere 1 1 = none ∧ docAt erasedHere 1 4 = none ∧
-    erasedHere.tier = {} ∧ erasedHere.erasing = false := by decide
-
-/-- `a_flush_is_not_mirrored_after_the_lease_was_lost` and the #293 review
-(`a_refresh_that_retakes_the_lease_does_not_adopt_its_token`): after the
-operator override the heartbeat's refresh re-takes the row at a new token, the
-store stops calling the lease held, the writer's next flush is refused by the
-primary, and no repair runs. -/
-def retaken : St := run Pt seeded [.override, .refresh]
-
-example : retaken.d.lease = 2 ∧ retaken.tier.held = none ∧ retaken.wtok = some 1 ∧
-    (run Pt retaken [.write [.upsert 4 (some (0, 40))]]).d = retaken.d := by decide
-
-/-- `a_marker_ahead_of_the_loaded_snapshot_is_rechecked_not_repaired` (#18): a
-load that read e1 while the holder's own flush committed and mirrored e2 sees
-the marker ahead, re-checks against a fresh load, and is in sync without a
-repair. -/
-example :
-    let s := run Pt seeded ([.loadBegin, .write [.upsert 4 (some (0, 40))]] ++ steps .mirStep 3 ++
-      [.loadEnd])
-    s.tier.sync = .inSync ∧ s.rep = .idle ∧ s.tier.repairing = false := by decide
-
-/-- `an_unleased_flush_is_not_mirrored_and_the_next_holder_repairs` (#18). -/
-example :
-    let s := run Pt {} [.writeUnleased seed]
-    s.tier.sync = .stale ∧ s.log = [] ∧
-      (run Pt s (attachEvs ++ steps .repStep 20)).tier.sync = .inSync := by decide
-
-/-! ### What the model shows about the Rust -/
-
-/-- The previous mirror (before the #319 fix), with the tests' backoff: the
-pinned runs below are statements about it. -/
-def Pprev : Params := { Pt with switchRepairs := false }
-
-/-- **A re-embed migration through the tier wrote its new vectors into the
-old contract's index** (the previous version, #319). `Graph::reembed_all`
-drains every `UpsertNode` **before** the trailing `SetEmbedding` (so the
-durable flush is one old-to-new transaction), but `project` switches the
-contract only for what follows a `SetEmbedding`: the rewrite is projected
-into contract 1's index under contract 1's hash, the new contract 2's index
-gets nothing, the marker advances and the session stays in sync. A read under
-the new contract is served from the index and finds no vector at all, and
-since the marker is in sync no load ever repairs it (only
-`lambo recall-index backfill` would); contract 1's index now holds build-1
-vectors under contract 1's name, which a reader still holding contract 1 ranks
-a contract-1 probe against. `project` itself is unchanged by the fix. -/
-def reembedBatch : List Mut := [.upsert 1 (some (1, 11)), .upsert 2 (some (1, 21)), .setContract (some 2)]
-
-theorem project_reembed_into_old_index :
-    project reembedBatch (some 1) = ([(1, 1, some (1, 11)), (1, 2, some (1, 21))], some 2) := by
-  decide
-
-def migrated : St := run Pprev seeded ([.write reembedBatch] ++ steps .mirStep 4 ++ [.read 2])
-
-theorem reembed_migration_misindexed :
-    migrated.d.contract = some 2 ∧ lookup 1 migrated.d.vecs = some (1, 11) ∧
-      migrated.tier.sync = .inSync ∧ markerEpoch migrated = some 2 ∧
-      answerAt migrated [1, 2] = some [none, none] ∧
-      docAt migrated 1 1 = some (1, 11) ∧ docAt migrated 1 2 = some (1, 21) ∧
-      (run Pprev migrated ([.loadBegin, .loadEnd] ++ steps .repStep 20 ++ [.read 2])).rep = .idle ∧
-      answerAt (run Pprev migrated ([.loadBegin, .loadEnd] ++ steps .repStep 20 ++ [.read 2])) [1, 2]
-        = some [none, none] := by decide
-
-/-- The same switch with `SetEmbedding` first (the order `project`'s table and
-`a_contract_mismatch_is_refused_and_a_switch_queries_only_the_new_index`
-used) landed in the new index under the previous version. -/
-example :
-    answerAt (run Pprev seeded ([.write [.setContract (some 2), .upsert 1 (some (1, 11)),
-      .upsert 2 (some (1, 21))]] ++ steps .mirStep 4 ++ [.read 2])) [1, 2]
-      = some [some (1, 11), some (1, 21)] := by decide
-
-/-- **An operator relabel left the new contract's index empty** (the previous
-version; the same bug as #319 with `SetEmbedding` first, found by modelling
-the fix). `--allow-embedding-mismatch` flushes a lone `SetEmbedding`
-(`Graph::replace_embedding_with_operator_override`, a same-kind model rename
-that keeps the vectors). The projection writes nothing, the marker advances
-and the session stays in sync, so the vectors the durable store now holds
-under contract 2 are in no contract-2 document. -/
-def relabeled : St := run Pprev seeded ([.write [.setContract (some 2)]] ++ steps .mirStep 2 ++ [.read 2])
-
-theorem relabel_leaves_new_index_empty :
-    relabeled.d.contract = some 2 ∧ lookup 1 relabeled.d.vecs = some (0, 10) ∧
-      relabeled.tier.sync = .inSync ∧ markerEpoch relabeled = some 2 ∧
-      answerAt relabeled [1, 2] = some [none, none] := by decide
-
-/-! ### The fix for #319 -/
-
-/-- The issue's batch, and the relabel, switch; the seed (first stamp first)
-and the in-place rewrite (no `SetEmbedding`) do not. -/
-example : switches reembedBatch (some 1) = true ∧ switches [.setContract (some 2)] (some 1) = true ∧
-    switches reembedBatch none = true ∧ switches seed none = false ∧
-    switches [.upsert 1 (some (1, 11)), .upsert 2 (some (1, 21))] (some 1) = false := by decide
-
-/-- **The issue's batch through the fixed mirror.** The flush is durable, the
-mirror writes nothing (contract 1's index keeps the build-0 documents,
-contract 2's has none), the session is stale and a repair is asked for; the
-holder's read falls back to the durable store meanwhile. Not a mirror
-failure. -/
-def migratedFixed : St := run Pt seeded ([.write reembedBatch] ++ steps .mirStep 4 ++ [.read 2])
-
-theorem reembed_migration_held_back :
-    migratedFixed.d.contract = some 2 ∧ lookup 1 migratedFixed.d.vecs = some (1, 11) ∧
-      migratedFixed.tier.sync = .stale ∧ migratedFixed.tier.failures = 0 ∧
-      migratedFixed.rep = .head ∧ markerEpoch migratedFixed = some 1 ∧
-      fellBack migratedFixed = true ∧
-      docAt migratedFixed 1 1 = some (0, 10) ∧ docAt migratedFixed 1 2 = some (0, 20) ∧
-      docAt migratedFixed 2 1 = none ∧ docAt migratedFixed 2 2 = none := by decide
-
-/-- Then the repair re-indexes from the durable snapshot: contract 2's index
-serves exactly the batch's vectors, the session is in sync at the batch's
-epoch, and the session's contract-1 documents are swept. -/
-def migratedRepaired : St := run Pt migratedFixed (steps .repStep 20 ++ [.read 2])
-
-theorem reembed_migration_repaired :
-    migratedRepaired.tier.sync = .inSync ∧ markerEpoch migratedRepaired = some 2 ∧
-      migratedRepaired.rep = .idle ∧
-      answerAt migratedRepaired [1, 2, 3] = some [some (1, 11), some (1, 21), none] ∧
-      docAt migratedRepaired 1 1 = none ∧ docAt migratedRepaired 1 2 = none := by decide
-
-/-- The relabel through the fixed mirror is repaired too, and contract 2's
-index serves the relabelled vectors; so is a switch with `SetEmbedding` first
-from an existing contract (the fix repairs it instead of trusting the batch to
-rewrite every vector). -/
-example :
-    let r := run Pt seeded ([.write [.setContract (some 2)]] ++ steps .repStep 20 ++ [.read 2])
-    let f := run Pt seeded ([.write [.setContract (some 2), .upsert 1 (some (1, 11)),
-      .upsert 2 (some (1, 21))]] ++ steps .repStep 20 ++ [.read 2])
-    r.tier.sync = .inSync ∧ answerAt r [1, 2] = some [some (0, 10), some (0, 20)] ∧
-      f.tier.sync = .inSync ∧ answerAt f [1, 2] = some [some (1, 11), some (1, 21)] := by decide
-
-/-- `repair_converges` applies to the issue's batch: one repair step after the
-flush the task is at its load with every hypothesis met, so the new
-contract's index holds exactly the durable vectors, which are the batch's,
-for every node. -/
-def migratedAtLoad : St := run Pt seeded [.write reembedBatch, .repStep]
-
-example : migratedAtLoad.rep = .load 1 ∧ migratedAtLoad.tier.held = some 1 ∧
-    migratedAtLoad.d.lease = 1 ∧ migratedAtLoad.d.row = .ours ∧ migratedAtLoad.d.erased = false ∧
-    migratedAtLoad.down = false ∧ checkMarker false migratedAtLoad.mark (some migratedAtLoad.d) = .behind ∧
-    nextVersion migratedAtLoad.tier.tok migratedAtLoad.tier.cnt 1 = some (1, 3, shift + 3) ∧
-    migratedAtLoad.mark = some (shift + 1, 1) ∧ migratedAtLoad.tier.committed ≤ migratedAtLoad.d.epoch ∧
-    migratedAtLoad.tier.again = false ∧ migratedAtLoad.d.vecs = [(2, 1, 21), (1, 1, 11)] ∧
-    migratedAtLoad.d.contract = some 2 := by decide
-
-/-- The mirror wrote nothing: the index is still the seed's three documents. -/
-theorem migratedAtLoad_rt : migratedAtLoad.rt =
-    put (put (put Idx.empty 1 1 (shift + 1) (some (0, 10))) 1 2 (shift + 1) (some (0, 20)))
-      1 3 (shift + 1) none := rfl
-
-theorem migratedAtLoad_dom (c n : Nat) : (migratedAtLoad.rt c n).ver < shift + 3 := by
-  rw [migratedAtLoad_rt]
-  simp [put, Idx.empty, shift]
-  split <;> (try split) <;> (try split) <;> decide
-
-example : Matches (run Pt migratedAtLoad (steps .repStep (2 * 2 + 9))) ∧
-    (run Pt migratedAtLoad (steps .repStep (2 * 2 + 9))).d.contract = some 2 ∧
-    (run Pt migratedAtLoad (steps .repStep (2 * 2 + 9))).d.vecs = [(2, 1, 21), (1, 1, 11)] := by
-  obtain ⟨hm, hd, -⟩ := repair_converges Pt migratedAtLoad 1 1 3 (shift + 3) (by decide) (by decide)
-    (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
-    (migratedAtLoad_dom)
-    (by intro w e h; rw [show migratedAtLoad.mark = some (shift + 1, 1) by decide] at h
-        cases h; simp [shift])
-    (by decide) (by decide)
-  have hl : migratedAtLoad.d.vecs.length = 2 := by decide
-  rw [hl] at hm hd
-  refine ⟨hm, ?_, ?_⟩ <;> rw [hd] <;> decide
-
-/-! ### The candidates the fix did not take -/
-
-/-- Candidate 1: project the whole batch under its final contract (apply the
-batch's `SetEmbedding` before its upserts). -/
-def projectFinal (ms : List Mut) (before : Option Nat) : List Op × Option Nat :=
-  projectGo (ms.filter fun m => match m with | .setContract _ => false | _ => true)
-    (project ms before).2 []
-
-/-- It places the issue's batch... -/
-example : projectFinal reembedBatch (some 1) =
-    ([(2, 1, some (1, 11)), (2, 2, some (1, 21))], some 2) := by decide
-
-/-- ... but a relabel writes nothing while the durable session keeps its
-vectors under the new contract, -/
-theorem projectFinal_misses_relabel :
-    projectFinal [.setContract (some 2)] (some 1) = ([], some 2) ∧
-      (applyBatch seeded.d [.setContract (some 2)]).vecs = [(2, 0, 20), (1, 0, 10)] ∧
-      (applyBatch seeded.d [.setContract (some 2)]).contract = some 2 := by decide
-
-/-- A session with vectors and no contract (a legacy session; the vectors
-here stand for any the batch writes before its first stamp). -/
-def legacy : Durable := { vecs := [(2, 0, 20), (1, 0, 10)] }
-
-/-- ... and on a first stamp it indexes vectors the durable store has just
-quarantined: the stores apply the stamp's legacy quarantine to the batch's
-own earlier upserts, so the index would serve vectors the authority does not
-hold. -/
-theorem projectFinal_ahead_of_durable :
-    projectFinal reembedBatch none = ([(2, 1, some (1, 11)), (2, 2, some (1, 21))], some 2) ∧
-      (applyBatch legacy reembedBatch).vecs = [] := by decide
-
-/-- Candidate 3: reorder `reembed_all`'s emit order. The durable stores are
-not order-insensitive here: with the `SetEmbedding` last, a first stamp
-quarantines the batch's vectors; with it first, they survive. Reordering
-changes what the durable store holds, so it is not a mirror fix. -/
-theorem reorder_changes_durable :
-    (applyBatch legacy reembedBatch).vecs = [] ∧
-      (applyBatch legacy [.setContract (some 2), .upsert 1 (some (1, 11)),
-        .upsert 2 (some (1, 21))]).vecs = [(2, 1, 21), (1, 1, 11)] := by decide
-/-- **The #296 review's case: an in-place re-embed briefly mixes two builds.**
-`--rewrite-same-contract` drains `UpsertNode`s only; the durable store takes
-them in one transaction, but the index takes the bulk item by item (and a
-periodic refresh can expose any prefix of it) into the same contract's index,
-while the session stays in sync: a read between two items ranks build-1 and
-build-0 vectors together. The durable store never holds the mix. -/
-def inPlace : List Mut := [.upsert 1 (some (1, 11)), .upsert 2 (some (1, 21))]
-
-theorem inplace_reembed_mixes_builds :
-    let s := run Pt seeded [.write inPlace, .mirStep, .read 1]
-    s.tier.sync = .inSync ∧ answerAt s [1, 2] = some [some (1, 11), some (0, 20)] ∧
-      s.d.vecs = [(2, 1, 21), (1, 1, 11)] := by decide
-
-/-- Once the bulk and the marker land the answer is one build again. If the
-bulk fails part way the holder goes stale and falls back; a reader in another
-process does not (`reader_never_rechecks`). -/
-example :
-    answerAt (run Pt seeded ([.write inPlace] ++ steps .mirStep 4 ++ [.read 1])) [1, 2]
-      = some [some (1, 11), some (1, 21)] ∧
-    fellBack (run Pt seeded [.write inPlace, .mirStep, .setDown true, .mirStep, .setDown false,
-      .read 1]) = true := by decide
-
-/-- **A reader that once found the session in sync never re-checks it.**
-`sync_for_read` re-checks only `Unknown` and `Stale` sessions; an `InSync`
-one is trusted until this store reloads it or evicts it. Another holder's
-mirror fails (its batch deleted node 1), the marker stays behind the durable
-epoch, and the reader keeps serving node 1 from the index however much time
-passes. -/
-def readerSeeded : St := run Pt {} [.takeover, .otherWrite seed true, .read 1]
-
-theorem reader_never_rechecks :
-    let s := run Pt readerSeeded [.otherWrite [.delete 1] false, .tick 1000000, .read 1]
-    readerSeeded.tier.sync = .inSync ∧ lookup 1 s.d.vecs = none ∧ markerEpoch s = some 1 ∧
-      s.d.epoch = 2 ∧ answerAt s [1] = some [some (0, 10)] := by decide
-
-/-- A reload does see it (`a_reader_that_saw_the_marker_behind_...`). -/
-example : fellBack (run Pt readerSeeded [.otherWrite [.delete 1] false, .loadBegin, .loadEnd,
-    .read 1]) = true := by decide
-
-/-- **A mirror in flight lands after another process's erase.** The mirror
-checks only this store's record of the lease, never the durable row
-(`ensure_fenced` guards repairs, not mirrors): a flush that committed before
-the writer stalled past its lease, then an erase by another process that
-swept the index and deleted the marker and reported done, then the stalled
-mirror resumes, and the erased session's vector and marker are back in the
-index. -/
-theorem mirror_lands_after_erase :
-    let s := run Pt seeded ([.write [.upsert 4 (some (0, 40))], .eraseOther] ++ steps .mirStep 3)
-    s.d.erased = true ∧ docAt s 1 4 = some (0, 40) ∧ markerEpoch s = some 2 ∧
-      s.log.take 2 = [.mirror 1, .mirror 1] := by decide
-
-/-- The repair in the same position writes nothing (#18): its fence reads the
-durable row. -/
-example :
-    let s := run Pt outage ([.write [.upsert 4 (some (0, 40))]] ++ steps .repStep 4 ++
-      [.eraseOther] ++ steps .repStep 20)
-    s.log.filter (· matches .repair _) = [] ∧ s.mark = none := by decide
-
-/-- **A repair can reconcile from the snapshot it loaded before re-checking an
-ahead marker** (`repair_once`). #18 says a marker ahead of a load is re-checked
-against a fresh load and never repaired from; but when the fresh re-check
-finds the marker *behind* (another flush committed in between), `repair_once`
-reconciles from the first, older snapshot. The holder loads while its own e2
-mirror is in flight (marker behind: a repair is queued while the session is
-still in sync), e2's mirror lands, the repair loads e2, e3 (deleting node 2)
-commits and mirrors, e4 commits; the repair's check finds the marker (e3)
-ahead of e2, the re-check finds it behind e4, and the pass re-indexes node 2
-and rewinds the marker to e2. The overtaken-repair guard (#18) sends it round again, which
-repairs it: for the holder, reads fall back meanwhile; another process's
-reader in sync (`reader_never_rechecks`) serves the deleted node. -/
-def rewound : St :=
-  run Pt seeded ([.write [.upsert 4 (some (0, 40))], .loadBegin, .loadEnd] ++ steps .mirStep 3 ++
-    [.repStep, .repStep, .write [.delete 2]] ++ steps .mirStep 3 ++
-    [.write [.upsert 5 (some (0, 50))]] ++ steps .repStep 14)
-
-theorem repair_from_pre_recheck_snapshot :
-    lookup 2 rewound.d.vecs = none ∧ rewound.d.epoch = 4 ∧
-      docAt rewound 1 2 = some (0, 20) ∧ markerEpoch rewound = some 2 ∧
-      rewound.tier.sync ≠ .inSync ∧ rewound.rep = .head := by decide
-
-set_option maxRecDepth 8000 in
-example :
-    let s := run Pt rewound (steps .mirStep 3 ++ steps .repStep 30)
-    s.tier.sync = .inSync ∧ docAt s 1 2 = none ∧ docAt s 1 5 = some (0, 50) ∧
-      markerEpoch s = some 4 := by decide
-
-/-- **A stale repair pass rewinds the version counter.** `next_version`
-restarts the counter whenever the token differs, an older token included,
-and `reconcile` calls it before its first fence. A pass that captured token 1
-reaches `reconcile` after this store was overridden and re-acquired at token 3
-and mirrored node 5 under 3 at counter 1: the pass sets the recorded token
-back to 1 and its fence stops it. The next token-3 write starts again at
-counter 1, the version node 5's document already has, so its bulk and marker
-are refused as conflicts that count as success; the repair it triggers does
-the same. The session ends in sync with node 5's old vector served, and the
-next mirrored flush advances the marker, so a reload finds it in sync too:
-permanent, silent staleness. -/
-def stalePass : St :=
-  run Pt seeded ([.write [.upsert 4 (some (0, 40))], .loadBegin, .loadEnd, .repStep, .repStep,
-    .repStep] ++ steps .mirStep 3 ++ [.takeover, .override, .acquire, .loadBegin, .loadEnd,
-    .write [.upsert 5 (some (0, 50))]] ++ steps .mirStep 3)
-
-def stalePassAfter : St :=
-  run Pt stalePass ([.repStep, .repStep, .write [.upsert 5 (some (0, 55))]] ++ steps .mirStep 3 ++
-    steps .repStep 30 ++ [.read 1])
-
-def stalePassLater : St :=
-  run Pt stalePassAfter ([.write [.upsert 6 (some (0, 60))]] ++ steps .mirStep 3 ++
-    [.loadBegin, .loadEnd] ++ steps .repStep 30 ++ [.read 1])
-
-set_option maxRecDepth 20000 in
-/-- `stalePass`'s run, pinned: the stale pass rewinds the recorded token, the
-next write's version repeats one already in the index, and the old vector is
-served while the session is in sync, through a later flush and a reload. -/
-theorem stale_pass_rewinds_version :
-    stalePass.tier.tok = 3 ∧ stalePass.tier.cnt = 1 ∧ (stalePass.rt 1 5).ver = 3 * shift + 1 ∧
-      (run Pt stalePass [.repStep]).tier.tok = 1 ∧ (run Pt stalePass [.repStep]).tier.cnt = 1 ∧
-      stalePassAfter.tier.sync = .inSync ∧ lookup 5 stalePassAfter.d.vecs = some (0, 55) ∧
-      answerAt stalePassAfter [5] = some [some (0, 50)] ∧
-      stalePassLater.tier.sync = .inSync ∧ markerEpoch stalePassLater = some 5 ∧
-      stalePassLater.d.epoch = 5 ∧ lookup 5 stalePassLater.d.vecs = some (0, 55) ∧
-      answerAt stalePassLater [5, 6] = some [some (0, 50), some (0, 60)] ∧
-      stalePassLater.rep = .idle := by decide
-
-/-- **A batch that deletes only edges leaves the marker behind.** It names no
-session and deletes no node, so `mirror_unnamed` returns before attributing
-it: the durable epoch moves and the marker does not. The holder stays in sync
-(the index content is right), but its next load finds the marker behind and
-re-indexes the whole session, and a reader falls back until the holder's next
-mirrored flush. -/
-theorem edge_only_batch_leaves_marker_behind :
-    let s := run Pt seeded [.write [.deleteEdge]]
-    s.d.epoch = 2 ∧ markerEpoch s = some 1 ∧ s.tier.sync = .inSync ∧
-      (run Pt s [.loadBegin, .loadEnd]).rep = .head := by decide
-
-end Runs
 
 end Lambo.Tiered

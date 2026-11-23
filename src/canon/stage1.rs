@@ -548,7 +548,7 @@ mod tests {
     /// Swarm's count keeps the dependent-origin dating throughout. Mirrors
     /// `Policy.dependentOriginsW_not_own` and
     /// `Policy.own_origin_is_the_writing_turn` in
-    /// `formal/LamboProofs/Policy.lean`.
+    /// `formal/LamboProofs/Policy/Support.lean`.
     #[test]
     fn solo_credits_a_dependence_to_the_interaction_that_wrote_it() {
         // Dependent 10 shares the pillar's origin i1; its edge was written

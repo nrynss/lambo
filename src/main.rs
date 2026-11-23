@@ -1731,7 +1731,7 @@ fn check_auth_token<T: std::str::FromStr<Err = String>>(
 /// clap's own error for a rejected value repeats the value ("invalid value
 /// '<it>' for ..."), and for a token with a stray trailing space that is the
 /// secret on stderr. Both `--auth-token` refusals are built here instead;
-/// `Resolve.lean` models the text as `render`'s `flagRefusal` and
+/// `Resolve/Auth.lean` models the text as `render`'s `flagRefusal` and
 /// `webFlagRefusal` (`web_flag_refusal_eq_serve`).
 fn auth_token_refusal(
     cmd: &clap::Command,
@@ -3136,7 +3136,7 @@ dim = 1024
     ///
     /// Before the fix the flag was parsed through `AuthToken: FromStr`, and
     /// clap's `ValueValidation` error quoted the refused value, so a stray
-    /// trailing space put the secret on stderr. Mirrors `Resolve.lean`:
+    /// trailing space put the secret on stderr. Mirrors `Resolve/Auth.lean`:
     /// `render_noninterference` at `PrintPath.webFlagRefusal` (the refusal
     /// depends on the token only through its verdict),
     /// `serve_web_flag_refusal_fixed` (the issue's `'x '` and
@@ -3203,7 +3203,7 @@ dim = 1024
     /// `serve-web`'s `--auth-token` refusal says what `serve`'s says, word
     /// for word (#315): `serve` driven through clap and
     /// [`http_auth_token_check`], the check `lambo serve --transport http`
-    /// runs and prints. Mirrors `Resolve.lean`'s `web_flag_refusal_eq_serve`.
+    /// runs and prints. Mirrors `Resolve/Auth.lean`'s `web_flag_refusal_eq_serve`.
     #[test]
     fn serve_web_auth_token_refusal_line_is_serves() {
         let web = Cli::try_parse_from(["lambo", "serve-web", "--auth-token", "x "])
@@ -3280,7 +3280,7 @@ dim = 1024
     /// is refused at parse time (exit 2, so nothing starts), never taken as
     /// the token, and never shown, on `serve` and `serve-web` (#315). With
     /// `allow_hyphen_values` (a26ffd30) each of these was the token and the
-    /// server started. Mirrors `Resolve.lean`'s
+    /// server started. Mirrors `Resolve/Auth.lean`'s
     /// `authFlagValue_spaced_none_iff` and `re_review_fixed` (previous
     /// version: `b1_fail_open`).
     #[test]
@@ -3321,7 +3321,7 @@ dim = 1024
     }
 
     /// `--auth-token=<v>` takes a value starting with `-`, as the base did
-    /// (#315 re-review). Mirrors `Resolve.lean`'s `authFlagValue_eq_form`.
+    /// (#315 re-review). Mirrors `Resolve/Auth.lean`'s `authFlagValue_eq_form`.
     #[test]
     fn auth_token_eq_form_takes_a_hyphen_value() {
         for sub in ["serve", "serve-web"] {
@@ -3340,7 +3340,7 @@ dim = 1024
     }
 
     /// A missing value keeps clap's "a value is required" message, with no
-    /// redaction and no tip (#315). Mirrors `Resolve.lean`'s
+    /// redaction and no tip (#315). Mirrors `Resolve/Auth.lean`'s
     /// `missing_value_kept`.
     #[test]
     fn missing_value_keeps_clap_message() {
@@ -3369,7 +3369,7 @@ dim = 1024
 
     /// An invalid value of an accepted flag after `--auth-token` is
     /// redacted: it may be a piece of the token (#315, the
-    /// `InvalidValue` branch). Mirrors `Resolve.lean`'s
+    /// `InvalidValue` branch). Mirrors `Resolve/Auth.lean`'s
     /// `quotedRender_noninterference` and `re_review_fixed`.
     #[test]
     fn invalid_value_after_auth_token_is_redacted() {
@@ -3438,7 +3438,7 @@ dim = 1024
     /// clap's "unexpected value '<it>' for '--flag' found; no more were
     /// expected" (`TooManyValues`, a value given to a flag that takes none)
     /// quotes it through `InvalidValue` and is redacted after
-    /// `--auth-token` (#315 re-review). Mirrors `Resolve.lean`'s
+    /// `--auth-token` (#315 re-review). Mirrors `Resolve/Auth.lean`'s
     /// `Quote.tooManyValues`.
     #[test]
     fn unexpected_value_after_auth_token_is_redacted() {
@@ -3506,7 +3506,7 @@ dim = 1024
     /// An unquoted token split by a space leaves its tail in argv; clap's
     /// "unexpected argument" error must not print it, or hint at it, on
     /// `serve` or `serve-web` (#315). The raw clap error did (pinned here as
-    /// the previous version, `Resolve.lean`'s `unexpected_arg_leaked`);
+    /// the previous version, `Resolve/Auth.lean`'s `unexpected_arg_leaked`);
     /// `main` prints it through [`redact_auth_token_echo`], whose output,
     /// usage line included, is the same for every tail
     /// (`quotedRender_noninterference`, `quotedRender_unexpected_is_render`).

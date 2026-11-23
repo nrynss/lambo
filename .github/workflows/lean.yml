@@ -17,6 +17,11 @@ on:
       - 'scripts/formal/check-oracle.sh'
       - 'scripts/formal/count-theorems.py'
       - 'scripts/formal/test_count_theorems.py'
+      - 'scripts/formal/check-decl-equivalence.py'
+      - 'scripts/formal/DumpDecls.lean'
+      - 'scripts/formal/test_check_decl_equivalence.py'
+      - 'scripts/formal/audit-theorems.py'
+      - 'scripts/formal/test_audit_theorems.py'
       - '.github/workflows/lean.yml'
   pull_request:
     paths:
@@ -24,6 +29,11 @@ on:
       - 'scripts/formal/check-oracle.sh'
       - 'scripts/formal/count-theorems.py'
       - 'scripts/formal/test_count_theorems.py'
+      - 'scripts/formal/check-decl-equivalence.py'
+      - 'scripts/formal/DumpDecls.lean'
+      - 'scripts/formal/test_check_decl_equivalence.py'
+      - 'scripts/formal/audit-theorems.py'
+      - 'scripts/formal/test_audit_theorems.py'
       - '.github/workflows/lean.yml'
   workflow_dispatch:
 
@@ -78,6 +88,19 @@ jobs:
           lean --version
           lake build --wfail 2>&1 | tee "$RUNNER_TEMP/build.log"
 
+      # scripts/formal/DumpDecls.lean (the dump check-decl-equivalence.py and
+      # audit-theorems.py read) is run by hand, not here; elaborate it so a
+      # Lean upgrade that breaks it fails CI rather than its next user.
+      - name: Elaborate DumpDecls.lean
+        working-directory: formal
+        run: lake env lean ../scripts/formal/DumpDecls.lean
+
+      # The models' rule (formal/README.md, "How the models are written"):
+      # every theorem is used by a proof or documented. Dumps the built
+      # models (DumpDecls.lean) and reads the dump.
+      - name: Every theorem is used or documented
+        run: python3 -I scripts/formal/audit-theorems.py --check
+
       # The differential oracle (#291): rebuild the exporter, regenerate
       # formal/oracle/*.json from the models and fail if the committed vectors
       # are stale, so a model change cannot ship with vectors the Rust test
@@ -95,6 +118,15 @@ jobs:
           set -euo pipefail
           python3 -I scripts/formal/test_count_theorems.py
           python3 -I scripts/formal/count-theorems.py --check-readme
+
+      # The restructuring check (scripts/formal/check-decl-equivalence.py) and
+      # the theorem audit (audit-theorems.py) are run by hand; their own tests
+      # need no Lean.
+      - name: Equivalence checker's and theorem audit's tests
+        run: |
+          set -euo pipefail
+          python3 -I scripts/formal/test_check_decl_equivalence.py
+          python3 -I scripts/formal/test_audit_theorems.py
 
       - name: Reject sorry
         working-directory: formal

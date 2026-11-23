@@ -49,13 +49,6 @@ The old `key` is also exactly `unfiltered_canonical_key`, which the
 `lambo provision` re-key uses to recognise a key written between #148 and the
 #301 fix.
 
-Not modelled: the invisible-character strip and Unicode NFC that open
-`tokens` (the model reads their output), Unicode case mapping beyond ASCII
-(`str::to_lowercase` maps non-ASCII letters too; `lowerA` is ASCII-only), the
-Snowball English algorithm itself (a parameter), `legacy_canonical_key`, and step 5
-(`canonicalize` matching a key against the graph). How a key is bound and kept
-is `Names.lean`.
-
 ## Results
 
 Structure (any stopword list and stemmer):
@@ -129,6 +122,13 @@ Names (`name_key`):
   (`single-writer-lease`, `lease writer single` and `SingleWriterLeases` are one
   name), `issue290_stopword` (`the-lease` is `lease`), and the general forms
   `nameKey_swap` and `nameKey_stop_segment`.
+
+Boundary: the invisible-character strip and Unicode NFC that open `tokens`
+(the model reads their output), Unicode case mapping beyond ASCII
+(`str::to_lowercase` maps non-ASCII letters too; `lowerA` is ASCII-only), the
+Snowball English algorithm itself (a parameter), `legacy_canonical_key`, and
+`canonicalize` matching a key against the graph are not modelled. How a key is
+bound and kept is `Names.lean`.
 -/
 
 namespace Lambo.Canonical
@@ -293,17 +293,6 @@ theorem wordsAux_append_sep {c : Char} (hc : isSep c = true) (Y : Text) :
 theorem words_append_sep {c : Char} (hc : isSep c = true) (X Y : Text) :
     words (X ++ c :: Y) = words X ++ words Y := by
   simp [words, wordsAux_append_sep hc, push_append]
-
-theorem words_nil : words [] = [] := rfl
-
-theorem words_sep_cons {c : Char} (hc : isSep c = true) (Y : Text) : words (c :: Y) = words Y := by
-  simpa [words_nil] using words_append_sep hc [] Y
-
-theorem words_all_sep : ∀ s : Text, (∀ c ∈ s, isSep c = true) → words s = []
-  | [], _ => rfl
-  | c :: cs, h => by
-    rw [words_sep_cons (h c (by simp))]
-    exact words_all_sep cs (fun d hd => h d (by simp [hd]))
 
 theorem wordsAux_noSep : ∀ s : Text, (∀ c ∈ s, isSep c = false) → wordsAux s = (s, [])
   | [], _ => rfl
@@ -651,11 +640,14 @@ def nameKey (sizeOk isUuid : Text → Bool) (stop : Token → Bool) (stem : Toke
 theorem key_eq (s : Text) : key stop stem s = joinSp (sort (tokens stop stem s)) := by
   simp [key, canonicalKey, tokens_trim]
 
-/-- A synonym hit is normalized like ordinary input; no second lookup. -/
+/-- A synonym hit in `canonical_key` is normalized like ordinary input, with
+no second synonym lookup. -/
 theorem canonicalKey_syn {syn : Text → Option Text} {s t : Text} (h : syn (trim s) = some t) :
     canonicalKey stop stem syn s = key stop stem t := by
   simp [canonicalKey, h, key_eq]
 
+/-- Without a synonym hit, `canonical_key` is the plain key of the trimmed
+input. -/
 theorem canonicalKey_no_syn {syn : Text → Option Text} {s : Text} (h : syn (trim s) = none) :
     canonicalKey stop stem syn s = key stop stem s := by
   simp [canonicalKey, h, key_eq, tokens_trim]
@@ -698,9 +690,6 @@ theorem map_lowerA_noUpper (t : Token) (h : ∀ c ∈ t, isUpperA c = false) : t
     simp only [List.map_cons, lowerA_of_not_upper (h a (by simp)),
       ih (fun c hc => h c (by simp [hc]))]
 
-theorem map_lowerA_idem (t : Token) : (t.map lowerA).map lowerA = t.map lowerA := by
-  simp [List.map_map, Function.comp_def, lowerA_idem]
-
 /-- **Case**: where the camelCase split inserts nothing, lowercasing keeps the key. -/
 theorem key_lower {s : Text} (h : camel false s = s) :
     key stop stem (s.map lowerA) = key stop stem s := by
@@ -710,15 +699,15 @@ theorem key_lower {s : Text} (h : camel false s = s) :
   simp only [tokens, hl, h, words_map lowerA isSep_lowerA, List.map_map, Function.comp_def,
     lowerA_idem]
 
-/-- In particular an all-caps (no ASCII lowercase) spelling has the key of its
-lowercase form. -/
+/-- An all-caps spelling has the canonical key of its lowercase form. -/
 theorem key_lower_of_noLower {s : Text} (h : ∀ c ∈ s, isLowerA c = false) :
     key stop stem (s.map lowerA) = key stop stem s :=
   key_lower (camel_noLower s h)
 
 /-! ### Stopwords -/
 
-/-- A single word whose lowercase form is a stopword contributes no token. -/
+/-- A single word with no camelCase boundary inside, whose lowercase form is a
+stopword, contributes no token to the canonical key. -/
 theorem tokens_stopword {w : Text} (hw : Good w) (hc : camel false w = w)
     (hs : stop (w.map lowerA) = true) : tokens stop stem w = [] := by
   simp [tokens, hc, words_single w hw.1 hw.2, hs]
@@ -828,7 +817,10 @@ theorem key_eq_iff_perm (hs : Sane stop stem) (a b : Text) :
     exact (sort_perm _).symm.trans (hsort ▸ sort_perm _)
   · exact key_perm
 
-/-- The same statement with multiplicities. -/
+/-- With a stemmer that gives every word a nonempty, separator-free stem
+(`Sane`, which the real stemmer is not: see `empty_stem_key`), two strings get
+the same canonical key (`src/graph/canonical.rs`) exactly when their tokens
+agree with multiplicities. -/
 theorem key_eq_iff_count (hs : Sane stop stem) (a b : Text) :
     key stop stem a = key stop stem b ↔
       ∀ t, (tokens stop stem a).count t = (tokens stop stem b).count t := by
@@ -868,6 +860,8 @@ theorem nameKey_empty {s : Text} (h : key stop stem s = []) :
   · rfl
   · simp [h]
 
+/-- When `name_key` gives a key, it is the input's canonical key and it is not
+empty. -/
 theorem nameKey_some {s k : Text} (h : nameKey sizeOk isUuid stop stem s = some k) :
     k = key stop stem s ∧ k ≠ [] := by
   unfold nameKey at h
@@ -941,8 +935,6 @@ meets); the other half, nonempty stems, is what the filter now provides. -/
 /-- A stemmer that never returns a stem with a separator in it. -/
 def NoSep (stop : Token → Bool) (stem : Token → Token) : Prop :=
   ∀ w, Called stop w → ∀ c ∈ stem w, isSep c = false
-
-theorem Sane.toNoSep (hs : Sane stop stem) : NoSep stop stem := hs.noSep
 
 /-- `.filter(|t| !t.is_empty())`. -/
 def dropEmpty (ts : List Token) : List Token := ts.filter (fun t => !t.isEmpty)
@@ -1124,16 +1116,21 @@ theorem keyF_eq_key {s : Text} (h : ∀ t ∈ tokens stop stem s, t ≠ []) :
     keyF stop stem s = key stop stem s := by
   rw [keyF_eq, key_eq, tokensF_eq_tokens h]
 
+/-- Whenever no token stems to empty, the Rust's `canonical_key` (which drops
+empty stems) equals the model's key, synonyms included. -/
 theorem canonicalKeyF_eq_canonicalKey {syn : Text → Option Text} {s : Text}
     (h : ∀ t ∈ tokens stop stem ((syn (trim s)).getD (trim s)), t ≠ []) :
     canonicalKeyF stop stem syn s = canonicalKey stop stem syn s := by
   simp only [canonicalKeyF, canonicalKey, tokensF_eq_tokens h]
 
-/-- A `Sane` stemmer never yields an empty stem, so for it nothing changes. -/
+/-- With a stemmer that never yields an empty stem, the Rust's empty-stem
+filter changes no canonical key. -/
 theorem keyF_eq_key_of_sane (hs : Sane stop stem) (s : Text) :
     keyF stop stem s = key stop stem s :=
   keyF_eq_key (fun t ht => (tokens_good hs t ht).1)
 
+/-- Whenever no token stems to empty, the Rust's `name_key` (which drops empty
+stems) equals the model's. -/
 theorem nameKeyF_eq_nameKey {s : Text} (h : ∀ t ∈ tokens stop stem s, t ≠ []) :
     nameKeyF sizeOk isUuid stop stem s = nameKey sizeOk isUuid stop stem s := by
   simp only [nameKeyF, nameKey, keyF_eq_key h]
@@ -1156,6 +1153,7 @@ theorem keyF_all_empty {s : Text} (h : ∀ t ∈ tokens stop stem s, t = []) :
     exact h2 (h t h1)
   rw [keyF_eq, this]; rfl
 
+/-- `name_key` gives no key when every token stems to empty. -/
 theorem nameKeyF_all_empty {s : Text} (h : ∀ t ∈ tokens stop stem s, t = []) :
     nameKeyF sizeOk isUuid stop stem s = none :=
   nameKeyF_empty (keyF_all_empty h)
@@ -1270,7 +1268,8 @@ example : key0 "src/MyFile.rs" = key0 "File.rs src/My" := by decide
 example : key0 "src/MyFile.rs" = "file.rs src/my".toList := by decide
 example : key0 "leaseV2" = key0 "v2-lease" := by decide
 
-/-- The key is a multiset: a repeated word is not collapsed. -/
+/-- The canonical key is a multiset: a repeated word is not collapsed (`lease
+lease` and `lease` differ). -/
 theorem dup_not_collapsed : key0 "lease lease" ≠ key0 "lease" := by decide
 
 /-- Stopword-only and id-shaped names are refused. -/

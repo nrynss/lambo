@@ -429,7 +429,7 @@ pub(crate) fn candidates_with_keyword_leg_as(
     // neighbour). The BM25 is read off the whole ranked search, not only the
     // part inside `keyword_cap`, so a named concept whose hit lies beyond the
     // cap keeps it too; no other node beyond the cap joins the leg.
-    // `formal/LamboProofs/Fusion.lean` models this step (`raiseFullName`).
+    // `formal/LamboProofs/Fusion/Max.lean` models this step (`raiseFullName`).
     let mut exact_name = false;
     if let Some(id) = graph.name_target(query)
         && matches!(graph.node(id), Some(Node::Concept(_)))
@@ -1245,7 +1245,7 @@ mod tests {
     /// `Fusion.raise_keyword_ge_bm25`, `Fusion.raise_local` and
     /// `Fusion.raise_keeps_wins` (and `Fusion.assign_lowers_named_concept`,
     /// the old step's failure on the same shape) in
-    /// `formal/LamboProofs/Fusion.lean`; X's hit is within the cap, where
+    /// `formal/LamboProofs/Fusion/Max.lean`; X's hit is within the cap, where
     /// the current step agrees with that one (`Fusion.full_eq_raise`).
     #[test]
     fn an_exact_name_raises_the_keyword_leg_without_lowering_its_bm25() {
@@ -1296,7 +1296,7 @@ mod tests {
     /// `Fusion.full_keyword_ge_bm25`, `Fusion.full_local` and
     /// `Fusion.full_keeps_beyond_cap_bm25` (and `Fusion.beyond_cap_floor_only`,
     /// the first #288 step's gap on the same shape) in
-    /// `formal/LamboProofs/Fusion.lean`.
+    /// `formal/LamboProofs/Fusion/Max.lean`.
     #[test]
     fn an_exact_name_keeps_its_bm25_beyond_the_overfetch_cap() {
         let (mut g, _) = planted_graph();

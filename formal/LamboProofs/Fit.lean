@@ -1,3 +1,5 @@
+import LamboProofs.Lib.List
+
 /-
 # The token budget keeps the longest ranked prefix of whole blocks
 
@@ -24,13 +26,8 @@ The model therefore takes a predicate
 
 over prefix lengths and nothing else: the estimator, the separator and the
 block texts are all inside `ok`. No property of the estimator is assumed
-except where a theorem says so.
-
-`fitFrom ok rem whole` is the loop with `rem` blocks left to try and `whole`
-already accepted; `fit ok n` is the loop over `n` blocks.
-
-Rule 2 of the module (#130), which truncates the *first* block when not even
-it fits, is modelled in the second part ("Rule 2" below).
+except where a theorem says so. Rule 2 (#130), which truncates the first
+block when not even it fits, is the second part.
 
 ## Results
 
@@ -63,7 +60,7 @@ scope)`. Elements are chars, so every cut is a char boundary; the estimator
   the marker alone. Cuts are `content_cuts` (`0`, then each position whose
   preceding char is not whitespace). A form whose cut `0` does not fit is
   skipped; the first whose cut `0` fits is binary-searched (`bsearch`, the
-  Rust loop with enough fuel, `bsearch_fuel`) and returned; nothing follows
+  Rust loop with enough fuel) and returned; nothing follows
   it. If no form's cut `0` fits, the context is empty.
 
 Exact arithmetic: `fits t m = t < usize::MAX ∧ t ≤ m` on naturals, with
@@ -131,11 +128,14 @@ it.
 Every caller in the crate passes `default_token_count`, which is `Steady`, so
 these are precision points about the doc, not bugs in a shipped path.
 
-Not modelled: `ContextBlock::for_hit` and `with_meta` (the model takes the
-three slices as given).
+Boundary: `ContextBlock::for_hit` and `with_meta` are not modelled (the three
+slices are given); `fits` assumes a 64-bit target, and `defaultG` agrees with
+the Rust's `f64` ceiling only for `b < 2^52` bytes.
 -/
 
 namespace Lambo.Fit
+
+open Lambo.Lib (getD_mem getD_mono getD_eq_getElem)
 
 /-- The loop, with `rem` blocks still to try and `whole` accepted so far. -/
 def fitFrom (ok : Nat → Bool) : Nat → Nat → Nat
@@ -290,7 +290,7 @@ theorem take_fit_prefix {α : Type} (ok : Nat → Bool) (blocks : List α) :
     ∃ dropped, blocks.take (fit ok blocks.length) ++ dropped = blocks :=
   ⟨blocks.drop (fit ok blocks.length), List.take_append_drop _ _⟩
 
-/-- A zero budget (nothing fits) renders no whole block. -/
+/-- When no prefix fits the budget, `fit` renders no whole block. -/
 theorem fit_of_nothing_fits (ok : Nat → Bool) (n : Nat) (h : ∀ k, ok k = false) :
     fit ok n = 0 := by
   cases n with
@@ -302,7 +302,7 @@ theorem fit_of_nothing_fits (ok : Nat → Bool) (n : Nat) (h : ∀ k, ok k = fal
     unfold fit
     exact fitFrom_miss h1 m
 
-/-- When every prefix fits, every block is rendered. -/
+/-- When every prefix fits the budget, `fit` renders every block. -/
 theorem fit_of_all_fit (ok : Nat → Bool) (n : Nat) (h : ∀ k, ok k = true) : fit ok n = n := by
   have hle := fit_le ok n
   by_cases hlt : fit ok n < n
@@ -410,7 +410,7 @@ while hi - lo > 1 {
 ```
 
 `fuel` bounds the iterations; each one shrinks `hi - lo`, so
-`fuel = cuts.len()` never runs out (`bsearch_fuel`). -/
+`fuel = cuts.len()` never runs out. -/
 def bsearch (p : Nat → Bool) : Nat → Nat → Nat → Nat
   | 0, lo, _ => lo
   | fuel + 1, lo, hi =>
@@ -521,31 +521,6 @@ theorem bsearch_spec (p : Nat → Bool) (n : Nat) :
         have := ih lo (lo + (hi - lo) / 2) (by omega) (by omega) h3 (Or.inr hf)
         exact ⟨this.1, by omega, this.2.2.1, this.2.2.2⟩
 
-/-- Fuel does not matter once it covers the interval: the model is the
-unbounded `while` loop. -/
-theorem bsearch_fuel (p : Nat → Bool) :
-    ∀ (f f' lo hi : Nat), hi - lo ≤ f + 1 → hi - lo ≤ f' + 1 →
-      bsearch p f lo hi = bsearch p f' lo hi := by
-  intro f
-  induction f with
-  | zero =>
-    intro f' lo hi h1 h2
-    cases f' with
-    | zero => rfl
-    | succ g => simp [bsearch, show hi - lo ≤ 1 by omega]
-  | succ k ih =>
-    intro f' lo hi h1 h2
-    cases f' with
-    | zero => simp [bsearch, show hi - lo ≤ 1 by omega]
-    | succ g =>
-      simp only [bsearch]
-      by_cases hs : hi - lo ≤ 1
-      · simp [hs]
-      · rw [ite_eq_right hs, ite_eq_right hs]
-        split
-        · exact ih g _ _ (by omega) (by omega)
-        · exact ih g _ _ (by omega) (by omega)
-
 /-- Downward closed below `n`: if index `i + 1` fits, so does `i`. -/
 def DownBelow (p : Nat → Bool) (n : Nat) : Prop := ∀ i, i + 1 < n → p (i + 1) = true → p i = true
 
@@ -646,18 +621,6 @@ theorem contentCuts_pairwise (ws : α → Bool) (xs : List α) :
 theorem contentCuts_length_pos (ws : α → Bool) (xs : List α) :
     0 < (contentCuts ws xs).length := by
   simp [contentCuts]
-
-theorem getD_mem {l : List Nat} {i : Nat} (h : i < l.length) : l.getD i 0 ∈ l := by
-  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h]
-  exact List.getElem_mem h
-
-theorem getD_mono {l : List Nat} (hp : l.Pairwise (· < ·)) {i j : Nat} (hij : i ≤ j)
-    (hj : j < l.length) : l.getD i 0 ≤ l.getD j 0 := by
-  rw [List.getD_eq_getElem?_getD, List.getD_eq_getElem?_getD,
-    List.getElem?_eq_getElem (by omega), List.getElem?_eq_getElem hj]
-  by_cases e : i = j
-  · subst e; exact Nat.le_refl _
-  · exact Nat.le_of_lt (List.pairwise_iff_getElem.mp hp i j (by omega) hj (by omega))
 
 /-! ### One form, and the loop over the forms -/
 
@@ -851,8 +814,6 @@ theorem fitBlocks_truncation_whole (e : Env α) (bs : List (Block α)) (maxT : N
   · rw [hp] at h; simp [plainFit] at h
   · rw [hq]
 
-theorem ctxOf_nil (sep : List α) : ctxOf sep [] = [] := rfl
-
 theorem foldl_appendBlock_ne_nil (sep : List α) :
     ∀ (ts : List (List α)) (acc : List α), acc ≠ [] → ts.foldl (appendBlock sep) acc ≠ [] := by
   intro ts
@@ -879,7 +840,8 @@ theorem fitBlocks_fits (e : Env α) (bs : List (Block α)) (maxT : Nat)
     rw [hti]
     simpa [okCut] using hoki
 
-/-- Nothing rendered means the empty context. -/
+/-- When `fit` (`src/recall/format/fit.rs`) renders no block, the context is
+empty. -/
 theorem fitBlocks_empty (e : Env α) (bs : List (Block α)) (maxT : Nat)
     (h : (fitBlocks e bs maxT).rendered = 0) : (fitBlocks e bs maxT).context = [] := by
   rcases fitBlocks_cases e bs maxT with hp | ⟨b, rest, t, f, _, _, _, hq⟩
@@ -1088,10 +1050,6 @@ theorem okCut_down (h : Steady e b w G) (maxT : Nat) (f : Form) :
   apply h.mono
   apply render_wsum_mono h f
   exact getD_mono (contentCuts_pairwise _ _) (Nat.le_succ i) hi
-
-theorem getD_eq_getElem {l : List Nat} {i : Nat} (h : i < l.length) : l.getD i 0 = l[i] := by
-  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h]
-  rfl
 
 /-- **The longest head, and the first form that fits.** Under `Steady`, the
 truncated block is the chosen form at the longest cut that fits, and no
@@ -1342,7 +1300,8 @@ theorem rust_default_steady (content label warn inspectId : List Char)
     have := toDigits_length_lip n n' h
     omega
 
-/-- The exact byte estimator `|s| s.len()` the tests also use is `Steady`. -/
+/-- The byte estimator `|s| s.len()` the Rust tests use is `Steady`, so the
+fit theorems cover it. -/
 theorem rust_bytes_steady (content label warn inspectId : List Char)
     (scope : Option (List Char)) :
     Steady (rustEnv (wsum Char.utf8Size)) (rustBlock content label warn inspectId scope)
@@ -1526,20 +1485,6 @@ def jEnv (est : List Nat → Nat) : Env Nat := ⟨est, [10, 10], [1], [10], fun 
 /-- Length up to `J`, then `10^k` more. -/
 def jumpEst (J k : Nat) (s : List Nat) : Nat := if s.length ≤ J then s.length else 10 ^ k + s.length
 
-/-- It is monotone in the length. -/
-theorem jumpEst_mono (J k : Nat) {s t : List Nat} (h : s.length ≤ t.length) :
-    jumpEst J k s ≤ jumpEst J k t := by
-  unfold jumpEst
-  by_cases hs : s.length ≤ J
-  · rw [ite_eq_left hs]
-    by_cases ht : t.length ≤ J
-    · rw [ite_eq_left ht]; exact h
-    · rw [ite_eq_right ht]; exact Nat.le_trans h (Nat.le_add_left _ _)
-  · rw [ite_eq_right hs]
-    have ht : ¬ t.length ≤ J := by omega
-    rw [ite_eq_right ht]
-    exact Nat.add_le_add_left h _
-
 /-- Ten content units, a one-unit label, no warnings. -/
 def jBlockA : Block Nat := ⟨List.replicate 10 5, [3], [], jMark 1⟩
 
@@ -1565,20 +1510,6 @@ byte count up to 90 bytes and `10^19` more above. -/
 def rjEst (s : List Char) : Nat :=
   if wsum Char.utf8Size s ≤ 90 then wsum Char.utf8Size s else 10 ^ 19 + wsum Char.utf8Size s
 
-/-- It is a monotone function of the byte count. -/
-theorem rjEst_mono {s t : List Char} (h : wsum Char.utf8Size s ≤ wsum Char.utf8Size t) :
-    rjEst s ≤ rjEst t := by
-  unfold rjEst
-  by_cases hs : wsum Char.utf8Size s ≤ 90
-  · rw [ite_eq_left hs]
-    by_cases ht : wsum Char.utf8Size t ≤ 90
-    · rw [ite_eq_left ht]; exact h
-    · rw [ite_eq_right ht]; exact Nat.le_trans h (Nat.le_add_left _ _)
-  · rw [ite_eq_right hs]
-    have ht : ¬ wsum Char.utf8Size t ≤ 90 := by omega
-    rw [ite_eq_right ht]
-    exact Nat.add_le_add_left h _
-
 /-- 91 content bytes and a real label: 126 bytes. -/
 def rjBlock : Block Char := rustBlock (List.replicate 91 'y') exLabel [] "1a2b3c4d".toList none
 
@@ -1588,7 +1519,8 @@ count has 20 digits) does not fit, but at cuts 1 to 9 (116 to 124 bytes) it
 does; the Rust skips the form and returns `ContentOnly` with a 26-byte head,
 although `ContentOnly` heads of 36 to 44 bytes fit too. Breaks "The first form
 that fits wins" (`fit.rs:26`) and "the head is also the longest such head that
-fits" (`fit.rs:53-55`) for an estimator monotone in bytes. -/
+fits" (`fit.rs:53-55`) for an estimator monotone in bytes (`rjEst` is, by its
+definition: the byte count, plus a constant above 90 bytes). -/
 theorem rust_jump_skips_a_fitting_form :
     okOf (rustEnv rjEst) [rjBlock] (10 ^ 19 + 124) 1 = false ∧
     fits (rjEst (render (rustEnv rjEst) rjBlock .withWarnings 0)) (10 ^ 19 + 124) = false ∧

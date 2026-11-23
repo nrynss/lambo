@@ -723,7 +723,7 @@ async fn a_contract_mismatch_is_refused_and_a_switch_queries_only_the_new_index(
 /// `UpsertNode`, then the trailing `SetEmbedding`) through the tier. The
 /// previous mirror projected the new vectors into the OLD contract's index
 /// and nothing into the new one, advanced the marker and stayed in sync
-/// (`formal/LamboProofs/Tiered.lean`: `reembed_migration_misindexed`,
+/// (`formal/LamboProofs/Tiered/History.lean`: `reembed_migration_misindexed`,
 /// `project_reembed_into_old_index`). Now the batch is not mirrored: the
 /// session goes stale and a repair re-indexes it from the durable snapshot
 /// (`mirror_switch_writes_nothing`, `reembed_migration_held_back`), so the
@@ -826,7 +826,7 @@ async fn a_reembed_migration_is_indexed_under_the_new_contract() {
 /// previous mirror wrote nothing, advanced the marker and stayed in sync, so
 /// the vectors the store now holds under the new contract were in no
 /// document of its index (`relabel_leaves_new_index_empty` in
-/// `formal/LamboProofs/Tiered.lean`). Now the batch is repaired from the
+/// `formal/LamboProofs/Tiered/History.lean`). Now the batch is repaired from the
 /// durable store (`mirror_switch_writes_nothing`), and the new contract's
 /// index serves the kept vectors.
 #[tokio::test]

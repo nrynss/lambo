@@ -194,7 +194,7 @@ fn k2_reembed_all_rewrites_vectors_then_swaps_contract_in_order() {
 /// quarantine runs before the new vectors land instead of after. The graph
 /// ends exactly as on a stamped session. Mirrors
 /// `reembedOrdered_contract_first` and `reembedOrdered_graph_eq` in
-/// `formal/LamboProofs/Contract.lean`.
+/// `formal/LamboProofs/Contract/Store.lean`.
 #[test]
 fn reembed_all_on_a_contractless_session_stamps_the_contract_first() {
     let mut g = Graph::new(sid());

@@ -64,19 +64,11 @@ daemon's routing around it in `Daemon::recall_routed` (`src/daemon/mod.rs`):
   `total_cmp` agree with `Nat` order on finite non-negative weights; NaN,
   negative zero and rounding are outside the model.
 * **Sorting.** The Rust's `sort_by` is a stable merge sort; the model uses an
-  insertion sort (`isort`) because the kernel can evaluate it for the `decide`
+  insertion sort (`isort`), which the kernel can evaluate for the `decide`
   examples. The comparator is `Order.rankMembers` itself, lawful and
   separating, and the dependents are distinct, so any correct sort returns the
-  same list (`ranked_unique`, from `Order.sorted_unique`).
-* **Anchor resolution** (`resolve_anchor_choice`: word-bounded spans, marker
-  spans, stop words, the security-group prose fallback, #129 ambiguity) is not
-  modelled: the resolved subject is an input, `Option Choice`. In
-  `recallRouted` it is a function of the graph snapshot, which is what
-  `ResolvedAnchor::current` gives when the epoch tracks every mutation (#171).
-* **Rendering** is not modelled: the per-hit `RecallHit` fields, blast-radius
-  banners, names, and the token-budget cut (`fit_blocks`, see `Fit.lean`),
-  which shortens the rendered context but not the `hits` list. The `?` in
-  `graph.node(s.item)?` never fires: every dependent is a concept
+  same list (`ranked_unique`, from `Order.sorted_unique`); the `?` in
+  `graph.node(s.item)?` never fires, every dependent being a concept
   (`ranked_concepts`).
 * **The blend** is opaque: the routing result is either a traversal answer or
   "the blended pipeline over this phase-1 input". The input is the store
@@ -87,13 +79,6 @@ daemon's routing around it in `Daemon::recall_routed` (`src/daemon/mod.rs`):
   and the recent-leg score `Phase1Gather::run` stamps on it is then
   `RECENT_SCORE`, the default's, so skipping the gather and running it give
   the same input.
-* **Early refusals** of `recall_routed` are not modelled: the
-  `validate_vector_candidate_limit` and caller/graph session-mismatch
-  returns (`DetailedRecall::warn_only`, `src/daemon/mod.rs`), which answer
-  before any routing. The gather's `Err` arm (`Phase1Gather::run`) is left
-  out too; that is harmless here, because only `Route::ByVector` returns it
-  and that route never routes structural, so it never meets a skipped
-  gather.
 * Concurrency: the three graph reads of `recall_routed` (pre-check, retry
   guard, final guard) are three snapshots `g₁ g₂ g₃`, any graphs at all.
 
@@ -168,16 +153,24 @@ Gather skip and routing:
   structural dependent falls through to the full blend; `general_blends`: a
   general query always does, even when its anchor has dependents.
 
-Dispatch over the fixed classifier (#299): `tryStructuralBy`,
-`fitsStructuralBy` and `recallRoutedBy` take the classifier as a parameter and
-are the definitions above at `classify` (`tryStructural_eq`,
-`fitsStructural_eq`, `recallRouted_eq`). `traversalBy_exact`,
-`fitsStructuralBy_iff`, `recallBy_blend_input`, `generalBy_blends` hold for
-every classifier, so for the fixed one: `traversal_exact_wb`,
-`fitsStructuralWB_iff`, `recall_blend_input_wb`, `general_blends_wb`
-(`fitsStructuralWith_iff` and `traversal_exact` read no classifier at all).
-The misrouted "independents of" question of the examples blends under the
-fixed classifier.
+Dispatch over the fixed classifier (#299): the traversal, the gather skip and
+the routing results hold for every classifier, so for the fixed one
+(`traversal_exact_wb`, `fitsStructuralWB_iff`, `recall_blend_input_wb`,
+`general_blends_wb`), and the misrouted "independents of" question blends.
+
+Boundary: anchor resolution (`resolve_anchor_choice`: word-bounded spans,
+`marker_spans`, stop words, the security-group prose fallback, #129
+ambiguity) is not modelled: the resolved subject is an input, a function of
+the graph snapshot, which is what `ResolvedAnchor::current` gives when the
+epoch tracks every mutation (#171). Rendering is not modelled (the per-hit
+`RecallHit` fields, banners, names, and the token-budget cut, `Fit.lean`,
+which shortens the rendered context but not the `hits` list), nor are the
+early refusals of `recall_routed` (`validate_vector_candidate_limit`, the
+session-mismatch returns) and the gather's `Err` arm (only `Route::ByVector`
+returns it, and it never routes structural). Lowercasing is ASCII-only, which
+agrees with Unicode `to_lowercase` on where a marker occurs by the reading
+under Strings, not by proof; weights are `Nat`, so NaN, negative zero and
+rounding are outside the model.
 -/
 
 namespace Lambo.Dispatch
@@ -236,6 +229,8 @@ theorem classify_iff (q : List Char) :
       List.any_eq_true.mpr ⟨m, hm, (containsSub_iff m _).mpr hi⟩
     rw [ite_eq_left this]
 
+/-- `classify` answers General exactly when no marker occurs in the lowercased
+query. -/
 theorem classify_general_iff (q : List Char) :
     classify q = .general ↔ ∀ m ∈ markers, ¬ m <:+: lower q := by
   have h := classify_iff q
@@ -265,7 +260,7 @@ theorem classify_marker {m : List Char} (hm : lower m ∈ markers) (pre post : L
   refine ⟨lower m, hm, lower pre, lower post, ?_⟩
   rw [lower_append, lower_append]
 
-/-- Each marker on its own is a structural query. -/
+/-- `classify` answers Structural for each marker on its own. -/
 theorem classify_each_marker : ∀ m ∈ markers, classify m = .structural := by
   intro m hm
   have := classify_marker (m := m) (by rw [markers_lower m hm]; exact hm) [] []
@@ -292,8 +287,8 @@ value is computed from routes to the structural arm. -/
 theorem depends_only_structural :
     classify "the answer depends only on the score".toList = .structural := by decide
 
-/-- "unsafe to delete" contains the marker `safe to delete` (harmless: it is
-still a delete-safety question). -/
+/-- `classify` treats `unsafe to delete` as structural (it contains the marker
+`safe to delete`), which is harmless: it is still a delete-safety question. -/
 theorem unsafe_to_delete_structural :
     classify "is it unsafe to delete it".toList = .structural := by decide
 
@@ -301,7 +296,9 @@ theorem unsafe_to_delete_structural :
 theorem independents_of_structural :
     classify "who are the independents of the senate".toList = .structural := by decide
 
-/-- "somewhat uses" contains the marker `what uses`. -/
+/-- `classify` (`src/recall/dispatch.rs`) matches markers as substrings, so
+`somewhat uses` (containing `what uses`) is a structural query: a false
+positive. -/
 theorem somewhat_uses_structural :
     classify "the team somewhat uses the old schema".toList = .structural := by decide
 
@@ -576,9 +573,6 @@ theorem classifyWB_each_marker (isWord : Char → Bool) :
 
 /-- `is_word_char` on ASCII: letters, digits and `_`. -/
 def asciiWord (c : Char) : Bool := c.isAlphanum || c == '_'
-
-theorem asciiWord_letters : ∀ c : Char, c.isLower = true → asciiWord c = true := by
-  intro c h; simp [asciiWord, Char.isAlphanum, Char.isAlpha, h]
 
 /-- **The issue's four queries classify general** under the fixed classifier:
 each marker in them is glued to a longer word. -/
@@ -1120,7 +1114,8 @@ theorem ranked_canonical_first (g : Graph κ) (hk : Lawful g.keyCmp) (a : Nat) :
     rw [show rankCmp g a y x = .lt from hyx] at this
     exact absurd this (by decide)
 
-/-- Within one Canonical class the stronger-bound dependent comes first. -/
+/-- Within one Canonical class, `dependents_of` ranks the more strongly bound
+dependent first. -/
 theorem ranked_weight_desc (g : Graph κ) (hk : Lawful g.keyCmp) (a : Nat) :
     (ranked g a).Pairwise
       (fun x y => g.canonical x = g.canonical y → weight g a y ≤ weight g a x) := by
@@ -1487,8 +1482,8 @@ theorem marker_no_dependents_blends (resolve : Graph κ → Option Choice) (rs v
   rw [recall_one_snapshot, hres]
   simp [finalStep, no_dependents_refuses g a k d hnone]
 
-/-- A general query always blends on the gathered input, at any snapshots,
-even when its anchor has dependents. -/
+/-- `recall_routed` always blends a General query over the gathered input,
+whatever the snapshots and even when its anchor has dependents. -/
 theorem general_blends (resolve : Graph κ → Option Choice) (rs vl : Bool) (q : List Char)
     (k d : Nat) (g₁ g₂ g₃ : Graph κ) (hq : classify q = .general) :
     recallRouted resolve rs vl q k d g₁ g₂ g₃ = .blend (gatherResult vl) := by
@@ -1497,8 +1492,7 @@ theorem general_blends (resolve : Graph κ → Option Choice) (rs vl : Bool) (q 
 /-! ## The dispatch over any classifier (#299)
 
 `tryStructural`, `fitsStructural` and `recallRouted` with the classifier a
-parameter. At `classify` they are the definitions above (`tryStructural_eq`,
-`fitsStructural_eq`, `recallRouted_eq`); at `classifyWB isWord` they are the
+parameter. At `classify` they are the definitions above; at `classifyWB isWord` they are the
 fixed code. The dispatch theorems hold for every classifier, so they hold for
 the fixed one (`traversal_exact_wb`, `fitsStructuralWB_iff`,
 `recall_blend_input_wb`, `general_blends_wb`). -/
@@ -1526,17 +1520,6 @@ def recallRoutedBy (cls : List Char → Kind) (resolve : Graph κ → Option Cho
   else
     finalStep g₃ (resolve g₃) structural topK depth
       (if ready then .empty else gatherResult vectorLeg)
-
-theorem tryStructural_eq (g : Graph κ) (resolve : List Char → Option Choice) (q : List Char)
-    (k d : Nat) : tryStructural g resolve q k d = tryStructuralBy classify g resolve q k d := rfl
-
-theorem fitsStructural_eq (g : Graph κ) (resolve : List Char → Option Choice) (q : List Char) :
-    fitsStructural g resolve q = fitsStructuralBy classify g resolve q := rfl
-
-theorem recallRouted_eq (resolve : Graph κ → Option Choice) (rs vl : Bool) (q : List Char)
-    (k d : Nat) (g₁ g₂ g₃ : Graph κ) :
-    recallRouted resolve rs vl q k d g₁ g₂ g₃ = recallRoutedBy classify resolve rs vl q k d g₁ g₂ g₃ :=
-  rfl
 
 /-- `traversal_exact` through the classifier: a dispatched answer for a
 single anchor, with `top_k` covering every dependent, is exactly its direct

@@ -365,7 +365,7 @@ fn fusion() {
     };
 
     // The weights are at scale 10 (`10` for `1.0`), k a fraction kNum/kDen.
-    let lean = Lean::new(model!("Fusion"));
+    let lean = Lean::new(model!("Fusion/Rrf"));
     let fields = lean.fields("RrfConfig");
     let dflt = lean.def("rrfDefault", "RrfConfig");
     let den = dflt.anon(&fields, "kDen").nat().value;
@@ -440,11 +440,12 @@ fn supersession() {
     use crate::canon::formal_pins::{MIN_COVERAGE, MIN_DISTINCT};
     use crate::graph::suspected::replacement::REPLACEMENT_CANDIDATE_LIMIT;
 
-    let lean = Lean::new(model!("Supersession"));
+    let suspected = Lean::new(model!("Supersession/Suspected"));
     assert_pin!(
         REPLACEMENT_CANDIDATE_LIMIT,
-        lean.def("limit", "Nat").nat().to::<usize>()
+        suspected.def("limit", "Nat").nat().to::<usize>()
     );
+    let lean = Lean::new(model!("Supersession/Pass"));
     // Stage 2's distinct origins.
     let since = lean.captures(
         "def stage2Since (ev : Evidence) (window since : Int) : Bool :=
@@ -484,11 +485,12 @@ fn policy() {
     };
     use crate::canon::PromotionPolicy;
 
-    let lean = Lean::new(model!("Policy"));
+    let sessions = Lean::new(model!("Policy/Sessions"));
     assert_pin!(
         SESSION_SEPARATION,
-        lean.def("sessionSeparation", "Nat").nat().secs()
+        sessions.def("sessionSeparation", "Nat").nat().secs()
     );
+    let lean = Lean::new(model!("Policy/Score"));
     let weight = |name: &str| lean.def(name, "Int").int().scaled(1);
     assert_pin!(SESSION_WEIGHT, weight("sessionWeight"));
     assert_pin!(HUMAN_CONFIRMED_WEIGHT, weight("humanConfirmedWeight"));
@@ -536,7 +538,7 @@ fn policy() {
 fn conflict() {
     use crate::daemon::conflict::CONFLICT_RECENCY_WINDOW;
 
-    let lean = Lean::new(model!("Conflict"));
+    let lean = Lean::new(model!("Conflict/Detect"));
     // Seconds.
     assert_pin!(
         CONFLICT_RECENCY_WINDOW,
@@ -549,7 +551,7 @@ fn conflict() {
 
 #[test]
 fn hotlist() {
-    let lean = Lean::new(model!("Hotlist"));
+    let lean = Lean::new(model!("Hotlist/List"));
     assert_pin!(
         HOT_LIST_MAX,
         lean.def("hotListMax", "Nat").nat().to::<usize>()
@@ -579,7 +581,7 @@ fn hotlist() {
 fn drain() {
     use crate::writeq::{EMBEDDER_SICK_THRESHOLD, REPLAY_LOOKUP_TIMEOUT_LIMIT};
 
-    let lean = Lean::new(model!("Drain"));
+    let lean = Lean::new(model!("Drain/Base"));
     assert_pin!(
         EMBEDDER_SICK_THRESHOLD,
         lean.def("sickThreshold", "Nat").nat().to::<usize>()
@@ -597,7 +599,7 @@ fn flush() {
     };
 
     // Milliseconds.
-    let lean = Lean::new(model!("Flush"));
+    let lean = Lean::new(model!("Flush/Retry"));
     assert_pin!(BACKOFF_BASE, lean.def("backoffBase", "Nat").nat().ms());
     assert_pin!(BACKOFF_CAP, lean.def("backoffCap", "Nat").nat().ms());
     assert_pin!(RETAINED_BACKOFF, lean.apply("retainedBackoff", &[]).ms());
@@ -612,7 +614,7 @@ fn flush() {
 
 #[test]
 fn batch_queue() {
-    let lean = Lean::new(model!("BatchQueue"));
+    let lean = Lean::new(model!("BatchQueue/Pure"));
     let cfg_fields = lean.fields("Cfg");
     let cfg = lean.def("Cfg.rust", "Cfg");
     let field = |name: &str| cfg.anon(&cfg_fields, name).nat().to::<usize>();
@@ -682,7 +684,8 @@ fn registry() {
         NEGATIVE_TTL, PINNED_RETRY, PREVIOUS_HANDLE_WAIT, UNPLACED_PER_PLACE,
     };
 
-    let lean = Lean::new(model!("Registry"));
+    let lean = Lean::new(model!("Registry/Pure"));
+    let runs = Lean::new(model!("Registry/Runs"));
 
     // pinnedRetry (milliseconds): at the Rust's election retry, and swept
     // across the floor so both branches are compared.
@@ -710,8 +713,9 @@ fn registry() {
         );
     }
 
-    // cfgEx's fixed constants, in milliseconds.
-    let cfg = lean.def("cfgEx", "Cfg");
+    // cfgEx's fixed constants, in milliseconds. cfgEx is in Registry/Runs;
+    // its `pr` and `cap` call Registry/Pure's functions, evaluated there.
+    let cfg = runs.def("cfgEx", "Cfg");
     assert_pin!(ELECTION_RETRY, cfg.record("er").nat().ms());
     assert_pin!(PINNED_RETRY, lean.eval_val(&cfg.record("pr")).ms());
     assert_pin!(PREVIOUS_HANDLE_WAIT, cfg.record("wait").nat().ms());
@@ -719,7 +723,7 @@ fn registry() {
     assert_pin!(NEGATIVE_TTL, cfg.record("ttl").nat().ms());
 
     // dropped_flight_fences_next's doc: the TTL and the release grace.
-    let doc = lean.doc_captures(
+    let doc = runs.doc_captures(
         "delayed past `NEGATIVE_TTL` ($ s; the release itself is bounded by
          `LEASE_RELEASE_GRACE`, $ s,",
     );
@@ -773,7 +777,8 @@ fn resolve() {
     use crate::embed::{EmbedderConfig, EmbedderKind};
     use crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
 
-    let lean = Lean::new(model!("Resolve"));
+    let lean = Lean::new(model!("Resolve/Construction"));
+    let serve = Lean::new(model!("Resolve/Serve"));
 
     // The `EmbedderConfig` default width: defaultDim, and Raw.dim's default.
     let default_dim = lean.def("defaultDim", "Nat").nat().to::<usize>();
@@ -784,7 +789,7 @@ fn resolve() {
     );
     assert_pin!(
         MAX_BEARER_CREDENTIAL_BYTES,
-        lean.def("maxBearer", "Nat").nat().to::<usize>()
+        serve.def("maxBearer", "Nat").nat().to::<usize>()
     );
     assert_pin!(
         DEFAULT_MAX_ATTACHED,
@@ -849,7 +854,7 @@ fn resolve() {
 fn tiered() {
     use crate::store::MAX_VECTOR_CANDIDATE_LIMIT;
 
-    let lean = Lean::new(model!("Tiered"));
+    let lean = Lean::new(model!("Tiered/Pure"));
     assert_pin!(
         MAX_VECTOR_CANDIDATE_LIMIT,
         lean.def("maxLimit", "Nat").nat().to::<usize>()

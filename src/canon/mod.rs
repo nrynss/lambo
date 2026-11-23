@@ -79,7 +79,8 @@ pub(crate) mod formal_oracle {
 
 /// Test-only aliases of the stage thresholds and the Solo score's weights and
 /// bars, for `crate::formal_constants_tests` (#291):
-/// `formal/LamboProofs/Canon.lean` and `Policy.lean` hard-code them, and
+/// `formal/LamboProofs/Canon.lean`, `Policy/Sessions.lean` and `Policy/Score.lean`
+/// hard-code them, and
 /// `stage1`, `stage2`, `stage3` and `policy` are private modules.
 #[cfg(test)]
 pub(crate) mod formal_pins {

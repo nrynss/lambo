@@ -27,9 +27,6 @@ transaction.
 Time is an integer and is supplied to each operation by the store, never by a
 client. Nothing below assumes it moves forward.
 
-Not modelled: the erased-session tombstone, and the first acquire on a session
-with no row (it mints token `1`; `first` below is that row).
-
 ## Results
 
 * `token_mono`: over any sequence of acquires and releases the token never
@@ -66,6 +63,11 @@ than the one the handle captured at its own acquire.
 * `override_beat_latches`: after the documented operator override (a release
   by hand), the old beat re-takes the row and does not latch; the fixed beat
   latches.
+
+Boundary: the erased-session tombstone and the first acquire on a session with
+no row (it mints token `1`; `first` is that row) are not modelled; time is an
+input to each operation and nothing assumes it moves forward. How the registry
+acts on a latch is `Registry/Step.lean`.
 -/
 
 namespace Lambo.Lease
@@ -309,7 +311,8 @@ theorem holder_token_permitted (r : Row H) : Permits r.token (some r.token) := b
   unfold Permits
   exact Or.inr ⟨r.token, rfl, Nat.le_refl r.token⟩
 
-/-- A writer that presents no token is refused once the session is leased. -/
+/-- Once a session is leased, the writer fence refuses a writer that presents
+no lease token. -/
 theorem no_token_refused (current : Nat) (h : 0 < current) : ¬ Permits current none := by
   intro hp
   unfold Permits at hp
@@ -321,8 +324,8 @@ theorem no_token_refused (current : Nat) (h : 0 < current) : ¬ Permits current 
       have hnone : (none : Option Nat) = some p := hp'.1
       cases hnone
 
-/-- The seed and fixture bypass: a session that was never leased admits any
-write. -/
+/-- The writer fence admits any write to a session that was never leased: the
+seed and fixture bypass. -/
 theorem unleased_permits (presented : Option Nat) : Permits 0 presented := by
   unfold Permits
   exact Or.inl rfl
@@ -372,7 +375,8 @@ acquire (and presents on every flush). -/
 def beatLatches (me : H) (t : Nat) (now ttl : Int) (r : Row H) : Bool :=
   decide ((acquire me now ttl r).holder ≠ me) || decide ((acquire me now ttl r).token ≠ t)
 
-/-- The fix only adds latches. -/
+/-- The #293 fix to the heartbeat's latch only adds latches: every beat the
+old rule latched still latches. -/
 theorem beatLatchesOld_le (me : H) (t : Nat) (now ttl : Int) (r : Row H)
     (h : beatLatchesOld me now ttl r = true) : beatLatches me t now ttl r = true := by
   unfold beatLatchesOld at h
@@ -417,8 +421,9 @@ theorem beat_latches_iff {released A : H} {a b : Row H} (hsteps : Steps released
         simp [htok, hne]
     · simp [hA]
 
-/-- In particular the first beat after any takeover latches: once the token
-has moved past the one `A` captured, `A`'s beat latches whoever holds the row. -/
+/-- `spawn_lease_heartbeat`'s beat latches the fence on the first beat after
+any takeover: once the token has moved past the one the holder captured, its
+beat latches whoever holds the row. -/
 theorem beat_latches_after_takeover {released A : H} {a b : Row H}
     (hsteps : Steps released a b) (hlt : a.token < b.token) (now ttl : Int) :
     beatLatches A a.token now ttl b = true :=
@@ -446,7 +451,7 @@ theorem override_beat_latches {released A : H} (a : Row H) (hA : a.holder = A)
   unfold beatLatchesOld beatLatches
   simp [hhold, htok]
 
-/-- The override scenario concretely (the `exRetakenRow` of `Flush.lean`):
+/-- The override scenario concretely (the `exRetakenRow` of `Flush/Errors.lean`'s runs):
 holder `0` holds token 1, the override at 50 s releases it, the refresh at
 60 s re-takes it at token 2. The old beat does not latch; the fixed one does. -/
 example :
