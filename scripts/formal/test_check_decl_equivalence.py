@@ -39,7 +39,7 @@ BASE = [
 
 
 class Equivalence(unittest.TestCase):
-    def run_check(self, base, head, renames=None):
+    def run_check(self, base, head, renames=None, deletions=None):
         with tempfile.TemporaryDirectory() as d:
             paths = []
             for name, rows in (("base", base), ("head", head)):
@@ -51,6 +51,10 @@ class Equivalence(unittest.TestCase):
                 r = Path(d) / "renames.tsv"
                 r.write_text(renames, encoding="utf-8")
                 args += ["--renames", str(r)]
+            if deletions is not None:
+                r = Path(d) / "deletions.tsv"
+                r.write_text(deletions, encoding="utf-8")
+                args += ["--deletions", str(r)]
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = eq.main(args)
@@ -113,6 +117,34 @@ class Equivalence(unittest.TestCase):
         head = BASE + [decl("Lambo.A.p", kind="def", type_="Nat",
                             value="_private.LamboProofs.A.Part.0.Lambo.A.q")]
         self.assertEqual(self.run_check(base, head)[0], 0)
+
+    def test_listed_deletions_pass_and_nothing_else_does(self):
+        head = [d for d in BASE if d["name"] != "Lambo.B.helper"]
+        listed = "# name\treason\tkept\nLambo.B.helper\tsame as A's\tLambo.A.helper\n"
+        code, out = self.run_check(BASE, head, deletions=listed)
+        self.assertEqual(code, 0, out)
+        self.assertIn("Lambo.B.helper: same as A's (kept: Lambo.A.helper)", out)
+        # Unlisted, the same deletion fails.
+        self.assertEqual(self.run_check(BASE, head)[0], 1)
+        # A second, unlisted deletion still fails.
+        head2 = [d for d in head if d["name"] != "Lambo.A.t"]
+        code, out = self.run_check(BASE, head2, deletions=listed)
+        self.assertEqual(code, 1)
+        self.assertIn("Lambo.A.t: theorem at the base, not declared at HEAD", out)
+
+    def test_listed_deletion_must_be_gone_and_a_theorem_and_keep_its_counterpart(self):
+        code, out = self.run_check(BASE, BASE, deletions="Lambo.B.helper\tr\t-\n")
+        self.assertEqual(code, 1)
+        self.assertIn("listed as deleted, but still declared", out)
+        head = [d for d in BASE if d["name"] != "Lambo.A.f"]
+        code, out = self.run_check(BASE, head, deletions="Lambo.A.f\tr\t-\n")
+        self.assertEqual(code, 1)
+        self.assertIn("only theorems can be deleted", out)
+        head = [d for d in BASE if d["name"] not in ("Lambo.A.helper", "Lambo.B.helper")]
+        code, out = self.run_check(BASE, head,
+                                   deletions="Lambo.B.helper\tr\tLambo.A.helper\nLambo.A.helper\tr\t-\n")
+        self.assertEqual(code, 1)
+        self.assertIn("listed as deleted for Lambo.A.helper, which is not declared at HEAD", out)
 
     def test_going_private_or_public_fails(self):
         base = BASE + [decl("Lambo.A.p", kind="def", type_="Nat", value="0")]

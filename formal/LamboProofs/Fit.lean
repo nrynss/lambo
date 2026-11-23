@@ -843,8 +843,6 @@ theorem fitBlocks_truncation_whole (e : Env α) (bs : List (Block α)) (maxT : N
   · rw [hp] at h; simp [plainFit] at h
   · rw [hq]
 
-theorem ctxOf_nil (sep : List α) : ctxOf sep [] = [] := rfl
-
 theorem foldl_appendBlock_ne_nil (sep : List α) :
     ∀ (ts : List (List α)) (acc : List α), acc ≠ [] → ts.foldl (appendBlock sep) acc ≠ [] := by
   intro ts

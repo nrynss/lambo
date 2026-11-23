@@ -1285,7 +1285,6 @@ section Authority
 
 variable (P : Params)
 
-theorem markStale_d (s : St) : (markStale s).d = s.d := rfl
 theorem requestRepair_d (s : St) : (requestRepair s).d = s.d := by
   unfold requestRepair; split <;> rfl
 theorem repairIfDue_d (s : St) : (repairIfDue s).d = s.d := by
@@ -1722,7 +1721,6 @@ theorem read_aux (exp : Nat) (s : St) :
 
 /-- A head or idle repair task is not writing. -/
 theorem writing_head (t : Nat) : RPc.head.writing t = false := rfl
-theorem writing_idle (t : Nat) : RPc.idle.writing t = false := rfl
 
 theorem step_row (s : St) (e : Ev) (h : s.d.row ≠ .none) : (step P s e).d.row ≠ .none := by
   by_cases hi : e.indexSide = true

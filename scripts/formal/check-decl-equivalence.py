@@ -2,6 +2,7 @@
 """Check that a change to the Lean models restates nothing they prove.
 
   python3 -I scripts/formal/check-decl-equivalence.py [--base REF] [--renames FILE]
+      [--deletions FILE]
       [--keep DIR] [--base-dump F] [--head-dump F]
 
 Builds the models at REF (default `origin/main`, exported with `git archive`
@@ -20,6 +21,12 @@ not the source text), and compares the two by fully qualified name:
   NEW must exist at HEAD with OLD's kind and type, and several OLD names may
   map to one NEW (duplicates merged). Names in FILE rewrite references in the
   compared bodies too;
+* a theorem may be missing at HEAD only when `--deletions FILE` lists it,
+  one `NAME<TAB>REASON<TAB>KEPT` per line (`#` starts a comment): NAME is a
+  theorem at the base and not at HEAD, REASON says why it went, and KEPT is
+  the theorem at HEAD that states the same thing or more (`-` when there is
+  none, as for a dead helper). Only theorems can be listed: a definition's
+  deletion would change what the others state;
 * no declaration is added at HEAD other than a NEW of FILE;
 * every theorem at HEAD rests on `propext`, `Quot.sound` and
   `Classical.choice` at most.
@@ -33,7 +40,8 @@ are compared; the constants Lean generates for them (`foo.proof_1`,
 `foo.match_1`, `_auxLemma.N`, ...) are not, as their numbering follows the
 file layout.
 
-Exit 0 when the only differences are the listed renames, 1 otherwise. Needs
+Exit 0 when the only differences are the listed renames and deletions, 1
+otherwise. Needs
 `lake` (`~/.elan/bin` on PATH, or LAKE set) and git.
 """
 
@@ -160,11 +168,40 @@ def first_difference(a, b, context=80):
     return f"    base: ...{a[lo:i + context]}\n    head: ...{b[lo:i + context]}"
 
 
-def compare(bd, hd, renames):
+def read_deletions(path):
+    """NAME -> (REASON, KEPT or None)."""
+    deletions = {}
+    if not path:
+        return deletions
+    for raw in open(path, encoding="utf-8"):
+        line = raw.split("#", 1)[0].rstrip("\n")
+        if not line.strip():
+            continue
+        parts = [x.strip() for x in line.split("\t")]
+        if len(parts) != 3 or not parts[0] or not parts[1] or not parts[2]:
+            raise SystemExit(f"{path}: want NAME<TAB>REASON<TAB>KEPT, got {raw!r}")
+        deletions[parts[0]] = (parts[1], None if parts[2] == "-" else parts[2])
+    return deletions
+
+
+def compare(bd, hd, renames, deletions=None):
     base, head = bd.user, hd.user
+    deletions = deletions or {}
     errors, notes = [], []
     targets = set(renames.values())
+    for name, (reason, kept) in sorted(deletions.items()):
+        b = base.get(name)
+        if b is None:
+            errors.append(f"{name}: listed as deleted, but not declared at the base")
+        elif b["kind"] != "theorem":
+            errors.append(f"{name}: listed as deleted, but a {b['kind']}: only theorems can be deleted")
+        if name in head:
+            errors.append(f"{name}: listed as deleted, but still declared")
+        if kept is not None and kept not in head:
+            errors.append(f"{name}: listed as deleted for {kept}, which is not declared at HEAD")
     for name, b in sorted(base.items()):
+        if name in deletions:
+            continue
         new = renames.get(name, name)
         h = head.get(new)
         if name in renames and name in head:
@@ -207,6 +244,7 @@ def main(argv=None):
     ap.add_argument("--repo", default=".", help="repository root (default: .)")
     ap.add_argument("--base", default="origin/main", help="git ref to compare against")
     ap.add_argument("--renames", help="OLD<TAB>NEW lines: helpers moved to the shared library")
+    ap.add_argument("--deletions", help="NAME<TAB>REASON<TAB>KEPT lines: theorems deleted on purpose")
     ap.add_argument("--keep", help="write the two dumps into this directory")
     ap.add_argument("--base-dump", help="reuse a dump of the base instead of building it")
     ap.add_argument("--head-dump", help="reuse a dump of HEAD instead of building it")
@@ -232,7 +270,8 @@ def main(argv=None):
         renames = read_renames(args.renames)
         bd, hd = Dump(base_dump, renames), Dump(head_dump, {})
         base, head = bd.user, hd.user
-        errors, notes = compare(bd, hd, renames)
+        deletions = read_deletions(args.deletions)
+        errors, notes = compare(bd, hd, renames, deletions)
         kinds = Counter(d["kind"] for d in base.values())
         moved = Counter((b["module"], head[renames.get(n, n)]["module"])
                         for n, b in base.items()
@@ -245,6 +284,10 @@ def main(argv=None):
             print(f"  renamed {len(renames)} (moved helpers):")
             for old, new in sorted(renames.items()):
                 print(f"    {old} -> {new}")
+        if deletions:
+            print(f"  deleted {len(deletions)}:")
+            for name, (reason, kept) in sorted(deletions.items()):
+                print(f"    {name}: {reason}" + (f" (kept: {kept})" if kept else ""))
         for n in notes:
             print(f"  note: {n}")
         if errors:
@@ -252,8 +295,9 @@ def main(argv=None):
             for e in errors:
                 print(f"  {e}", file=sys.stderr)
             return 1
-        print("equivalent: every statement and definition unchanged; "
-              "theorems rest on standard axioms only")
+        print("equivalent: every statement and definition unchanged"
+              + (" but the listed moves and deletions" if renames or deletions else "")
+              + "; theorems rest on standard axioms only")
         return 0
     finally:
         if not args.keep:

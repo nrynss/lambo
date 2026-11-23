@@ -979,8 +979,6 @@ theorem lengthChunks_slack (c : Cfg) (lens : List Nat) :
     ∀ ch ∈ lengthChunks c lens, ∀ a ∈ ch, ∀ b ∈ ch, lenAt lens b ≤ 2 * lenAt lens a + c.slack :=
   chunksOf_slack _ _ _ (sortBy_sorted _ _)
 
-theorem lengthChunks_nil (c : Cfg) : lengthChunks c [] = [] := rfl
-
 theorem lengthChunks_ne (c : Cfg) (lens : List Nat) (h : lens ≠ []) : lengthChunks c lens ≠ [] := by
   intro h0
   have := (lengthChunks_perm c lens).length_eq

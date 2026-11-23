@@ -450,10 +450,6 @@ again. -/
 def refusedHits (threshold : Int) (guardRefused : Nat → Bool) (hits : List (Nat × Int)) : List Nat :=
   (hits.filter fun h => decide (threshold ≤ h.2) && guardRefused h.1).map (·.1)
 
-theorem recordRefused_nil (slot : Nat → Nat → Bool) (look : Nat → Option Concept) (new : Concept)
-    (fresh : Nat → Nat) (at_ : Int) (E : List Edge) :
-    recordRefused slot look new fresh at_ E [] = E := rfl
-
 /-- Every suspected edge runs from a strictly later-dated concept to an
 earlier one, by the date function `date` (`dated_at` by id). -/
 def WellDated (date : Nat → Int) (E : List Edge) : Prop :=
@@ -2032,8 +2028,6 @@ theorem gather_off (W : World) (cooldown now : Int) : gather W false cooldown no
 
 theorem gatherHolds_off (W : World) (cooldown now : Int) (window : List Nat) :
     gatherHolds W false cooldown now window = [] := rfl
-
-theorem decideV_nil (ev : Nat → Evidence) (window : Int) : decideV ev window [] = [] := rfl
 
 /-- **The #198 edge is never read as a contradiction.** Adding
 `SuspectedSupersedes` edges changes no contradiction, so no probe and no

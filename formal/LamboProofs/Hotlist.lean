@@ -913,10 +913,6 @@ theorem countC_upsert_le (e : Entry ν) (l : List (Entry ν)) :
   · rw [upsert_of_not_mem e l hm, countC_perm (List.perm_append_singleton _ _), countC_cons]
     split <;> omega
 
-/-- The seqs after an upsert are the old ones plus the new entry's. -/
-theorem seq_mem_upsert {e y : Entry ν} {l : List (Entry ν)} (hy : y ∈ upsert e l) :
-    y = e ∨ y ∈ l := mem_upsert hy
-
 theorem upsert_seq_nodup (e : Entry ν) :
     ∀ l : List (Entry ν), (l.map Entry.seq).Nodup → (∀ x ∈ l, x.seq < e.seq) →
       ((upsert e l).map Entry.seq).Nodup

@@ -1,0 +1,15 @@
+# Theorems deleted from the models on purpose, after the audit in
+# formal/audit/unreferenced-theorems.md found nothing referencing them (no
+# proof in the dump's `uses`, no other declaration naming them, no example,
+# docs anchor, claims ledger row, Rust comment, Audit.lean line, oracle or
+# README mention). Tab-separated: name, reason, the kept theorem that states
+# the same thing or more (`-` when there is none). Read by
+# scripts/formal/check-decl-equivalence.py --deletions and by
+# scripts/formal/audit-theorems.py.
+Lambo.BatchQueue.lengthChunks_nil	dead helper: an undocumented rfl unfolding of lengthChunks on [] that nothing uses or names	-
+Lambo.Fit.ctxOf_nil	dead helper: an undocumented rfl unfolding of ctxOf on [] that nothing uses or names	-
+Lambo.Hotlist.seq_mem_upsert	duplicate: states exactly what mem_upsert states (same statement up to binder names)	Lambo.Hotlist.mem_upsert
+Lambo.Supersession.recordRefused_nil	dead helper: an undocumented rfl unfolding of recordRefused on [] that nothing uses or names	-
+Lambo.Supersession.decideV_nil	dead helper: an undocumented rfl unfolding of decideV on [] that nothing uses or names	-
+Lambo.Tiered.markStale_d	dead helper: an undocumented rfl unfolding of markStale's durable side that nothing uses or names	-
+Lambo.Tiered.writing_idle	dead helper: an undocumented rfl unfolding of RPc.writing at idle that nothing uses or names	-

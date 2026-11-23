@@ -46,7 +46,7 @@ oracle" below). It keeps
 module is not rebuilt. Besides the checkout pin `ci.yml` already uses, the only
 action is `actions/cache`, pinned by commit.
 
-[^count]: For the record: 2,468 theorems across 33 model files, and 18 shared
+[^count]: For the record: 2,461 theorems across 33 model files, and 18 shared
     lemmas about lists in `LamboProofs/Lib/List.lean`. The count is of `theorem`
     declarations in the model files (every `.lean` file under `LamboProofs/`,
     subdirectories included, other than `Audit.lean` and the shared lemmas under
@@ -243,7 +243,8 @@ environment, so it compares what Lean checked rather than the source text),
 and compares them by fully qualified name.
 
 ```bash
-PATH="$HOME/.elan/bin:$PATH" python3 -I scripts/formal/check-decl-equivalence.py --base origin/main
+PATH="$HOME/.elan/bin:$PATH" python3 -I scripts/formal/check-decl-equivalence.py --base origin/main \
+  --renames formal/audit/moved-helpers.tsv --deletions formal/audit/deleted-theorems.tsv
 ```
 
 It fails unless every theorem at the base exists with the same kind, universe
@@ -255,7 +256,9 @@ not compared. A declaration that goes private or public fails, since that
 changes its kernel name. A declaration may change name only when `--renames FILE` lists
 it as `OLD<TAB>NEW` (a helper moved to the shared library; several old names
 may map to one new one), and then the new one must have the old one's
-statement. The constants Lean generates (`foo.match_1`, `foo.proof_1`,
+statement. A theorem may be missing only when `--deletions FILE` lists it
+(`formal/audit/deleted-theorems.tsv`: name, reason, and the kept theorem
+that states the same thing or more). The constants Lean generates (`foo.match_1`, `foo.proof_1`,
 `_auxLemma.N`) are compared by what they are, not by name, since their names
 follow the file layout. Its tests run without Lean:
 
