@@ -3,32 +3,34 @@
 //! `--ledger-heartbeat`, before any backend is built, with the usage exit
 //! code 2 that every other preflight refusal uses.
 //!
-//! The config names a SQLite store in a directory that does not exist, so a
-//! command line that gets past the checks has its backends built and fails
-//! on the store's first use, exit 1, `unable to open database file`. A
-//! refusal that never gets there was made before anything was built (a
-//! store build is lazy and opens nothing, so the refusal is also the first
-//! thing the command does with the store). The models
-//! are `formal/LamboProofs/Resolve/Serve.lean`'s
+//! The config pins `[store] vector_dim` to a width the embedder does not
+//! emit. The file loads, so every check before the backends passes, and
+//! `resolve_backends` refuses it after building the store and the embedder:
+//! exit 1, `failed to build backends: store.vector_dim is pinned ...`. A
+//! command line that never prints that line was refused before
+//! `resolve_backends` ran. Before #316 all three refusals came after it
+//! (`serve-web`'s in `serve_web::run`, `serve`'s in `lambo::mcp::serve`), so
+//! each test here fails on that code. The models are
+//! `formal/LamboProofs/Resolve/Serve.lean`'s
 //! `exposed_bind_refused_before_build` and
 //! `heartbeat_without_ledger_refused_before_build`.
-#![cfg(all(feature = "store-sqlite", feature = "embed-fixture", unix))]
+#![cfg(all(feature = "store-memory", feature = "embed-fixture", unix))]
 
 use std::process::{Output, Stdio};
 
 mod common;
 use common::{RuntimeDir, ScratchDir, RUNTIME_DIR_VAR};
 
-/// A `lambo.toml` whose store cannot be opened: its first use fails.
+/// What the backend resolve says about the config below.
+const RESOLVE_REFUSED: &str = "store.vector_dim is pinned to 768";
+
+/// A `lambo.toml` that loads but that `resolve_backends` refuses, after
+/// building the store and the embedder.
 fn unbuildable(dir: &ScratchDir) -> std::path::PathBuf {
     let cfg = dir.join("lambo.toml");
-    let missing = dir.join("no-such-dir").join("x.sqlite");
     std::fs::write(
         &cfg,
-        format!(
-            "[store]\nkind = \"sqlite\"\npath = \"{}\"\n\n[embedder]\nkind = \"fixture\"\ndim = 1024\n",
-            missing.display()
-        ),
+        "[store]\nkind = \"memory\"\nvector_dim = 768\n\n[embedder]\nkind = \"fixture\"\ndim = 1024\n",
     )
     .expect("write config");
     cfg
@@ -57,26 +59,22 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// Refused before the backends: exit 2, `needle` in the message, and no
-/// backend build was attempted.
+/// Refused before the backends: exit 2, `needle` in the message, and
+/// `resolve_backends` never ran.
 fn refused_before_build(out: &Output, needle: &str) {
     let err = stderr(out);
     assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains(needle), "{err}");
-    assert!(!err.contains(UNOPENABLE), "{err}");
-    // Nor was the embedder built: building it logs that the fixture
-    // contract has no calibration row.
-    assert!(!err.contains("no calibration row"), "{err}");
+    assert!(!err.contains("failed to build backends"), "{err}");
+    assert!(!err.contains(RESOLVE_REFUSED), "{err}");
 }
 
-/// What the store says on its first use.
-const UNOPENABLE: &str = "unable to open database file";
-
-/// Got past every check to the backends, whose store fails: exit 1.
+/// Got past every check to `resolve_backends`, which refuses: exit 1.
 fn reached_the_backends(out: &Output) {
     let err = stderr(out);
     assert_eq!(out.status.code(), Some(1), "{err}");
-    assert!(err.contains(UNOPENABLE), "{err}");
+    assert!(err.contains("failed to build backends"), "{err}");
+    assert!(err.contains(RESOLVE_REFUSED), "{err}");
 }
 
 fn token() -> String {
