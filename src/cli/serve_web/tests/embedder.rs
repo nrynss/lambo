@@ -5,7 +5,11 @@
 //! [`Deferred`] stands in for the candle adapter: it embeds only after its
 //! `prepare` ran (an embed before that is an error the tests would see as a
 //! degraded recall), counts every `prepare` and query embed, and can park
-//! its `prepare` until a test releases it, or fail it.
+//! its `prepare` until a test releases it, or fail it. In its candle shape
+//! ([`Deferred::candle_like`]) the first `prepare` starts the one load on a
+//! task of its own, which a dropped caller does not stop, and every
+//! `prepare` waits for that load, as candle's does on its blocking thread
+//! (#31).
 
 use super::*;
 use crate::cli::serve_web::embedder::OFF_BY_CONFIGURATION;
@@ -22,6 +26,10 @@ struct Deferred {
     park: Option<Arc<tokio::sync::Semaphore>>,
     /// How many of the next `prepare`s fail.
     failures: Arc<parking_lot::Mutex<usize>>,
+    /// The candle shape: the one load in flight, once started.
+    flight: Option<Arc<parking_lot::Mutex<Option<tokio::sync::watch::Receiver<bool>>>>>,
+    /// Loads started (in the candle shape; `prepares` counts calls).
+    loads: Arc<AtomicUsize>,
 }
 
 impl Deferred {
@@ -33,7 +41,43 @@ impl Deferred {
             loaded: Arc::default(),
             park: None,
             failures: Arc::default(),
+            flight: None,
+            loads: Arc::default(),
         }
+    }
+
+    /// Parked, and in candle's shape: one load, on its own task.
+    fn candle_like(self) -> (Self, Arc<tokio::sync::Semaphore>) {
+        let (mut this, park) = self.parked();
+        this.flight = Some(Arc::default());
+        (this, park)
+    }
+
+    /// The candle shape's `prepare`: join the load in flight, or start it.
+    async fn join_the_load(
+        &self,
+        flight: &parking_lot::Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
+    ) -> Result<(), crate::embed::EmbedError> {
+        let mut done = flight
+            .lock()
+            .get_or_insert_with(|| {
+                let (tx, rx) = tokio::sync::watch::channel(false);
+                self.loads.fetch_add(1, Ordering::SeqCst);
+                let (park, loaded) = (self.park.clone(), self.loaded.clone());
+                tokio::spawn(async move {
+                    if let Some(park) = park {
+                        park.acquire().await.expect("park open").forget();
+                    }
+                    loaded.store(true, Ordering::SeqCst);
+                    let _ = tx.send(true);
+                });
+                rx
+            })
+            .clone();
+        done.wait_for(|loaded| *loaded)
+            .await
+            .map(|_| ())
+            .map_err(|_| crate::embed::EmbedError::Unavailable("load task gone".into()))
     }
 
     fn parked(mut self) -> (Self, Arc<tokio::sync::Semaphore>) {
@@ -74,6 +118,9 @@ impl crate::embed::Embedder for Deferred {
     }
     async fn prepare(&self) -> Result<(), crate::embed::EmbedError> {
         self.prepares.fetch_add(1, Ordering::SeqCst);
+        if let Some(flight) = &self.flight {
+            return self.join_the_load(flight).await;
+        }
         if let Some(park) = &self.park {
             park.acquire().await.expect("park open").forget();
         }
@@ -294,6 +341,76 @@ async fn embedder_off_never_loads_and_recall_says_so() {
     handle.abort();
 }
 
+/// (f) A recall dropped while the load is in flight (its client went
+/// away) releases the gate's turn without an outcome. The next recall calls
+/// `prepare` again, and that joins the load already running rather than
+/// starting a second one: one load in all, and the waiter embeds with it.
+#[tokio::test]
+async fn a_recall_dropped_mid_load_leaves_one_load_for_the_next() {
+    let (embedder, park) = Deferred::new().candle_like();
+    let (prepares, loads, queries) = (
+        embedder.prepares.clone(),
+        embedder.loads.clone(),
+        embedder.queries.clone(),
+    );
+    let (state, _addr, handle) =
+        portal("t247-drop", embedder, &crate::config::WebConfig::default()).await;
+    let session = SessionId::new("t247-drop");
+    let recall = |query: &'static str| {
+        let (state, session) = (state.clone(), session.clone());
+        tokio::spawn(async move {
+            let request = crate::cli::recall::RecallRequest::validate(
+                session.as_str(),
+                query,
+                None,
+                None,
+                None,
+            )
+            .expect("valid");
+            let view = state.view(&session).await.expect("view");
+            state
+                .embedder
+                .recall(&state.backends, &view.reader, &request, None)
+                .await
+        })
+    };
+    let until_prepares = |n: usize| {
+        let prepares = prepares.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while prepares.load(Ordering::SeqCst) < n {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("prepare reached")
+        }
+    };
+
+    let leading = recall("user schema");
+    until_prepares(1).await;
+    leading.abort();
+    assert!(matches!(leading.await, Err(e) if e.is_cancelled()));
+
+    let waiter = recall("auth middleware");
+    until_prepares(2).await;
+    assert_eq!(state.embedder.prepares(), 2, "the turn was released");
+    assert_eq!(loads.load(Ordering::SeqCst), 1, "no second load started");
+
+    park.add_permits(1);
+    let cli = waiter.await.expect("task").expect("recall");
+    assert!(
+        cli.response_annotations.iter().all(|a| a.kind
+            != crate::recall::detail::AnnotationKind::VectorDegraded
+            || a.text.contains("the store's vector read failed")),
+        "the waiter embedded: {:?}",
+        cli.response_annotations
+    );
+    assert_eq!(queries.load(Ordering::SeqCst), 1, "the waiter's query");
+    assert_eq!(loads.load(Ordering::SeqCst), 1, "one load in all");
+    handle.abort();
+}
+
 /// (d) A failed load degrades the recall exactly as a failed embed does,
 /// and is not remembered: the next recall loads again, and succeeds.
 #[tokio::test]
@@ -369,16 +486,49 @@ async fn recalls_waiting_on_a_failed_load_share_its_outcome() {
 }
 
 /// The gate is the only portal source that loads the embedder: startup
-/// (`run`) and every route reach the model only through it.
+/// (`run`) and every route reach the model only through it. Calling
+/// `prepare` is not the only way to load it: candle's `embed` and
+/// `embed_query` load an unloaded model themselves, so any use of the
+/// resolved adapter (`backends.embedder`, as opposed to its
+/// `embedder_cfg`), any direct embed, and any `cli::recall` entry point
+/// that embeds with the resolved adapter (everything but
+/// `run_detailed_on_leg`, which takes the gate's handle) would load it too.
 #[test]
 fn only_the_gate_loads_the_embedder() {
+    // `run_detailed_on_leg(` is the gate's, and not matched by these.
+    const BARE_RECALLS: &[&str] = &[
+        "recall::run(",
+        "run_by(",
+        "run_reported(",
+        "run_reported_with_text_vector(",
+        "run_detailed(",
+        "run_detailed_on(",
+    ];
     for (name, src) in PRODUCTION_SOURCES {
         let src = src.split("#[cfg(all(test").next().unwrap_or(src);
-        let calls = src.matches(".prepare()").count();
-        if *name == "serve_web/embedder.rs" {
-            assert_eq!(calls, 1, "{name}: the gate's one prepare");
-        } else {
-            assert_eq!(calls, 0, "{name} loads the embedder outside the gate");
+        // Whitespace out, so a call chain rustfmt split across lines
+        // (`backends\n    .embedder`) still matches.
+        let src: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        let gate = *name == "serve_web/embedder.rs";
+        let count = |needle: &str| src.matches(needle).count();
+
+        let prepares = count(".prepare()");
+        assert_eq!(prepares, usize::from(gate), "{name}: `.prepare()` calls");
+
+        // The resolved adapter: once in the gate, to wrap it in `Gated`.
+        let adapter = count("backends.embedder") - count("backends.embedder_cfg");
+        assert_eq!(
+            adapter,
+            usize::from(gate),
+            "{name}: uses of `backends.embedder`"
+        );
+
+        // Embeds: only `Gated`'s two, after the gate's load.
+        let embeds = count(".embed(") + count(".embed_query(");
+        assert_eq!(embeds, 2 * usize::from(gate), "{name}: direct embeds");
+
+        for bare in BARE_RECALLS {
+            assert_eq!(count(bare), 0, "{name} recalls through `{bare}`");
         }
     }
 }
