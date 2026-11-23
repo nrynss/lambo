@@ -14,7 +14,7 @@
   models, which Rust, its end results and what it does not cover. Every
   theorem is used by another proof or has a doc comment stating what it
   guarantees about which Rust behaviour, and CI checks that rule
-  (`scripts/formal/audit-theorems.py --check`). The 78 theorems that met
+  (`scripts/formal/audit-theorems.py --check`). The 81 theorems that met
   neither, or whose doc comment did not hold up against the Rust on review
   (pure order theory or arithmetic, a design not in the Rust), are deleted,
   each listed with its reason in `formal/audit/deleted-theorems.tsv`. They

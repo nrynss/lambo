@@ -70,7 +70,7 @@ Lambo.BatchQueue.removeDesc_snd_sublist	leftover helper: used only by the delete
 Lambo.Canonical.words_nil	leftover helper: an rfl unfolding used only by the deleted words_sep_cons	-
 Lambo.Cite.Acyclic.irrefl	purpose review: a generic consequence of the definition of Acyclic for any relation; its doc claimed closing_edge refuses s -> s, which refuses_self_loop states about the gate	-
 Lambo.Fit.bsearch_fuel	purpose review: a fact about the model's fuel parameter (enough fuel gives the same answer), not about fit.rs, and no proof uses it	-
-Lambo.Fit.jumpEst_mono	purpose review: arithmetic about the toy counterexample estimator; rjEst_mono states it for the byte-faithful counterexample on fit.rs	-
+Lambo.Fit.jumpEst_mono	purpose review: arithmetic about the toy counterexample estimator	-
 Lambo.Gc.taken_le_budget	purpose review: list arithmetic (take (min len b) has length at most b) that names no GC definition; its doc also claimed a prefix order it does not state	-
 Lambo.Gc.none_deferred_iff	purpose review: arithmetic (len - min len b = 0 iff len <= b) that names no GC definition	-
 Lambo.Order.Lawful.strict_total	purpose review: order theory about any lawful separating comparator, naming no Rust behaviour	-
@@ -99,3 +99,6 @@ Lambo.Order.ex280RelHit	#280 unimplemented design; recoverable from git history	
 Lambo.Order.ex280Score	#280 unimplemented design; recoverable from git history	-
 Lambo.Order.ex280Order	#280 unimplemented design; recoverable from git history	-
 Lambo.TopK.exSame	#280 unimplemented design; recoverable from git history	-
+Lambo.Cite.no_dependency_cycle	re-review: a generic consequence of Acyclic for any relation, as Acyclic.irrefl was; its doc claimed what closing_edge does, which it does not prove	-
+Lambo.Fit.rjEst_mono	re-review: arithmetic about the model's own counterexample estimator, as jumpEst_mono was	-
+Lambo.Confidence.noisyOr_ge_keyword	re-review: states exactly what keywordOnly_le_noisyOr states (the same statement; that one's proof now inlines this one's); its Audit.lean line removed	Lambo.Confidence.keywordOnly_le_noisyOr

@@ -61,8 +61,8 @@ the argument says so).
   `noisyOr_mono_bm25`, `provisional_mono_bm25`); the Rust test checks
   integer steps only.
 * **"Never below either term" and the keyword-only comparison are
-  exact-arithmetic only** (`noisyOr_ge_keyword`, `noisyOr_ge_vector`,
-  `keywordOnly_le_noisyOr`, `keywordOnly_eq_noisyOr_at_null`): in `f64` they
+  exact-arithmetic only** (`keywordOnly_le_noisyOr`, `noisyOr_ge_vector`,
+  `keywordOnly_eq_noisyOr_at_null`): in `f64` they
   can be off by an ulp. For example `noisy_or(1.0, 0.10, 0.36)` is
   `0.16666666666666663`, below `keyword_term(1.0) = 0.16666666666666666`,
   although the cosine is under the median (`b = 0`).
@@ -104,7 +104,7 @@ named are in `src/recall/confidence.rs` (`the_arithmetic_is_the_noisy_or_recorde
   `provisional_mono_bm25`, `provisional_mono_cosine`: **monotone in each leg**
   (the test's "monotone in each leg"), with the basis unchanged. In `f64` the
   cosine statements survive rounding; the BM25 ones hold up to an ulp.
-* `noisyOr_ge_keyword`, `noisyOr_ge_vector`, `noisyOrCombine_num`,
+* `keywordOnly_le_noisyOr`, `noisyOr_ge_vector`, `noisyOrCombine_num`,
   `noisyOrCombine_comm`, `noisyOr_eq_one_iff`: the noisy-OR is never below
   either term, equals `a + b - ab`, is symmetric, and is `1` exactly when the
   cosine is at least `1` ("one at 1 is 1"); keyword evidence alone never
@@ -420,7 +420,7 @@ theorem noisyOr_eq_some {u : Int} {bm25 cosine median : F64} {v : Frac}
       | _ => simp [keywordTerm] at h
   · cases h
 
-/-- `provisional_confidence`'s two-leg value is `None` for any non-finite
+/-- `noisy_or`'s two-leg value is `None` for any non-finite
 input and for a null median at or above `1`. -/
 theorem noisyOr_none {u : Int} {bm25 cosine median : F64}
     (h : bm25.isFinite = false ∨ cosine.isFinite = false ∨ median.isFinite = false ∨
@@ -437,20 +437,15 @@ theorem noisyOr_none {u : Int} {bm25 cosine median : F64}
     · cases h
     · cases hm'; omega
 
-/-- **The value is in `[0, 1]`** whenever it is reported. -/
+/-- **The value is in `[0, 1]`**: `noisy_or`'s two-leg value, whenever it is
+reported. -/
 theorem noisyOr_inUnit {u : Int} (hu : 0 < u) {bm25 cosine median : F64} {v : Frac}
     (h : noisyOr u bm25 cosine median = some v) : v.InUnit := by
   obtain ⟨s, c, m, -, -, -, hm, rfl⟩ := noisyOr_eq_some h
   exact noisyOrCombine_inUnit (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
 
-/-- **Never below the keyword term**, in exact arithmetic (in `f64` up to an
-ulp, as the number model shows). -/
-theorem noisyOr_ge_keyword {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
-    (keywordTermFin u s).le (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) :=
-  le_noisyOrCombine_left (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
-
-/-- **Never below the rescaled cosine**, in exact arithmetic (in `f64` up to an
-ulp). -/
+/-- **Never below the rescaled cosine**: `noisy_or`'s two-leg value is at least
+its vector term, in exact arithmetic (in `f64` up to an ulp). -/
 theorem noisyOr_ge_vector {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
     (vectorTerm u c m).le (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) :=
   le_noisyOrCombine_right (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
@@ -492,17 +487,21 @@ theorem noisyOr_eq_one_iff {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
     rw [h1, Int.mul_zero, Int.sub_zero]
 
 /-- **The keyword-only value is the two-leg value with `b = 0`**: at a cosine
-at or under the null median the two agree, in exact arithmetic. -/
+at or under the null median, `keyword_term` and `noisy_or` agree, in exact
+arithmetic. -/
 theorem keywordOnly_eq_noisyOr_at_null {u : Int} {s c m : Int} (hm : m < u) (hc : c ≤ m) :
     (keywordTermFin u s).eqv (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) := by
   have h0 := (vectorTerm_spec (c := c) hm).1 hc
   simp only [Frac.eqv, noisyOrCombine, h0, Int.sub_zero]
   grind
 
-/-- **A lower quantity than the two-leg value** for the same store. -/
+/-- **A lower quantity than the two-leg value** for the same store: the
+keyword-only value (`keyword_term`) is never above `noisy_or`'s two-leg value,
+which is so never below its keyword term, in exact arithmetic (in `f64` up to
+an ulp, as the number model shows). -/
 theorem keywordOnly_le_noisyOr {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
     (keywordTermFin u s).le (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) :=
-  noisyOr_ge_keyword hu hm
+  le_noisyOrCombine_left (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
 
 /-! ## `provisional` and the two bases -/
 

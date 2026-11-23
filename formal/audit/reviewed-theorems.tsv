@@ -30,13 +30,13 @@ Lambo.Canonical.keyF_eq_key_of_sane	keep	the #301 empty-stem filter in `canonica
 Lambo.Canonical.dup_not_collapsed	keep	`canonical_key` keeps repeated words (a multiset), on a concrete pair
 Lambo.Cite.Acyclic.irrefl	deleted	a generic consequence of Acyclic for any relation; its doc claimed what refuses_self_loop proves about closing_edge
 Lambo.Cite.no_mutual_dependency	keep	the doc states what `closing_edge` does, no more broadly than the statement
-Lambo.Cite.no_dependency_cycle	keep	on the Causal/Dependency graph `closing_edge` keeps acyclic, nothing a concept depends on depends back on it
+Lambo.Cite.no_dependency_cycle	deleted	a generic consequence of Acyclic for any relation; its doc claimed what closing_edge does (re-review)
 Lambo.Confidence.keywordTerm_of_nonpos	keep	`keyword_term` counts a non-positive BM25 as none (the Rust doc quoted)
 Lambo.Confidence.noisyOrCombine_num	keep	`noisy_or`'s `1 - (1 - a)(1 - b)` is the noisy-OR `a + b - ab`
 Lambo.Confidence.noisyOr_none	keep	the doc states what `provisional_confidence` does, no more broadly than the statement
-Lambo.Confidence.noisyOr_inUnit	keep	`noisy_or`'s reported value is in [0, 1]
-Lambo.Confidence.noisyOr_ge_vector	narrowed	exact arithmetic only; the doc now says so (in f64 up to an ulp)
-Lambo.Confidence.keywordOnly_eq_noisyOr_at_null	narrowed	exact arithmetic only; the doc now says so
+Lambo.Confidence.noisyOr_inUnit	narrowed	the doc now names `noisy_or` (re-review)
+Lambo.Confidence.noisyOr_ge_vector	narrowed	exact arithmetic only, and the doc now names `noisy_or`
+Lambo.Confidence.keywordOnly_eq_noisyOr_at_null	narrowed	exact arithmetic only, and the doc now names `keyword_term` and `noisy_or`
 Lambo.Confidence.topLegs_perm	keep	`top_legs` ignores the HashMap iteration order
 Lambo.Confidence.recall_keywordOnly_without_median	keep	a recall with no vector leg reports the keyword-only value without a median (#256)
 Lambo.Conflict.declaredAt_le_aboutTime	keep	the doc states what `declared_at` does, no more broadly than the statement
@@ -131,8 +131,8 @@ Lambo.Fit.fit_of_all_fit	keep	`fit_blocks`' whole-block loop renders every block
 Lambo.Fit.bsearch_fuel	deleted	about the model's fuel parameter, not fit.rs
 Lambo.Fit.fitBlocks_empty	keep	`fit_blocks` with no block rendered returns the empty context
 Lambo.Fit.rust_bytes_steady	keep	the byte estimator `fit.rs`'s tests use is Steady, so the fit results cover it
-Lambo.Fit.jumpEst_mono	deleted	arithmetic about a toy estimator; rjEst_mono covers the fit.rs counterexample
-Lambo.Fit.rjEst_mono	keep	the byte-faithful counterexample estimator for `fit.rs`'s doc is monotone in bytes
+Lambo.Fit.jumpEst_mono	deleted	arithmetic about a toy estimator
+Lambo.Fit.rjEst_mono	deleted	arithmetic about the model's own counterexample estimator (re-review)
 Lambo.Flush.checkFence_unfenced	keep	the doc states what `drain_and_flush` does, no more broadly than the statement
 Lambo.Flush.stale_write_erased	keep	`drain_and_flush` on an erased session's stale write: fence latched, batch dropped, loop stopped (#23)
 Lambo.Flush.run_degraded_silent	keep	the doc states what `drain_and_flush` does, no more broadly than the statement
@@ -163,7 +163,7 @@ Lambo.Gc.only_contradictions_is_orphan	keep	mirrors the Rust test `counts_toward
 Lambo.Gc.cap_ge_floor	narrowed	the doc claimed a sweep can always collect that many; it now says the cap allows that many
 Lambo.Gc.taken_le_budget	deleted	list arithmetic naming no GC definition, and its doc claimed an order it does not state
 Lambo.Gc.none_deferred_iff	deleted	arithmetic naming no GC definition
-Lambo.Gc.bump_adds_one	keep	`bump_gc_survived` adds one below `i32::MAX`
+Lambo.Gc.bump_adds_one	narrowed	the doc claimed saturation, which no theorem states; it now states the add-one below `i32::MAX` only (re-review)
 Lambo.Hotlist.enforce_evicts_oldest_in_tier	keep	`HotList::enforce` evicts the older of two entries in one tier
 Lambo.Hotlist.insert_evicted_lowest	keep	the doc states what `HotList::insert` does, no more broadly than the statement
 Lambo.Hotlist.enforce_pairwise	keep	the doc states what `HotList::enforce` does, no more broadly than the statement

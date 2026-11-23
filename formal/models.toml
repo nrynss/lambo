@@ -302,11 +302,12 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Dispatch.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:5a54043e8333e61ba515da45000dcc812e40286173c395992533b94aa5f33af1"
+read_digest = "v2:sha256:a3a0476933daa64e0d12840f3e91ebb97720ff6e159947a44b2e22759c4b513e"
 rust = [
   "src/recall/dispatch.rs",
   "src/daemon/mod.rs#recall_routed",
   "src/recall/format.rs#dependents_of",
+  "src/types/mod.rs#EdgeType",
   "src/types/mod.rs#dependence",
   "src/types/mod.rs#dependent_end",
   "src/recall/candidates.rs#gather_from",

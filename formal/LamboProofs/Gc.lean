@@ -217,8 +217,7 @@ theorem bump_never_resets (g : Nat) : ∀ (n : Nat), g ≤ Nat.repeat bump n g :
     show g ≤ bump (Nat.repeat bump n g)
     exact Nat.le_trans ih (bump_mono _)
 
-/-- Below `i32::MAX`, `bump_gc_survived` adds exactly one survival; it
-saturates rather than overflow. -/
+/-- Below `i32::MAX`, `bump_gc_survived` adds exactly one survival. -/
 theorem bump_adds_one (g : Nat) (h : g < i32Max) : bump g = g + 1 := by
   unfold bump
   exact ite_eq_left h

@@ -163,7 +163,6 @@ open Lambo
 #print axioms Confidence.keywordTerm_tendsto_one
 #print axioms Confidence.provisional_mono_bm25
 #print axioms Confidence.provisional_mono_cosine
-#print axioms Confidence.noisyOr_ge_keyword
 #print axioms Confidence.noisyOr_eq_one_iff
 #print axioms Confidence.keywordOnly_le_noisyOr
 #print axioms Confidence.provisional_basis_iff

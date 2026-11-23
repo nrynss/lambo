@@ -1510,22 +1510,6 @@ byte count up to 90 bytes and `10^19` more above. -/
 def rjEst (s : List Char) : Nat :=
   if wsum Char.utf8Size s ≤ 90 then wsum Char.utf8Size s else 10 ^ 19 + wsum Char.utf8Size s
 
-/-- The counterexample estimator for `fit.rs` (the byte count up to 90 bytes,
-`10^19` more above) is monotone in the byte count: monotonicity alone does not
-make the cut safe. -/
-theorem rjEst_mono {s t : List Char} (h : wsum Char.utf8Size s ≤ wsum Char.utf8Size t) :
-    rjEst s ≤ rjEst t := by
-  unfold rjEst
-  by_cases hs : wsum Char.utf8Size s ≤ 90
-  · rw [ite_eq_left hs]
-    by_cases ht : wsum Char.utf8Size t ≤ 90
-    · rw [ite_eq_left ht]; exact h
-    · rw [ite_eq_right ht]; exact Nat.le_trans h (Nat.le_add_left _ _)
-  · rw [ite_eq_right hs]
-    have ht : ¬ wsum Char.utf8Size t ≤ 90 := by omega
-    rw [ite_eq_right ht]
-    exact Nat.add_le_add_left h _
-
 /-- 91 content bytes and a real label: 126 bytes. -/
 def rjBlock : Block Char := rustBlock (List.replicate 91 'y') exLabel [] "1a2b3c4d".toList none
 
@@ -1535,7 +1519,8 @@ count has 20 digits) does not fit, but at cuts 1 to 9 (116 to 124 bytes) it
 does; the Rust skips the form and returns `ContentOnly` with a 26-byte head,
 although `ContentOnly` heads of 36 to 44 bytes fit too. Breaks "The first form
 that fits wins" (`fit.rs:26`) and "the head is also the longest such head that
-fits" (`fit.rs:53-55`) for an estimator monotone in bytes. -/
+fits" (`fit.rs:53-55`) for an estimator monotone in bytes (`rjEst` is, by its
+definition: the byte count, plus a constant above 90 bytes). -/
 theorem rust_jump_skips_a_fitting_form :
     okOf (rustEnv rjEst) [rjBlock] (10 ^ 19 + 124) 1 = false ∧
     fits (rjEst (render (rustEnv rjEst) rjBlock .withWarnings 0)) (10 ^ 19 + 124) = false ∧

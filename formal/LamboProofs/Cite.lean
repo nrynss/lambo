@@ -158,12 +158,6 @@ theorem no_mutual_dependency {R : ι → ι → Prop} (h : Acyclic R) {x y : ι}
     ¬ R y x :=
   fun hyx => h x y hxy (Reach.single hyx)
 
-/-- On the `Causal`/`Dependency` graph the write gates (`closing_edge`) keep
-acyclic, nothing a concept transitively depends on depends back on it. -/
-theorem no_dependency_cycle {R : ι → ι → Prop} (h : Acyclic R) {x y z : ι} (hxy : R x y)
-    (hyz : Reach R y z) : ¬ R z x :=
-  fun hzx => h x y hxy (Reach.trans hyz (Reach.single hzx))
-
 /-! ## The other refusals of `pin_scoped`
 
 These are checks on a single call's references rather than on the graph. -/
