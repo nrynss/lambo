@@ -568,12 +568,14 @@ open Lambo
 #print axioms Lambo.Drain.closeD_vouches_only_committed
 #print axioms Lambo.Drain.closeD_durable_iff
 #print axioms Lambo.Drain.closeD_retryD
+#print axioms Lambo.Drain.closeD_keptDropped
 -- Where the lookup-timeout streak resets (#346)
 #print axioms Lambo.Drain.streakNew_eq_runSince
 #print axioms Lambo.Drain.heldNew_iff
 #print axioms Lambo.Drain.streakNew_after_commit
 #print axioms Lambo.Drain.timeout_after_commit_settlesW
 #print axioms Lambo.Drain.streak_old_counts_across_commit
+#print axioms Lambo.Drain.streak_okArm_counts_across_commit
 #print axioms Lambo.Drain.streak_both_forgets_run
 -- Store flush path
 #print axioms Flush.flushWithRetry_backoff

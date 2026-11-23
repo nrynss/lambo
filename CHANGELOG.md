@@ -30,8 +30,8 @@
   theorems for close and crash accounting, and says a run of slow vector
   lookups holds every later first attempt until a write applies, not only the
   third. `scripts/formal/count-theorems.py` counts the theorems by the rule
-  `formal/README.md` states (2,439; the README said 2,393 for files it counts
-  as 2,394).
+  `formal/README.md` states (2,478 with the #345 and #346 models below; the
+  README said 2,393 for files it counts as 2,394).
 
 ### Fixed
 
@@ -58,11 +58,12 @@
   toward the run of slow lookups (#346).** The in-session streak of lookup
   timeouts reset in a write's settle block, after its commit, so another
   agent's timeout landing between the two counted as part of the old run
-  and could be held instead of settled `failed`. The streak now resets at
-  the commit, which is the documented rule: three timeouts in a row with
-  nothing applied between. Modelled first in `Drain.lean`
-  (`streak_old_counts_across_commit`, the defect; `streakNew_eq_runSince`,
-  `heldNew_iff`, the fix).
+  and could be held instead of settled `failed`. The streak now resets
+  inside the write's commit, under the same graph lock hold, which is the
+  documented rule: three timeouts in a row with nothing applied between.
+  Modelled first in `Drain.lean` (`streak_old_counts_across_commit` and
+  `streak_okArm_counts_across_commit`, the defect at the settle and at the
+  worker's `Ok` arm; `streakNew_eq_runSince`, `heldNew_iff`, the fix).
 
 ## 0.15.0 (2026-11-22)
 
