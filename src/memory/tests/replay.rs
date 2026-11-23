@@ -1397,8 +1397,15 @@ async fn a_stale_flush_during_close_answers_close_unflushed() {
 }
 
 /// [`VectorSearchable`] whose checked vector lookup is slower than a write's
-/// whole I/O budget, every time (#125).
-struct SlowLookup(VectorSearchable);
+/// whole I/O budget (#125): every time, or while its switch is on (#346).
+struct SlowLookup(VectorSearchable, Arc<std::sync::atomic::AtomicBool>);
+
+impl SlowLookup {
+    /// Slow on every lookup.
+    fn always(inner: VectorSearchable) -> Self {
+        Self(inner, Arc::new(std::sync::atomic::AtomicBool::new(true)))
+    }
+}
 
 #[async_trait::async_trait]
 impl GraphStore for SlowLookup {
@@ -1444,8 +1451,10 @@ impl GraphStore for SlowLookup {
         _expected_contract: &crate::types::EmbeddingContract,
         _limit: usize,
     ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
-        // Slower than any write's whole budget, every time.
-        tokio::time::sleep(crate::graph::hybrid::HYBRID_IO_TIMEOUT * 2).await;
+        // Slower than any write's whole budget, while switched on.
+        if self.1.load(Ordering::SeqCst) {
+            tokio::time::sleep(crate::graph::hybrid::HYBRID_IO_TIMEOUT * 2).await;
+        }
         Ok(Vec::new())
     }
     async fn blast_radius(
@@ -1562,7 +1571,7 @@ async fn a_lookup_timeout_at_replay_settles_failed_and_a_run_of_them_stops_it() 
         .session("intent-slow-lookup")
         .agent("agent-a")
         .flush_interval(Duration::from_secs(3_600))
-        .store(Arc::new(SlowLookup(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
+        .store(Arc::new(SlowLookup::always(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
         .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(MatchStrategy::Hybrid)
@@ -2404,7 +2413,7 @@ async fn a_lookup_timeout_in_session_settles_failed_and_holds_nothing() {
         .session("in-session-slow-lookup")
         .agent("agent-a")
         .flush_interval(Duration::from_secs(3_600))
-        .store(Arc::new(SlowLookup(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
+        .store(Arc::new(SlowLookup::always(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
         .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(MatchStrategy::Hybrid)
@@ -2714,7 +2723,7 @@ async fn a_lookup_timeout_run_holds_the_third_write_and_its_retry_settles_it() {
         .session("in-session-lookup-run")
         .agent("agent-a")
         .flush_interval(Duration::from_secs(3_600))
-        .store(Arc::new(SlowLookup(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
+        .store(Arc::new(SlowLookup::always(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
         .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(MatchStrategy::Hybrid)
@@ -2766,5 +2775,103 @@ async fn a_lookup_timeout_run_holds_the_third_write_and_its_retry_settles_it() {
         }
         other => panic!("the retry of the held write settles it: {other:?}"),
     }
+    mem.close().await.expect("clean close");
+}
+
+/// Submit one write of `agent` and wait (bounded) until it leaves `pending`.
+async fn submit_until_answered(
+    mem: &Memory,
+    agent: &AgentId,
+    content: &str,
+) -> crate::writeq::ReceiptId {
+    let submitted = mem
+        .derive_async_as(
+            agent,
+            &[(content, ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack");
+    assert!(!submitted.dropped(), "{}", submitted.answer.describe());
+    let receipt = submitted.receipt;
+    until_mem(mem, "the write to leave pending", |m| {
+        m.pipeline().lookup(agent, receipt).tag() != "pending"
+    })
+    .await;
+    receipt
+}
+
+/// **#346**: the in-session lookup-timeout streak counts the timeouts "with
+/// nothing applied between". Two lookup timeouts settle `failed`; then agent
+/// b's write commits, and its worker is held (test-only
+/// `pause_before_settle`) between that commit and its settle block; agent
+/// c's first attempt then times out. A write applied since the other two, so
+/// c's timeout is a first timeout and settles `failed`. Before the fix the
+/// streak was reset only in the settle block, so c's timeout counted as the
+/// third of a run and was held (`pending_replay`).
+///
+/// Mirrors `Drain.streak_old_counts_across_commit` (the bug) and
+/// `Drain.timeout_after_commit_settlesW`, `Drain.heldNew_iff` (the fix).
+#[tokio::test(start_paused = true)]
+async fn a_lookup_timeout_between_a_commit_and_its_settle_settles_failed() {
+    let inner = Arc::new(MemoryStore::new());
+    let slow = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mem = Memory::builder()
+        .session("in-session-lookup-commit")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(
+            Arc::new(SlowLookup(VectorSearchable(inner.clone()), slow.clone()))
+                as Arc<dyn GraphStore>,
+        )
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    let a = AgentId::new("agent-a");
+    let b = AgentId::new("agent-b");
+    let c = AgentId::new("agent-c");
+
+    // A run of lookup timeouts one short of the limit: each settles `failed`.
+    for i in 0..crate::writeq::REPLAY_LOOKUP_TIMEOUT_LIMIT - 1 {
+        let id = submit_until_answered(&mem, &a, &format!("slow lookup fact {i}")).await;
+        assert_eq!(mem.pipeline().lookup(&a, id).tag(), "failed");
+    }
+
+    // Agent b's write commits; its worker stops before its settle block.
+    slow.store(false, Ordering::SeqCst);
+    let (reached, resume) = mem.pipeline().pause_before_settle();
+    let applied = mem
+        .derive_async_as(
+            &b,
+            &[("fast lookup fact", ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack")
+        .receipt;
+    tokio::time::timeout(Duration::from_secs(60), reached.notified())
+        .await
+        .expect("agent b's write committed and reached its settle block");
+
+    // A first-attempt timeout lands between that commit and its settle.
+    slow.store(true, Ordering::SeqCst);
+    let after = submit_until_answered(&mem, &c, "slow lookup fact after a commit").await;
+    let answer = mem.pipeline().lookup(&c, after);
+    assert_eq!(
+        answer.tag(),
+        "failed",
+        "a write applied since the run, so this is a first timeout: {answer:?}"
+    );
+
+    resume.notify_one();
+    until_mem(&mem, "agent b's write to settle", |m| {
+        m.pipeline().lookup(&b, applied).tag() == "applied"
+    })
+    .await;
     mem.close().await.expect("clean close");
 }

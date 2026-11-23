@@ -646,6 +646,16 @@ pub(super) struct Lanes {
     /// settles its write `failed`; at it the store is slow for everyone and
     /// the write is held like an embedder outage.
     pub(super) lookup_streak: usize,
+    /// Test-only, one-shot: the next worker whose write committed signals the
+    /// first `Notify` and waits on the second before its settle block, so a
+    /// test can put another worker's step between a commit and its settle
+    /// (#346). Taken by that worker; `None` otherwise, and then the worker
+    /// does not await there.
+    #[cfg(test)]
+    pub(super) pause_before_settle: Option<(
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    )>,
 }
 
 impl Lanes {

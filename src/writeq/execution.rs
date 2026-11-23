@@ -623,6 +623,17 @@ enum Next {
 }
 
 impl WritePipeline {
+    /// Test-only (#346): arm a one-shot pause. The next worker whose write
+    /// commits notifies the first `Notify` and waits for the second before
+    /// its settle block.
+    #[cfg(test)]
+    pub(crate) fn pause_before_settle(&self) -> (Arc<Notify>, Arc<Notify>) {
+        let reached = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        self.lanes.lock().pause_before_settle = Some((reached.clone(), resume.clone()));
+        (reached, resume)
+    }
+
     /// Spawn `agent`'s lane worker. Called under the lanes lock, so it takes
     /// its wake-up (`Lanes::wake_for`) from the caller rather than the lock.
     pub(super) fn spawn_worker(&self, agent: AgentId, wake: Arc<Notify>) -> JoinHandle<()> {
@@ -875,6 +886,19 @@ impl WritePipeline {
                     );
                     settled.notify_waiters();
                     continue;
+                }
+
+                // Test-only (#346): hold a committed write here, between its
+                // commit and its settle block, while another worker runs.
+                // Armed by `pause_before_settle` alone; unarmed, nothing here
+                // awaits, so the rule below holds outside that test.
+                #[cfg(test)]
+                if outcome.is_ok() {
+                    let pause = lanes.lock().pause_before_settle.take();
+                    if let Some((reached, resume)) = pause {
+                        reached.notify_one();
+                        resume.notified().await;
+                    }
                 }
 
                 // No `.await` from here to the end of the iteration: an
