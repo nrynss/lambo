@@ -202,8 +202,11 @@ in their doc comments, and describe behaviour the current Rust no longer has.
   every session no flush dead-lettered.
 * Where the lookup streak resets (#346; `streakOld`, `streakNew`,
   `runSince`): before the fix a timeout between a commit and that write's
-  settle was counted toward the old run (`streak_old_counts_across_commit`);
-  the current worker resets at the commit, so the streak is the documented
+  settle was counted toward the old run (`streak_old_counts_across_commit`),
+  and with the reset in the worker's `Ok` arm, one between the commit and
+  that arm (`streak_old_counts_across_commit`'s twin,
+  `streak_okArm_counts_across_commit`); the current worker resets inside the
+  commit's critical section, so the streak is the documented
   count (`streakNew_eq_runSince`, `heldNew_iff`) and a timeout after an
   applied write settles `failed` (`streakNew_after_commit`,
   `timeout_after_commit_settlesW`); both resets would forget a run
@@ -6515,66 +6518,87 @@ at least the `REPLAY_LOOKUP_TIMEOUT_LIMIT`-th of a run of them **with nothing
 applied between**; any other settles `failed`. This section counts the
 streak.
 
-The workers read and write `lookup_streak` only under the lanes lock, so the
-events are the lanes-lock holds that touch it, across every lane, in the
-order they take the lock:
+The events are the steps that read or write `lookup_streak`, across every
+lane, in the order they happen:
 
 * `timeout`: a first-attempt lookup timeout (`spawn_worker`, the
-  `is_lookup_timeout` arm) adds one, and the write is held when the new value
-  reaches the limit (`heldErrW false streak`, `streak` the value before). A
-  held write's retry that times out does not touch the streak and is no
-  event here.
-* `commit`: a write whose run returned `Ok`, its graph write and consume
-  committed. The worker's `Ok` arm takes the lanes lock right after the run
-  returns, with no `.await` between.
-* `settleOk`: that write's settle block, later in the same iteration. There
-  is no `.await` between the two either, but another worker can take the
-  lanes lock in between on a multi-threaded runtime (and, in the Rust test,
-  at the test-only `pause_before_settle`).
+  `is_lookup_timeout` arm) takes the lanes lock and adds one, and the write
+  is held when the new value reaches the limit (`heldErrW false streak`,
+  `streak` the value before). A held write's retry that times out does not
+  touch the streak and is no event here.
+* `commit`: a write's commit, inside `WriteCtx::run`, under the graph write
+  lock: its mutations and the consume of its intent (the hybrid
+  `CommitHook`, or the canonical and action paths' inline blocks). Since the
+  fix the reset happens here too, the lanes lock taken under the graph write
+  lock (the order admission nests them in), so the commit and the reset are
+  one event: the commit becomes visible only when the graph lock is
+  released, after the reset, and a timeout's lanes-lock hold falls either
+  before the reset (then before the commit, as the graph lock publishes it)
+  or after both.
+* `okArm`: the worker's `Ok` arm, after `WriteCtx::run` has returned: later
+  than the commit by the index mirroring (`mirror_concepts`, which waits for
+  the graph read and index write locks), the daemon wake and the receipt
+  summary. No `.await` lies between, but another worker can take the lanes
+  lock in that stretch on a multi-threaded runtime (and, in the Rust test, at
+  the test-only `pause_after_commit`).
+* `settleOk`: that write's settle block, later still in the same iteration
+  (in the Rust test, after the test-only `pause_before_settle`).
 
-"Applied" in the rule is the commit, ordered by the lanes lock as the
-timeouts are. (Between the commit inside `WriteCtx::run` and the `Ok` arm's
-lock hold there is no `.await`; a timeout that takes the lock in that window,
-on another thread, is ordered before the commit, as the lock orders it.)
+"Applied" in the rule is the commit.
 
 * `runSince`: the documented count, the timeouts since the last commit.
-* `streakOld`, the Rust before the fix, which reset the streak in the settle
+* `streakOld`, the Rust before #346, which reset the streak in the settle
   block: `streak_old_counts_across_commit`, a timeout that follows a commit
   but comes before that write's settle is held as the third of a run (two
   timeouts came before the commit), where the rule says it is a first timeout
   and settles `failed`.
-* `streakBoth`, both resets: wrong the other way
+* `streakOkArm`, #346's first fix, which reset in the `Ok` arm:
+  `streak_okArm_counts_across_commit`, the same fault in the narrower stretch
+  between the commit and the `Ok` arm (found in review).
+* `streakBoth`, resets at the commit and the settle: wrong the other way
   (`streak_both_forgets_run`), the settle's reset forgets timeouts that came
-  after the commit. So the fix removes the settle's reset.
-* `streakNew`, the fix (reset at the commit, in the `Ok` arm, only):
+  after the commit. So the fix keeps no later reset.
+* `streakNew`, the fix (reset at the commit, in its critical section, only):
   `streakNew_eq_runSince` over every trace; `heldNew_iff`: a first-attempt
   timeout is held exactly when `limit ≤ runSince + 1`;
   `streakNew_after_commit`, `timeout_after_commit_settlesW`: a first-attempt
   timeout with no timeout since the last commit counts as a first timeout,
   and in the worker model settles `failed` and consumes its intent. -/
 
-/-- What moves `lookup_streak`, in lanes-lock order. -/
+/-- What moves `lookup_streak`, or could, in the order it happens. -/
 inductive SEv where
   | commit
+  | okArm
   | settleOk
   | timeout
   deriving DecidableEq, Repr
 
-/-- The streak before the fix: reset in the settle block. -/
+/-- The streak before #346: reset in the settle block. -/
 def streakOld (s : Nat) : SEv → Nat
   | .commit => s
+  | .okArm => s
   | .settleOk => 0
   | .timeout => s + 1
 
-/-- The streak after the fix: reset at the commit. -/
-def streakNew (s : Nat) : SEv → Nat
-  | .commit => 0
+/-- #346's first fix: reset in the worker's `Ok` arm, after `WriteCtx::run`
+returned. -/
+def streakOkArm (s : Nat) : SEv → Nat
+  | .commit => s
+  | .okArm => 0
   | .settleOk => s
   | .timeout => s + 1
 
-/-- Both resets, which the fix does not keep. -/
+/-- The streak after the fix: reset at the commit, in its critical section. -/
+def streakNew (s : Nat) : SEv → Nat
+  | .commit => 0
+  | .okArm => s
+  | .settleOk => s
+  | .timeout => s + 1
+
+/-- Resets at the commit and the settle, which the fix does not keep. -/
 def streakBoth (s : Nat) : SEv → Nat
   | .commit => 0
+  | .okArm => s
   | .settleOk => 0
   | .timeout => s + 1
 
@@ -6615,6 +6639,7 @@ theorem foldl_streakNew_zero : ∀ (mid : List SEv), (∀ e ∈ mid, e ≠ .time
     have he : streakNew 0 e = 0 := by
       cases e with
       | commit => rfl
+      | okArm => rfl
       | settleOk => rfl
       | timeout => exact absurd rfl (h _ List.mem_cons_self)
     rw [List.foldl_cons, he]
@@ -6631,8 +6656,9 @@ theorem streakNew_after_commit (pre mid : List SEv) (hmid : ∀ e ∈ mid, e ≠
 /-- **In the worker model, that timeout settles `failed`**: the running write
 of agent `a` whose first attempt times out after a commit (no timeout since)
 is settled `failed` with its intent consumed, by `lookupTimeout_settlesW` at
-the streak the fixed worker counts. Rust test
-`a_lookup_timeout_between_a_commit_and_its_settle_settles_failed`. -/
+the streak the fixed worker counts. Rust tests
+`a_lookup_timeout_between_a_commit_and_its_settle_settles_failed`,
+`a_lookup_timeout_between_a_commit_and_its_ok_arm_settles_failed`. -/
 theorem timeout_after_commit_settlesW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
     {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
     (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
@@ -6655,6 +6681,21 @@ test `a_lookup_timeout_between_a_commit_and_its_settle_settles_failed`. -/
 theorem streak_old_counts_across_commit :
     let pre := [SEv.timeout, .timeout, .commit]
     holdsS (heldErrW false (pre.foldl streakOld 0) .lookupTimeout) = true ∧
+      runSince pre = 0 ∧
+      holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = false := by
+  decide
+
+/-- **#346's first fix still counted a timeout that follows a commit.** It
+reset the streak in the worker's `Ok` arm, which runs after `WriteCtx::run`
+returns: after the index mirroring, which waits for the graph read and index
+write locks. Two lookup timeouts, then another lane's write commits; before
+its `Ok` arm runs, a third first-attempt timeout takes the lanes lock. The
+`Ok`-arm streak reads 2 and holds it; `runSince` is 0, and the fixed streak,
+reset inside the commit, settles it `failed`. Rust test
+`a_lookup_timeout_between_a_commit_and_its_ok_arm_settles_failed`. -/
+theorem streak_okArm_counts_across_commit :
+    let pre := [SEv.timeout, .timeout, .commit]
+    holdsS (heldErrW false (pre.foldl streakOkArm 0) .lookupTimeout) = true ∧
       runSince pre = 0 ∧
       holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = false := by
   decide
