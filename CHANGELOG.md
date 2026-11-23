@@ -15,8 +15,10 @@
   next recall. The new `[web] embedder = false` key and the `--no-embedder`
   flag never load it: recall runs on its keyword and recent legs and carries
   a `vector_degraded` line saying the vector leg is off by configuration, and
-  `/api/session` and `/api/pulse` report `vector_search: false`. Startup
-  prints which of the two applies. The configured embedder is still resolved
+  `/api/session` and `/api/pulse` report `vector_search: false`; its
+  `confidence` has the `keyword-only-v0` basis, as after a failed embed. The
+  portal's recall reads one session and never merges a layer, so no layer
+  hit is lost. Startup prints which of the two applies. The configured embedder is still resolved
   (identity and width, no weights), so the embedding-contract status is
   unchanged.
 - Formal models are reorganized; no kept theorem's statement changes. The

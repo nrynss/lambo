@@ -256,6 +256,15 @@ async fn embedder_off_never_loads_and_recall_says_so() {
         "the keyword leg still finds the concept: {context}"
     );
     assert!(!body["hits"].as_array().expect("hits").is_empty(), "{body}");
+    // The vector leg did not run, so the confidence is the keyword term
+    // alone under its own basis, never a two-leg value with the vector
+    // term read as zero under the two-leg name.
+    assert!(body["top_legs"]["vector_cosine"].is_null(), "{body}");
+    let bm25 = body["top_legs"]["bm25"].as_f64().expect("bm25");
+    assert!(bm25 > 0.0, "{body}");
+    assert_eq!(body["confidence"]["basis"], "keyword-only-v0", "{body}");
+    let value = body["confidence"]["value"].as_f64().expect("value");
+    assert!((value - bm25 / (bm25 + 5.0)).abs() < 1e-12, "{body}");
 
     let info = get_json(addr, "/api/session").await;
     assert_eq!(info["embedder"], "fixture", "{info}");
