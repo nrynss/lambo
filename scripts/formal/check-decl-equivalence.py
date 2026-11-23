@@ -17,12 +17,13 @@ not the source text), and compares the two by fully qualified name:
 * every definition, inductive, constructor and structure keeps its type, and
   a definition its body, so the theorems still speak of the same things;
 * a declaration may change name only when FILE lists it, one `OLD<TAB>NEW`
-  per line (`#` starts a comment), as a helper moved to the shared library:
+  per line (a line starting with `#` is a comment), as a helper moved to the shared library:
   NEW must exist at HEAD with OLD's kind and type, and several OLD names may
   map to one NEW (duplicates merged). Names in FILE rewrite references in the
   compared bodies too;
 * a theorem may be missing at HEAD only when `--deletions FILE` lists it,
-  one `NAME<TAB>REASON<TAB>KEPT` per line (`#` starts a comment): NAME is a
+  one `NAME<TAB>REASON<TAB>KEPT` per line (a line starting with `#` is a
+  comment; a reason may contain `#`, as in an issue number): NAME is a
   theorem at the base and not at HEAD, REASON says why it went, and KEPT is
   the theorem at HEAD that states the same thing or more (`-` when there is
   none, as for a dead helper). Only theorems can be listed: a definition's
@@ -164,7 +165,7 @@ def read_renames(path):
     if not path:
         return renames
     for raw in open(path, encoding="utf-8"):
-        line = raw.split("#", 1)[0].strip()
+        line = "" if raw.lstrip().startswith("#") else raw.strip()
         if not line:
             continue
         old, new = line.split("\t") if "\t" in line else line.split()
@@ -187,8 +188,8 @@ def read_deletions(path):
     if not path:
         return deletions
     for raw in open(path, encoding="utf-8"):
-        line = raw.split("#", 1)[0].rstrip("\n")
-        if not line.strip():
+        line = raw.rstrip("\n")
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
         parts = [x.strip() for x in line.split("\t")]
         if len(parts) != 3 or not parts[0] or not parts[1] or not parts[2]:

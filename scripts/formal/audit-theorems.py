@@ -3,7 +3,7 @@
 
   python3 -I scripts/formal/audit-theorems.py [--dump FILE] [--out FILE] [--repo DIR]
   python3 -I scripts/formal/audit-theorems.py --duplicates [--dump FILE]
-  python3 -I scripts/formal/audit-theorems.py --check [--dump FILE]
+  python3 -I scripts/formal/audit-theorems.py --check [--dump FILE] [--reviewed FILE]
 
 Reads a dump of the elaborated models (`scripts/formal/DumpDecls.lean`; built
 here when `--dump` is not given) and, for every theorem declared in a model
@@ -30,33 +30,37 @@ not model files), records what references it:
   backticks within ten lines of a mention of its model file;
 * audit: `Audit.lean` prints its axioms.
 
-A theorem with none of these is unreferenced. For each, the report gives a
-class and a one-line reason, from what the sources say about it:
+A theorem with none of these is unreferenced: nothing but its own doc
+comment ties it to the Rust. Each unreferenced theorem is reviewed by a person
+against the models' rule (formal/README.md, "How the models are written"):
+its doc comment says, truthfully and no more broadly than its statement, what
+it guarantees about which Rust behaviour. The verdicts are in
+`formal/audit/reviewed-theorems.tsv` (`NAME<TAB>VERDICT<TAB>REASON`, the
+verdict `keep`, `narrowed` (kept after its doc comment was narrowed to the
+statement) or `deleted` (then also in `deleted-theorems.tsv`)). For each
+unreferenced theorem the report gives a class and a one-line reason:
 
-* (a) a standalone property worth keeping: its model's header or
-  `formal/README.md` names it as a result, the CHANGELOG names it, its doc
-  comment opens with a bold title (the models' mark for a result) or quotes
-  the Rust or names a Rust test, or it is a closed statement about a
-  concrete case;
+* (a) documented and reviewed against the rule (verdict `keep` or
+  `narrowed`);
 * (b) a deletion candidate, only when it is shown to be one: a referenced
   theorem that stays states the same thing, or supersedes it (its name with
   a current-model suffix, `foo` and `fooW`, or the counterpart its doc
   comment names) and its doc comment does not state it as a result (a
-  finding's bold title keeps it in (a)); or it is a dead helper, an
+  finding's bold title keeps it out of (b)); or it is a dead helper, an
   undocumented `rfl` unfolding of a definition that nothing uses or names;
-* (c) unclear: an undocumented lemma, which the models' rule forbids and
-  `--check` fails on; a documented one is (a), its doc comment stating its
-  Rust guarantee.
+* (c) not settled: an undocumented lemma, a `@[simp]` lemma, or a documented
+  theorem not yet reviewed (the reason says which, and what the sources say
+  about it: its model's header, the README or the CHANGELOG naming it, a
+  bold title, a quote of the Rust or a Rust test, or a closed statement).
 
-Precedence: a same-statement twin (b); a result named in a header, the
-README or the CHANGELOG, or a bold title (a); a superseding counterpart (b);
-the other (a) criteria; a `@[simp]` lemma (c); a dead helper (b); a
-documented theorem (a); the rest (c). The classes are a first sort from those signals, for a person to
-confirm.
+Precedence: a same-statement twin (b); a review verdict (a); a superseding
+counterpart (b); a `@[simp]` lemma (c); a dead helper (b); the rest (c).
 
 `--check` exits 1 when a theorem is neither used by a proof (or named by
-another declaration) nor carries a doc comment: the rule every theorem
-follows (formal/README.md, "How the models are written"). CI runs it.
+another declaration) nor carries a doc comment; when an unreferenced theorem
+has no `keep` or `narrowed` verdict in the review file; or when the review
+file is stale (a kept theorem no longer declared, a `deleted` one still
+declared or missing from `deleted-theorems.tsv`). CI runs it.
 
 `--duplicates` lists theorems that state the same thing (the same `shape`:
 binders named by depth, universe parameters by position) in more than one
@@ -342,7 +346,7 @@ def simp_refs(m):
     path = m.repo / "formal" / "audit" / "simp-used.tsv"
     if path.exists():
         for raw in path.read_text(encoding="utf-8").splitlines():
-            line = raw.split("#", 1)[0]
+            line = "" if raw.lstrip().startswith("#") else raw
             if line.strip():
                 name = line.split("\t")[0].strip()
                 if name in m.theorems:
@@ -379,6 +383,39 @@ COUNTERPART = re.compile(r"(?:[Cc]urrent counterparts?|[Ss]uperseded by|[Rr]epla
 RFL = re.compile(r":=\s*(?:by\s+)?rfl\s*$")
 
 
+REVIEWED = "formal/audit/reviewed-theorems.tsv"
+DELETED = "formal/audit/deleted-theorems.tsv"
+VERDICTS = ("keep", "narrowed", "deleted")
+
+
+def read_tsv(path, width):
+    """Rows of a tab-separated audit file (a line starting with `#` is a
+    comment; a field may contain `#`, as in an issue number)."""
+    rows = []
+    if not path.exists():
+        return rows
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = "" if raw.lstrip().startswith("#") else raw.rstrip()
+        if line.strip():
+            parts = [x.strip() for x in line.split("\t")]
+            if len(parts) != width:
+                raise SystemExit(f"{path}: {raw!r}: expected {width} tab-separated fields")
+            rows.append(parts)
+    return rows
+
+
+def read_reviewed(path):
+    """NAME -> (verdict, reason) from the review file."""
+    out = {}
+    for name, verdict, reason in read_tsv(path, 3):
+        if verdict not in VERDICTS:
+            raise SystemExit(f"{path}: {name}: verdict {verdict!r} is not one of {', '.join(VERDICTS)}")
+        if name in out:
+            raise SystemExit(f"{path}: {name} is reviewed twice")
+        out[name] = (verdict, reason)
+    return out
+
+
 def local_name(n):
     """`n` below its model namespace: `Reach.trans` for `Lambo.Cite.Reach.trans`."""
     ns = namespace_of(n)
@@ -401,11 +438,24 @@ def counterpart(m, n, doc, referenced):
 
 
 def classify(m, n, d, src_lines, header, readme, changelog, doc_mentions, twins=(),
-             referenced=lambda x: True):
+             referenced=lambda x: True, review=None):
     """(class, reason) for an unreferenced theorem; see the module doc."""
-    short, local = n.split(".")[-1], local_name(n)
     if twins:
         return "b", f"states the same as `{local_name(twins[0])}`, which stays and is referenced"
+    if review and review[0] in ("keep", "narrowed"):
+        how = "reviewed against the rule" + (", its doc comment narrowed" if review[0] == "narrowed" else "")
+        return "a", f"{how}: {review[1]}"
+    if review:
+        return "b", f"reviewed and deleted ({review[1]}), but still declared"
+    cls, why = signals_class(m, n, d, src_lines, header, readme, changelog, doc_mentions, referenced)
+    if cls == "a":
+        return "c", f"not yet reviewed against the rule (add it to `{REVIEWED}`); {why}"
+    return cls, why
+
+
+def signals_class(m, n, d, src_lines, header, readme, changelog, doc_mentions, referenced):
+    """The first sort from the sources, before review."""
+    short, local = n.split(".")[-1], local_name(n)
     path = module_path(m.repo, d["module"])
     rel = path.relative_to(m.repo / "formal" / "LamboProofs").as_posix()
     doc = doc_comment(src_lines, d)
@@ -434,35 +484,63 @@ def classify(m, n, d, src_lines, header, readme, changelog, doc_mentions, twins=
     if not doc and RFL.search(body):
         return "b", "a dead helper: an undocumented `rfl` unfolding of a definition that nothing uses or names"
     if doc:
-        # The models' rule: a theorem no proof uses states its Rust guarantee
-        # in its doc comment, which a reviewer has checked.
         first = re.sub(r"\s+", " ", doc.lstrip()[3:].split("-/")[0]).strip()
-        return "a", f"its doc comment states its Rust guarantee: \"{first[:110]}\""
+        return "a", f"documented: \"{first[:110]}\""
     return "c", f"undocumented {span}-line lemma, which the models' rule forbids (`--check` fails on it)"
 
 
-def check(m):
+def all_refs(m):
+    """SIGNAL -> theorem -> what references it."""
+    refs = {k: defaultdict(set) for k in SIGNALS}
+    for n, us in m.proof_users().items():
+        refs["proof"][n] |= us
+    for k, f in (("named", named_refs), ("simp", simp_refs), ("example", example_refs), ("anchor", anchor_refs),
+                 ("ledger", ledger_refs), ("rust", rust_refs), ("audit", audit_refs)):
+        for n, v in f(m).items():
+            refs[k][n] |= v
+    return refs
+
+
+def check(m, reviewed, deleted):
     """The models' rule: every theorem is used by a proof (or named by another
     declaration, as an `rfl` lemma handed to `simp` is), or its doc comment says
-    what it guarantees about the Rust. Only the doc comment's presence can be
-    checked; what it says is the reviewer's."""
-    used = set(m.proof_users())
-    used |= set(named_refs(m)) | set(simp_refs(m))
-    bad = []
+    what it guarantees about the Rust; and a theorem nothing else references has
+    had that doc comment reviewed (`reviewed`, the review file's verdicts)."""
+    refs = all_refs(m)
+    used = set(refs["proof"]) | set(refs["named"]) | set(refs["simp"])
+    bad, unreviewed, stale = [], [], []
     for n, d in m.theorems.items():
         if n in used:
             continue
         p = module_path(m.repo, d["module"]).resolve()
+        where = (p.relative_to(m.repo.resolve()).as_posix(), d["line"], local_name(n))
         if not doc_comment(m.text[p].split("\n"), d):
-            bad.append((p.relative_to(m.repo.resolve()).as_posix(), d["line"], local_name(n)))
+            bad.append(where)
+        elif not any(refs[k].get(n) for k in SIGNALS) and reviewed.get(n, ("",))[0] not in ("keep", "narrowed"):
+            unreviewed.append(where)
+    for n, (verdict, _) in sorted(reviewed.items()):
+        if verdict == "deleted":
+            if n in m.theorems:
+                stale.append(f"{n} is reviewed as deleted but still declared")
+            if n not in deleted:
+                stale.append(f"{n} is reviewed as deleted but not listed in {DELETED}")
+        elif n not in m.theorems:
+            stale.append(f"{n} is reviewed as {verdict} but no model declares it (mark it deleted, or drop the row)")
     for path, line, name in sorted(bad):
         print(f"{path}:{line}: {name} is used by no proof and has no doc comment stating its Rust guarantee",
               file=sys.stderr)
-    if bad:
-        print(f"{len(bad)} theorem(s) neither used nor documented (formal/README.md, \"How the models are "
-              f"written\")", file=sys.stderr)
+    for path, line, name in sorted(unreviewed):
+        print(f"{path}:{line}: {name} is referenced by nothing and its doc comment is not reviewed: check it "
+              f"against the rule and add a verdict to {REVIEWED}", file=sys.stderr)
+    for line in stale:
+        print(f"{REVIEWED}: {line}", file=sys.stderr)
+    if bad or unreviewed or stale:
+        print(f"{len(bad)} theorem(s) neither used nor documented, {len(unreviewed)} unreviewed, "
+              f"{len(stale)} stale review row(s) (formal/README.md, \"How the models are written\")",
+              file=sys.stderr)
         return 1
-    print(f"every theorem of {len(m.theorems)} is used by a proof or documented")
+    print(f"every theorem of {len(m.theorems)} is used by a proof or documented, and every unreferenced one "
+          f"is reviewed ({len(reviewed)} review rows)")
     return 0
 
 
@@ -473,9 +551,12 @@ def main(argv=None):
     ap.add_argument("--out", help="write the markdown report here (default: stdout)")
     ap.add_argument("--duplicates", action="store_true", help="list theorems stated more than once")
     ap.add_argument("--check", action="store_true",
-                    help="exit 1 if a theorem is neither used by a proof nor carries a doc comment")
-    ap.add_argument("--deleted", default="formal/audit/deleted-theorems.tsv",
+                    help="exit 1 if a theorem is neither used by a proof nor carries a doc comment, an "
+                         "unreferenced one is not reviewed, or the review file is stale")
+    ap.add_argument("--deleted", default=DELETED,
                     help="the theorems deleted on purpose (NAME<TAB>REASON<TAB>KEPT), listed in the report")
+    ap.add_argument("--reviewed", default=REVIEWED,
+                    help="the review verdicts for unreferenced theorems (NAME<TAB>VERDICT<TAB>REASON)")
     args = ap.parse_args(argv)
     repo = Path(args.repo).resolve()
     dump = Path(args.dump) if args.dump else repo / "formal" / ".lake" / "decls.jsonl"
@@ -498,16 +579,12 @@ def main(argv=None):
         print(f"{len(dups)} statement(s) proved more than once", file=sys.stderr)
         return 0
 
+    reviewed = read_reviewed(repo / args.reviewed)
+    deleted = [tuple(r) for r in read_tsv(repo / args.deleted, 3)]
     if args.check:
-        return check(m)
+        return check(m, reviewed, {name for name, _, _ in deleted})
 
-    refs = {k: defaultdict(set) for k in SIGNALS}
-    for n, us in m.proof_users().items():
-        refs["proof"][n] |= us
-    for k, f in (("named", named_refs), ("simp", simp_refs), ("example", example_refs), ("anchor", anchor_refs), ("ledger", ledger_refs),
-                 ("rust", rust_refs), ("audit", audit_refs)):
-        for n, v in f(m).items():
-            refs[k][n] |= v
+    refs = all_refs(m)
 
     readme = (repo / "formal" / "README.md").read_text(encoding="utf-8")
     changelog = (repo / "CHANGELOG.md").read_text(encoding="utf-8") if (repo / "CHANGELOG.md").exists() else ""
@@ -535,7 +612,7 @@ def main(argv=None):
         src = m.text[p]
         twins = sorted(x for x in shapes[d["shape"]] if x != n and any(refs[k].get(x) for k in SIGNALS))
         cls, why = classify(m, n, d, src.split("\n"), header_of(src), readme, changelog, doc_mentions, twins,
-                            referenced=lambda x: any(refs[k].get(x) for k in SIGNALS))
+                            referenced=lambda x: any(refs[k].get(x) for k in SIGNALS), review=reviewed.get(n))
         per_file[rel].append((d["line"], local_name(n), cls, why))
         counts[(rel, cls)] += 1
 
@@ -546,14 +623,6 @@ def main(argv=None):
     for (rel, k), v in counts.items():
         total[k] += v
     w("# Unreferenced theorems in the Lean models\n")
-    deleted = []
-    dpath = repo / args.deleted
-    if dpath.exists():
-        for raw in dpath.read_text(encoding="utf-8").splitlines():
-            line = raw.split("#", 1)[0]
-            if line.strip():
-                name, reason, kept = [x.strip() for x in line.split("\t")]
-                deleted.append((name, reason, kept))
     w(f"Generated by `python3 -I scripts/formal/audit-theorems.py --out formal/audit/unreferenced-theorems.md` "
       f"from the models as built.\n")
     if deleted:
@@ -565,21 +634,20 @@ def main(argv=None):
       "`lean:` anchor cites it, a claims ledger under `formal/claims/` names it with its model file, a "
       "comment in `src/` or `tests/` names it (as `Model.name`, or in backticks near a mention of its "
       "model file), or `Audit.lean` prints its axioms. The rest are listed below, each with a class:\n")
-    w("* **(a)** a standalone property worth keeping, ideally cited from a test, doc or ledger. Criteria: "
-      "its file's header, `formal/README.md` or the CHANGELOG names it as a result; its doc comment opens "
-      "with a bold title (the models' mark for a result), quotes the Rust or names a Rust test; or it is a "
-      "closed statement about a concrete case.")
+    w("* **(a)** documented and reviewed against the rule (formal/README.md, \"How the models are "
+      "written\"): a person read its statement, its doc comment and the Rust it names, and the doc comment "
+      f"says truthfully, no more broadly than the statement, what it guarantees about which Rust behaviour. "
+      f"The verdict (`keep`, or `narrowed` when the doc comment was narrowed to the statement) and its "
+      f"reason are in `{REVIEWED}`.")
     w("* **(b)** a deletion candidate, only when shown to be one. Criteria: a referenced theorem that stays "
       "states the same thing, or supersedes it (its name with a current-model suffix such as `fooW`, or "
       "the current counterpart its doc comment names) and it is not stated as a result (a bold-titled doc "
-      "comment, such as a finding's, keeps it in (a)); or it is a dead helper, an undocumented `rfl` "
+      "comment, such as a finding's, keeps it out of (b)); or it is a dead helper, an undocumented `rfl` "
       "unfolding of a definition that nothing uses or names.")
-    w("* **(c)** unclear: an undocumented lemma, which the models' rule forbids (`--check` fails on it). "
-      "A documented one is (a): under the rule (formal/README.md, \"How the models are written\") its doc "
-      "comment states what it guarantees about which Rust behaviour, and a reviewer checked that it does.\n")
-    w("Precedence: a same-statement twin (b); a result named in a header, the README or the CHANGELOG, "
-      "or a bold title (a); a superseding counterpart (b); the other (a) criteria; a `@[simp]` lemma (c); "
-      "a dead helper (b); a documented theorem (a); the rest (c). The result is a first sort for the owner to confirm. `Drain/History.lean` describes no current Rust "
+    w("* **(c)** not settled: an undocumented lemma or a documented theorem not yet reviewed, which "
+      "`--check` fails on, or a `@[simp]` lemma `simp` may use without naming it.\n")
+    w("Precedence: a same-statement twin (b); a review verdict (a); a superseding counterpart (b); a "
+      "`@[simp]` lemma (c); a dead helper (b); the rest (c). `Drain/History.lean` describes no current Rust "
       "and is kept as the evidence for its findings. Names are given below their model's namespace "
       "(`Reach.trans` is `Lambo.Cite.Reach.trans`).\n")
     w("## Summary\n")
@@ -614,9 +682,10 @@ def main(argv=None):
         w("")
     if deleted:
         w("## Deleted\n")
-        w("Each was referenced by nothing (no proof in the dump, no other declaration naming it, no "
-          "example, docs anchor, claims ledger row, Rust comment, `Audit.lean` line, oracle or README) "
-          "when it was deleted.\n")
+        w("Each was referenced by nothing when it was deleted (no proof in the dump, no other declaration "
+          "naming it, no example, docs anchor, claims ledger row, Rust comment, oracle or README, and no "
+          "`Audit.lean` line but `Drain.orderInv_nil`'s, removed with it); those marked \"purpose review\" "
+          f"failed the review recorded in `{REVIEWED}`.\n")
         for name, reason, kept in deleted:
             w(f"- `{name.removeprefix('Lambo.')}`: {reason}"
               + (f"; kept: `{kept.removeprefix('Lambo.')}`" if kept != "-" else "") + ".")

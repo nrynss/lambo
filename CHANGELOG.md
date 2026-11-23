@@ -15,7 +15,9 @@
   that rule (`scripts/formal/audit-theorems.py --check`). The 70 theorems that
   met neither, or whose doc comment did not hold up against the Rust on review
   (pure order theory or arithmetic, a design not in the Rust), are deleted,
-  each listed with its reason in `formal/audit/deleted-theorems.tsv`. `scripts/formal/check-decl-equivalence.py`
+  each listed with its reason in `formal/audit/deleted-theorems.tsv`. A theorem
+  nothing else references keeps its place only with a reviewed verdict in
+  `formal/audit/reviewed-theorems.tsv`, and `--check` fails on one without. `scripts/formal/check-decl-equivalence.py`
   compares the Lean environments of two trees and confirms that every other
   theorem is stated exactly as before, with the moved helpers in
   `formal/audit/moved-helpers.tsv`. Earlier entries below name model files as

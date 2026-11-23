@@ -2,7 +2,14 @@
 # from a copy of its model, and the copy no longer elaborates (one-shot probe:
 # `lake env lean` on the copy, no lake cache, 2026-11-23); the twelve the
 # probe showed dead are in deleted-theorems.tsv. audit-theorems.py counts
-# these as used by a proof. Tab-separated: name, how it was shown.
+# these as used by a proof. The probe is not rerun in CI (each lemma costs one
+# elaboration of its model, minutes in all): a lemma listed here that a later
+# change makes unneeded stays exempt until someone re-probes it. To re-probe:
+# copy the model, delete the lemma from the copy, run `lake env lean` on the
+# copy from formal/ (not `lake build`, whose cache can hide the change), and
+# drop the row (and delete the lemma, listing it in deleted-theorems.tsv) when
+# the copy elaborates with no error or warning. Tab-separated: name, how it
+# was shown.
 Lambo.Registry.holds_none	Registry/Step.lean no longer elaborates without it (simp needs it)
 Lambo.Registry.holds_att	Registry/Step.lean no longer elaborates without it (simp needs it)
 Lambo.Registry.holds_live	Registry/Step.lean no longer elaborates without it (simp needs it)

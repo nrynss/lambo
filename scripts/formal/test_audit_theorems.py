@@ -91,6 +91,14 @@ DECLS = [
 ]
 
 
+REVIEWED = """\
+# name, verdict, reason
+Lambo.M.headline\tkeep\tthe header's result
+Lambo.M.f_zero\tkeep\ta worked example
+Lambo.M.documented\tnarrowed\tits doc says what it proves (#1)
+"""
+
+
 class Audit(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -101,9 +109,19 @@ class Audit(unittest.TestCase):
         (root / "formal" / "LamboProofs" / "M.lean").write_text(MODEL, encoding="utf-8")
         (root / "formal" / "LamboProofs" / "Audit.lean").write_text(AUDIT, encoding="utf-8")
         (root / "formal" / "README.md").write_text("# Proofs\n", encoding="utf-8")
+        (root / "formal" / "audit").mkdir()
         self.dump = root / "dump.jsonl"
         self.root = root
+        self.write_reviewed(REVIEWED)
         self.write_dump(DECLS)
+
+    def write_reviewed(self, text):
+        (self.root / "formal" / "audit" / "reviewed-theorems.tsv").write_text(text, encoding="utf-8")
+
+    def check(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+            code = at.main(["--repo", str(self.root), "--dump", str(self.dump), "--check"])
+        return code, err.getvalue()
 
     def write_dump(self, decls):
         src = (self.root / "formal" / "LamboProofs" / "M.lean").read_bytes()
@@ -140,9 +158,9 @@ class Audit(unittest.TestCase):
         # The same statement as a referenced theorem.
         self.assertTrue(self.row(text, "twin_unused").startswith("- (b)"))
         self.assertIn("states the same as `twin_used`", self.row(text, "twin_unused"))
-        # Documented, cited nowhere: under the models' rule its doc comment
-        # states its Rust guarantee, so it is kept.
+        # Documented, cited nowhere, and reviewed against the rule: kept.
         self.assertTrue(self.row(text, "documented").startswith("- (a)"))
+        self.assertIn("its doc comment narrowed: its doc says what it proves (#1)", self.row(text, "documented"))
         # simp may use it without naming it.
         self.assertTrue(self.row(text, "f_eq").startswith("- (c)"))
         # An undocumented lemma that is not an `rfl` unfolding is unclear.
@@ -181,6 +199,34 @@ class Audit(unittest.TestCase):
         self.assertIn("M.lean:13: headline", err.getvalue())
         self.assertNotIn(": documented ", err.getvalue())
         self.assertNotIn(": twin_used ", err.getvalue())
+
+    def test_an_unreviewed_documented_theorem_is_c_and_fails_check(self):
+        self.write_reviewed(REVIEWED.replace("Lambo.M.documented\tnarrowed\tits doc says what it proves (#1)\n", ""))
+        row = self.row(self.report(), "documented")
+        self.assertTrue(row.startswith("- (c)"), row)
+        self.assertIn("not yet reviewed", row)
+        code, err = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("M.lean:30: documented is referenced by nothing and its doc comment is not reviewed", err)
+
+    def test_a_reviewed_theorem_passes_the_review_rule(self):
+        code, err = self.check()
+        self.assertEqual(code, 1)  # the undocumented ones still fail
+        self.assertNotIn("documented is referenced by nothing", err)
+        self.assertNotIn("stale", err.split("theorem(s)")[0])
+
+    def test_stale_review_rows_fail(self):
+        self.write_reviewed(REVIEWED + "Lambo.M.gone\tkeep\tonce kept\n"
+                            "Lambo.M.twin_unused\tdeleted\ta twin\n")
+        code, err = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("Lambo.M.gone is reviewed as keep but no model declares it", err)
+        self.assertIn("Lambo.M.twin_unused is reviewed as deleted but still declared", err)
+        self.assertIn("Lambo.M.twin_unused is reviewed as deleted but not listed", err)
+        # A verdict outside the three is refused outright.
+        self.write_reviewed("Lambo.M.headline\tmaybe\tunsure\n")
+        with self.assertRaises(SystemExit):
+            self.check()
 
     def test_dead_rfl_helper_is_b(self):
         model = MODEL.replace("theorem old_ruleW (n : Nat) : f n = n := rfl",

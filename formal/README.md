@@ -80,12 +80,22 @@ covers, its end results and its boundary: the Rust behaviour it does not cover
 internals, panics where they are not modelled, ...), so that silence is not
 read as a guarantee. Prose that only narrates the Lean is left out.
 
-CI enforces the part a machine can check: `python3 -I
+CI enforces what a machine can check: `python3 -I
 scripts/formal/audit-theorems.py --check` fails when a theorem is used by no
 proof (and named by no other declaration, as an `rfl` lemma handed to `simp`
-is) and carries no doc comment. What the doc comment says is the reviewer's to
-judge. A `@[simp]` lemma no proof names counts as used when a build probe
-showed a proof needs it (`formal/audit/simp-used.tsv`).
+is) and carries no doc comment, and when a theorem nothing references (no
+proof, example, docs anchor, claims ledger row, Rust comment or `Audit.lean`
+line) has no verdict in `formal/audit/reviewed-theorems.tsv`. A person gives
+that verdict after reading the statement, the doc comment and the Rust it
+names: `keep`, `narrowed` (the doc comment was narrowed to what the statement
+proves) or `deleted`, with a one-line reason. A new unreferenced theorem fails
+CI until it is reviewed and added there. A `@[simp]` lemma no proof names
+counts as used when a build probe showed a proof needs it
+(`formal/audit/simp-used.tsv`). That probe was run once; a listed lemma that
+later becomes unneeded stays exempt until someone re-probes it: remove the
+lemma from a copy of its model, elaborate the copy with `lake env lean` (not
+`lake build`, whose cache can hide the change), and drop the row when the copy
+still elaborates with no error or warning.
 
 ## What is modelled, and what each file proves
 
@@ -316,8 +326,8 @@ To find theorems nothing references (no proof, `example`, docs anchor, claims
 ledger row, Rust comment or `#print axioms` line), and statements proved twice, run
 `python3 -I scripts/formal/audit-theorems.py --out
 formal/audit/unreferenced-theorems.md`; it builds the models, dumps them with
-`DumpDecls.lean` and sorts each unreferenced theorem into keep, delete or
-unclear with a reason. `--duplicates` lists the theorems that state the same
+`DumpDecls.lean` and sorts each unreferenced theorem into reviewed (with the
+review's verdict and reason), deletion candidate or not settled. `--duplicates` lists the theorems that state the same
 thing.
 
 ## Differential oracle

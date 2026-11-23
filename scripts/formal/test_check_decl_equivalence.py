@@ -141,6 +141,10 @@ class Equivalence(unittest.TestCase):
         code, out = self.run_check(BASE, head, deletions=listed)
         self.assertEqual(code, 0, out)
         self.assertIn("Lambo.B.helper: same as A's (kept: Lambo.A.helper)", out)
+        # A `#` inside a reason (an issue number) is text, not a comment.
+        code, out = self.run_check(BASE, head, deletions="Lambo.B.helper\tdead since #280\t-\n")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Lambo.B.helper: dead since #280", out)
         # Unlisted, the same deletion fails.
         self.assertEqual(self.run_check(BASE, head)[0], 1)
         # A second, unlisted deletion still fails.
