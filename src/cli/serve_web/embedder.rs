@@ -19,9 +19,10 @@
 //!   model and width are exactly what they were when startup loaded it.
 //! * **Off (`[web] embedder = false` or `--no-embedder`).** `prepare` and
 //!   every embed are never called. Recall runs on its keyword and recent
-//!   legs, the path a failed embed already degrades to, and carries
-//!   [`OFF_BY_CONFIGURATION`] as its `vector_degraded` line, so the page says
-//!   the vector leg is off rather than failed.
+//!   legs, the path a failed embed already degrades to. On a store that can
+//!   search by vector it carries [`OFF_BY_CONFIGURATION`] as its
+//!   `vector_degraded` line, so the page says the vector leg is off rather
+//!   than failed; on one that cannot there is no vector leg to mention.
 //!
 //! **A failed load is not remembered** (the view cache's rule): the recalls
 //! that waited on the failed attempt get its error and degrade as a failed

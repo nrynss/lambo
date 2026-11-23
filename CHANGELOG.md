@@ -13,14 +13,15 @@
   degrades that recall to the keyword and recent legs with the usual
   `query embedding failed ...; vector leg skipped` line and is retried by the
   next recall. The new `[web] embedder = false` key and the `--no-embedder`
-  flag never load it: recall runs on its keyword and recent legs and carries
-  a `vector_degraded` line saying the vector leg is off by configuration, and
-  `/api/session` and `/api/pulse` report `vector_search: false`; its
-  `confidence` has the `keyword-only-v0` basis, as after a failed embed. The
-  portal's recall reads one session and never merges a layer, so no layer
-  hit is lost. Startup prints which of the two applies. The configured embedder is still resolved
-  (identity and width, no weights), so the embedding-contract status is
-  unchanged.
+  flag never load it: recall runs on its keyword and recent legs and, on a
+  store that can search by vector, carries a `vector_degraded` line saying
+  the vector leg is off by configuration; `/api/session` and `/api/pulse`
+  report `vector_search: false`, and recall's `confidence` has the
+  `keyword-only-v0` basis, as after a failed embed. The portal's recall
+  reads one session and never merges a layer, so no layer hit is lost.
+  Startup prints which of the two applies. The configured embedder is still
+  resolved (identity and width, no weights), so the embedding-contract
+  status is unchanged.
 - Formal models are reorganized; no kept theorem's statement changes. The
   large models are split along their Rust seams into directories in the same
   namespace (`Drain/`, `Conflict/`, `Policy/`, `Contract/`, `Supersession/`,

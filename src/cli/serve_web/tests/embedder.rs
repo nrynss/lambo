@@ -275,6 +275,23 @@ async fn embedder_off_never_loads_and_recall_says_so() {
     assert_eq!(queries.load(Ordering::SeqCst), 0, "never embedded");
     assert_eq!(state.embedder.prepares(), 0);
     handle.abort();
+
+    // On a store that cannot search by vector there is no vector leg to
+    // turn off, so the recall says nothing about it, as with the embedder on.
+    let store = seed("t247-off-novec").await;
+    let mut backends = backends_on(store);
+    backends.embedder = Box::new(Deferred::new());
+    let (addr, handle) = spawn(state_with_web(backends, "t247-off-novec", None, &web)).await;
+    let body = get_json(addr, "/api/recall?q=user%20schema").await;
+    assert!(degraded(&body).is_empty(), "{body}");
+    assert!(
+        !body["context"]
+            .as_str()
+            .expect("context")
+            .contains(OFF_BY_CONFIGURATION),
+        "{body}"
+    );
+    handle.abort();
 }
 
 /// (d) A failed load degrades the recall exactly as a failed embed does,

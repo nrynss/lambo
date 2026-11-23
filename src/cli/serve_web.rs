@@ -108,8 +108,9 @@
 //! (candle BGE-M3) costs about 1.3 GB per process once loaded. So startup
 //! and browsing never load it: the first recall that embeds a query does,
 //! once, and keeps it. `[web] embedder = false` or `--no-embedder` never
-//! loads it, and recall runs on its keyword and recent legs, saying the
-//! vector leg is off by configuration. See `embedder`.
+//! loads it, and recall runs on its keyword and recent legs, saying (on a
+//! store that can search by vector) the vector leg is off by configuration.
+//! See `embedder`.
 //!
 //! # Deployment (target: AWS)
 //!

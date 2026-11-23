@@ -489,7 +489,8 @@ url = "http://127.0.0.1:8080"
 # first recall that embeds a query loads it once and keeps it. A failed load
 # degrades that recall to keyword + recent results and is retried by the next
 # recall. embedder = false (or --no-embedder) never loads it: every recall
-# then runs on keyword + recent results and says the vector leg is off.
+# then runs on keyword + recent results and, on a store that can search by
+# vector, says the vector leg is off.
 #
 # --- [web] example begins ---
 # [web]

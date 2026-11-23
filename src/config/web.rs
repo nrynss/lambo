@@ -36,8 +36,8 @@
 //!
 //! `embedder = false` (or `lambo serve-web --no-embedder`) turns the vector
 //! leg off: the model is never loaded, and every recall runs on the keyword
-//! and recent legs with a line saying the vector leg is off by
-//! configuration. The configured embedder is still resolved (its identity
+//! and recent legs, with a line saying the vector leg is off by
+//! configuration on a store that can search by vector. The configured embedder is still resolved (its identity
 //! and width, no weights), so the page's embedding-contract status stays
 //! exact.
 //!

@@ -154,12 +154,13 @@ enum Commands {
         )]
         allowed_host: Vec<String>,
         /// Never load the embedder (as lambo.toml [web] embedder = false):
-        /// recall runs on its keyword and recent legs and says the vector
-        /// leg is off. Without it the embedder loads on the first recall
-        /// that needs a query vector, never at startup.
+        /// recall runs on its keyword and recent legs and, on a store that
+        /// can search by vector, says the vector leg is off. Without it the
+        /// embedder loads on the first recall that needs a query vector,
+        /// never at startup.
         #[arg(
             long = "no-embedder",
-            help = "Never load the embedder (as lambo.toml [web] embedder = false): recall runs on its keyword and recent legs and says the vector leg is off. Without it the embedder loads on the first recall that needs one, never at startup."
+            help = "Never load the embedder (as lambo.toml [web] embedder = false): recall runs on its keyword and recent legs and, on a store that can search by vector, says the vector leg is off. Without it the embedder loads on the first recall that needs one, never at startup."
         )]
         no_embedder: bool,
         /// Also serve every live, non-erased session in the store, including
