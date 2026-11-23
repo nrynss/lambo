@@ -103,13 +103,16 @@ stay fail-closed and stop until recall succeeds (see
   fact + its *why* (`logic` or `constraint`). Activity (merges, review rounds, binary
   re-pins, infra changes) goes to `lambo_record_action`.
 - **Cite what you relied on:** Pass the 8-hex ID or durable name from recall in
-  `depends_on` (on `lambo_derive` concepts or `lambo_record_action`). Both 8-hex IDs
-  and durable names in `depends_on` and `against` must belong to the same target
-  session (when layered, `hits[].session` matches target). *Enforced* in `depends_on`
-  and `against` on `lambo_derive` and in `against` on `lambo_record_action`: a reference
+  `depends_on` (on `lambo_derive` concepts or `lambo_record_action`). Both 8-hex IDs and
+  durable names in `depends_on` and `against` must belong to the same target session
+  (when layered, `hits[].session` matches target). *Enforced* in `depends_on` and
+  `against` on `lambo_derive` and in `against` on `lambo_record_action`: a reference
   that names no concept in the target session refuses the whole call, as cross-session
   when it names one in another session the call reads. `lambo_record_action.depends_on`
-  creates unregistered text instead (below), so check the session yourself there.
+  creates unregistered text instead (below), with two cross-session refusals: a
+  hyphenated node id that names no concept here but one in another session the call
+  reads, and, on a write scoped to a layer, text that names a concept of the caller's
+  own session. Anything else is minted, so check the session yourself there.
 - **Contradict stale facts explicitly:** When new evidence invalidates a recalled
   concept, pass its 8-hex ID or durable name in `against` (same-session rule applies).
   - *Enforced:* one concept (or action) must not name the same target in both its
@@ -125,12 +128,12 @@ stay fail-closed and stop until recall succeeds (see
 - **Name standing rulings durably (`concepts[].name`):** Give a 2–4 word lowercase
   kebab-case `<domain>-<subject>` name (no slashes; e.g. `single-writer-lease`,
   `vector-dim-authority`) **only** to settled `logic`/`constraint` rulings or shared
-  infra pillars meant to be cited across workstreams. Never name `observation`s,
-  one-off findings, or file paths (names stay permanently reserved even after GC).
-  *Advisory, not checked:* the shape and what to name; the server accepts any spelling
-  and any concept type. *Enforced:* the name's key. Two names are the same name when
-  their keys match, and the first spelling to take a key owns it for good; any spelling
-  with that key resolves to that concept. A name is reduced to its key in these steps:
+  infra pillars meant to be cited across workstreams. Never name `observation`s, one-off
+  findings, or file paths (names stay permanently reserved even after GC). *Advisory,
+  not checked:* the shape and what to name; the server accepts any spelling and any
+  concept type. *Enforced:* the name's key. Two names are the same name when their keys
+  match, and the first spelling to take a key owns it for good; any spelling with that
+  key resolves to that concept. A name is reduced to its key in these steps:
   1. Trim surrounding whitespace.
   2. Erase invisible characters, then apply Unicode NFC. The few a name may contain
      (zero-width joiner and non-joiner, variation selectors and the like, which some
@@ -141,32 +144,42 @@ stay fail-closed and stop until recall succeeds (see
      uppercase letter.
   4. Lowercase.
   5. Drop the stopwords: the, a, an, for, of, at, in, to, on, and, or, is, are.
-  6. Reduce each word to its English (Snowball) stem, except words containing a digit,
-     `.` or `/`, which are kept as written apart from case. Empty stems are dropped.
+  6. Reduce each word to its English (Snowball) stem, except words containing an ASCII
+     digit, `.` or `/`, which are kept as written apart from case. Empty stems are
+     dropped.
   7. Sort the words.
 
-  These collide: word order (`single-writer-lease`, `lease-writer-single`,
-  `writer single lease`); separators (`-`, `_`, spaces and tabs are interchangeable, and
-  a run counts once); case (`SINGLE_WRITER_LEASE`); camelCase (`SingleWriterLeases`,
+  These collide: word order (`single-writer-lease`, `lease-writer-single`, `writer
+  single lease`); separators (`-`, `_`, spaces and tabs are interchangeable, and a run
+  counts once); case (`SINGLE_WRITER_LEASE`); camelCase (`SingleWriterLeases`,
   `singleWriterLease`; `XmlParser` is `xml-parser`, `leaseV2` is `v2-lease`; a camelCase
-  boundary splits even inside a dotted or slashed piece, so `src/MyFile.rs` is
-  `File.rs src/My`); word forms (`leases`, `leasing`, `lease`); stopwords (`the-lease`
-  is `lease`, `the-lease-of-the-writer` is `writer-lease`). These do not: a run-together
-  word (`singlewriterlease`), a run of capitals (`XMLParser` is one word), a digit
-  (`v2Lease` is one word), dotted or slashed pieces without a camelCase boundary
-  (`single.writer.lease`; `leases/v2` is not `v2/leases`, though case is still
-  ignored), repeated words (`lease lease` is not `lease`), a stopword glued into a word
-  (`thelease`). Keys are not stable under re-typing: the key
-  `leas singl writer`, typed back as a name, keys as `lea singl writer`. Always reuse
-  the original spelling, never a key. A name is refused when another name
-  already holds its key (`NameTaken`); when another concept's canonical key is the same
-  (normally its content's key after graph synonyms; observations count; the name's own
-  target does not block it); when its key is empty (only stopwords or separators:
-  `the`, `the-of`); when it is id-shaped (a UUID, or exactly 8 hex digits such as
-  `DeadBeef`); or when it fails the size or character check (control and invisible characters). Proved in
-  `formal/LamboProofs/Canonical.lean` (`nameKey_eq_iff_perm`, `keyF_eq_iff_perm`,
-  `issue290_order`, `issue290_stopword`); the code is `name_key` in
-  `src/graph/graph/names.rs` and `canonical_key` in `src/graph/canonical.rs`.
+  boundary splits even inside a dotted or slashed piece, so `src/MyFile.rs` is `File.rs
+  src/My`); word forms (`leases`, `leasing`, `lease`); stopwords (`the-lease` is
+  `lease`, `the-lease-of-the-writer` is `writer-lease`). These do not: a run-together
+  word (`singlewriterlease`), a run of capitals (`XMLParser` is one word), an ASCII
+  digit (`v2Lease` is one word), dotted or slashed pieces without a camelCase boundary
+  (`single.writer.lease`; `leases/v2` is not `v2/leases`, though case is still ignored),
+  repeated words (`lease lease` is not `lease`), a stopword glued into a word
+  (`thelease`). Keys are not stable under re-typing: the key `leas singl writer`, typed
+  back as a name, keys as `lea singl writer`. Always reuse the original spelling, never
+  a key. A name is refused when another name already holds its key (`NameTaken`); when
+  another concept's canonical key is the same (normally its content's key after graph
+  synonyms; observations count; the name's own target does not block it); when its key
+  is empty (only stopwords or separators, such as `the` or `the-of`; only words whose
+  stems are empty, such as `''s`; or only the invisible characters step 2 allows); when
+  it is id-shaped (a UUID, or exactly 8 hex digits such as `DeadBeef`); or when it fails
+  the size and character check (over the content size limit, a control character other
+  than tab and newline, or an invisible character step 2 does not allow).
+
+  What is proved, and what is not: `formal/LamboProofs/Canonical.lean` models steps 1
+  and 3 to 7 for ASCII input and any stemmer whose stems contain no separator, and
+  proves that two inputs share a key exactly when their nonempty stems form the same
+  multiset (`keyF_eq_iff_perm`). It leaves out step 2, non-ASCII lowercasing and the
+  Snowball stemmer itself; its stem examples (`issue290_order`, `issue290_stopword`) use
+  a small table checked against a debug build, not Snowball. The refusals are code only:
+  `name_key` and `Graph::validate_name` in `src/graph/graph/names.rs`, with
+  `canonical_key` in `src/graph/canonical.rs`.
+
   Wait via `lambo_stats(receipt, wait_ms)` before citing a brand-new name in the same
   turn. Reference resolution differs by tool: `lambo_derive` refuses unknown
   references, whereas in `lambo_record_action.depends_on` unregistered text creates a
