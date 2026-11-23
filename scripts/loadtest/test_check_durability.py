@@ -302,7 +302,7 @@ class ClassifyTest(unittest.TestCase):
         # #117 review M1: a close whose final flush did not complete has its
         # own answer, distinct from intent_durable.
         tag, _ = self.mod.classify(
-            "close did not finish its final flush — this write was not applied before the "
+            "close could not confirm this write was saved — this write was not applied before the "
             "session closed, and it may or may not have been saved"
         )
         self.assertEqual(tag, "close_unflushed")

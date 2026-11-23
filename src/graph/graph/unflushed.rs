@@ -33,6 +33,19 @@
 //!
 //! RAM-only, like the access dirty set: a loaded session starts empty
 //! (everything it loaded is durable), and nothing here is snapshotted.
+//!
+//! **Dead-lettered intents (#345).** A dead letter drops the whole batch,
+//! the `PutWriteIntent`s in it included, so a write admitted in this process
+//! whose put was in that batch has no intent in the store. The flush hands
+//! such a batch to [`Graph::note_dead_lettered_intents`] as well, and the
+//! close asks [`Graph::intent_dead_lettered`] before it answers a set-aside
+//! receipt `intent_durable` (`WritePipeline::settle_deferred`). Every other
+//! put this process appended has, by the time a close whose final flush
+//! completed settles, been committed: the background flushes and the final
+//! one carry the whole log, and a degraded or fenced session's drops make the
+//! close answer `close_unflushed` anyway. So the set is exact, not a
+//! conservative bound (Lean: `Drain.closeD_durable_iff`). It only grows, by
+//! one receipt per put in a dead-lettered batch.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -102,6 +115,25 @@ impl Graph {
                 _ => {}
             }
         }
+    }
+
+    /// The flush dead-lettered `mutations`: remember the receipt ids of the
+    /// write intents they put, which therefore never reached the store
+    /// (#345). Call it with the batch the dead letter drops, before or with
+    /// [`Self::pin_unflushed`].
+    pub(crate) fn note_dead_lettered_intents(&mut self, mutations: &[Mutation]) {
+        for m in mutations {
+            if let Mutation::PutWriteIntent { intent } = m {
+                self.dead_lettered_intents.insert(intent.receipt.clone());
+            }
+        }
+    }
+
+    /// Whether the put of the write intent `receipt` was in a batch the
+    /// flush dead-lettered (#345): its intent is not in the store, so a close
+    /// must not answer it `intent_durable`.
+    pub(crate) fn intent_dead_lettered(&self, receipt: &str) -> bool {
+        self.dead_lettered_intents.contains(receipt)
     }
 
     /// Whether the latest write to `id` (an upsert or a delete) is not yet

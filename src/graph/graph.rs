@@ -149,6 +149,11 @@ pub struct Graph {
     /// Whether the holder has logged its first whole-graph fallback for an
     /// overflowing unflushed set (#60 review L-2). RAM-only.
     unflushed_overflow_logged: unflushed::LoggedOnce,
+    /// The receipt ids of the write intents whose `PutWriteIntent` was in a
+    /// batch the flush dead-lettered (#345; see `unflushed.rs`). A close
+    /// answers such a receipt `close_unflushed`, never `intent_durable`.
+    /// RAM-only, like the log.
+    dead_lettered_intents: HashSet<String>,
     /// The most recent plan-relevant concept writes with their epochs (#116; see
     /// `txn.rs`). RAM-only.
     node_writes: txn::NodeWrites,
@@ -184,6 +189,7 @@ impl Graph {
             unflushed: HashMap::new(),
             unflushed_contract: None,
             unflushed_overflow_logged: unflushed::LoggedOnce::default(),
+            dead_lettered_intents: HashSet::new(),
             node_writes: txn::NodeWrites::default(),
             undo: None,
         }

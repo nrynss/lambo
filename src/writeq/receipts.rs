@@ -607,13 +607,20 @@ pub enum ReceiptAnswer {
     /// never landed. `abort_workers` now sets the receipts aside and
     /// `WritePipeline::settle_deferred` answers them once the flush reports:
     /// this answer on success, [`ReceiptAnswer::CloseUnflushed`] otherwise.
+    /// "Success" is per write (#345): a write whose put a background flush
+    /// dead-lettered answers `CloseUnflushed` even when the final flush
+    /// completes, since its intent never reached the store.
     IntentRecorded,
     /// Not applied before this session closed, and the close could **not**
-    /// complete its final flush: it failed, the session was degraded, or the
-    /// lease was lost and the tail dropped (#117). The write's intent
-    /// is durable only if an earlier background flush took it, so whether the
-    /// next serve replays it is unknown from here. A retried `close()` whose
-    /// flush completes upgrades this to [`ReceiptAnswer::IntentRecorded`].
+    /// vouch for its intent: the close could not complete its final flush (it
+    /// failed, the session was degraded, or the lease was lost and the tail
+    /// dropped, #117), or a background flush dead-lettered the batch that
+    /// carried the intent's put (#345). After an incomplete flush the write's
+    /// intent is durable only if an earlier background flush committed it,
+    /// so whether the next serve replays it is unknown from here. A retried
+    /// `close()` whose flush completes upgrades this to
+    /// [`ReceiptAnswer::IntentRecorded`], except for a dead-lettered intent,
+    /// which no flush can bring back.
     CloseUnflushed,
     /// Never attempted: refused at admission. The agent's lane, the whole
     /// queue or its payload cap was full (writes held behind an embedder
@@ -774,7 +781,9 @@ impl ReceiptAnswer {
                                               order. Fetch this receipt id there to learn the \
                                               outcome, or recall."
                 .into(),
-            ReceiptAnswer::CloseUnflushed => "close did not finish its final flush — this write \
+            ReceiptAnswer::CloseUnflushed => "close could not confirm this write was saved (its \
+                                              final flush did not finish, or the store rejected \
+                                              the batch that carried its intent) — this write \
                                               was not applied before the session closed, and it \
                                               may or may not have been saved as an intent for \
                                               the next serve to re-attempt. Recall before \

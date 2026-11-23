@@ -42,6 +42,10 @@
 //!   the whole batch counts as ONE in `dead_lettered` however many writes it
 //!   held (Lean: `Flush.constraint_dead_lettered` and its `exPoison`
 //!   example). Splitting it to find the offending mutation is not attempted.
+//!   The write intents the batch put are dropped with it, so the loop notes
+//!   their receipt ids in the graph (`Graph::note_dead_lettered_intents`),
+//!   and a close answers those receipts `close_unflushed`, never
+//!   `intent_durable` (#345; Lean: `Drain.closeD_never_vouches_dropped`).
 //! * **A permanent error about the store degrades (#301).** A flush the store
 //!   refuses with [`StoreError::Permanent`] (an error no replay can fix that
 //!   is about the store, not the batch, such as an undefined table; the codes
@@ -867,6 +871,12 @@ impl FlushLoop {
                 // outage, and the count goes up by one, not by the number of
                 // writes (module docs, `Flush.constraint_dead_lettered`).
                 let batch_len = self.pending.len();
+                // #345: the write intents this batch put never reached the
+                // store either; a close must not answer them
+                // `intent_durable`. Noted before `pending` is cleared.
+                self.graph
+                    .write()
+                    .note_dead_lettered_intents(&self.pending.mutations);
                 self.drop_pending();
                 self.retry_after = None;
                 self.shared.dead_lettered.fetch_add(1, Ordering::AcqRel);
