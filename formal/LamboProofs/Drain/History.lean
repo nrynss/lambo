@@ -2,13 +2,14 @@
 # Write-queue drain: the history layer (before #294 and #295)
 
 **Nothing in this file describes the current Rust.** It holds the lane worker
-as it was before #295 (`work`, `drainLane`, `close`, `abortAllSync`), under
-which an in-session embedder outage (or lookup timeout) answered `failed`,
-left the intent owed and let the agent's next write run; and the theorems
-over the replay loop before #294 and #295 (`replay`, `loop` over
-`replayStep`). The pieces the current model shares with them (`workerStep`,
-the receipt store, `settleDeferred`, `replayStep`, `loop`, `replay`) are
-defined in `Base.lean`. The file is built and its theorems are in the axiom
+loop as it was before #295 (`work`, and `close` over it), under which an
+in-session embedder outage (or lookup timeout) answered `failed`, left the
+intent owed and let the agent's next write run; and the theorems over the
+replay loop before #294 and #295 (`replay`, `loop` over `replayStep`). The
+pieces the current model shares with them (`workerStep`, the receipt store,
+`settleDeferred`, the lane drain, the `Drop` path, the restart map's seed,
+`replayStep` and its arms, `loop`, `replay`) are defined, with their
+theorems, in `Base.lean`. The file is built and its theorems are in the axiom
 audit, but `formal/models.toml` does not check it against the Rust for drift,
 and the docs do not cite it. Its theorems were the evidence for the original
 findings (`Examples.lean`), so they stay. The current counterparts are named
@@ -16,10 +17,6 @@ in each doc comment.
 
 ## Results (before #295)
 
-* `drain_fifo`, `drain_extends_taken`: a lane drained to completion has taken
-  exactly the submitted jobs in submission order; what it had taken before is
-  a prefix (agrees with `Receipts.lane_fifo`). This is about the lane, not
-  the worker, and still holds.
 * `drain_settles_each`, `work_log`, `drained_final`: every admitted write is
   settled once with the worker's answer (`applied` or `failed`), one batch per
   job, and no later settle changes it.
@@ -38,10 +35,7 @@ in each doc comment.
   `close()` every receipt is settled, and each admitted write is drained,
   `intent_durable` and owed by the next replay, or `close_unflushed`
   ("deferred, not lost", `quiesce`). Current counterparts:
-  `shutdown_no_silent_lossW`, `held_at_closeW`. `drop_settles_nothing`: the
-  `Drop` path, the documented exception; it is definitional (`abortAllSync`
-  is the identity on receipts) and is there to name the gap, not to prove
-  anything about it.
+  `shutdown_no_silent_lossW`, `held_at_closeW`.
 * `outage_failed_but_owed`: an in-session `EmbedUnavailable` answered
   `failed` and left the write owed. The current Rust holds the write
   (`pending_replay`), `outage_holdsW`.
@@ -53,15 +47,15 @@ in each doc comment.
 * `replay_order`, `replay_seq_order`, `replay_epoch_seq_order`: one serve
   applied in load order, which within one process is sequence (admission)
   order as long as no later admission carries an earlier issue time.
-* `inputFact_goes_on`, `replayStep_cycle`, `replayStep_decode`: a refusal
-  that is a fact about the intent's input (`Embed`, `ImageIdTaken`,
-  `Reference`, a cycle refusal, an undecodable payload) settled `failed` and
-  the replay went on (`StoreError::is_cycle_refusal` doc; test
-  `a_cycle_refused_at_replay_settles_failed_and_the_replay_goes_on`).
+* `inputFact_goes_on`: a refusal that is a fact about the intent's input
+  (`Embed`, `ImageIdTaken`, `Reference`, a cycle refusal, an undecodable
+  payload) settled `failed` and the replay went on (`StoreError::is_cycle_refusal`
+  doc; test `a_cycle_refused_at_replay_settles_failed_and_the_replay_goes_on`).
   `sessionWide_stops`: any other non-transient error stopped it, the intent
-  and the rest left unconsumed. `unavailable_skips`, `unavailable_stops`: the
-  transient arm. `replayStep_inputRefusal_stops`: the graph-dependent
-  refusal #294 fixed. Current counterparts: `fixed_input_goes_on`,
+  and the rest left unconsumed. `replayStep_inputRefusal_stops`: the
+  graph-dependent refusal #294 fixed. The step's arms themselves
+  (`replayStep_cycle`, `replayStep_decode`, `unavailable_skips`, ...) are
+  still the current step's and are in `Base.lean`. Current counterparts: `fixed_input_goes_on`,
   `fixed_sessionWide_stops` (#294) and `fixedD_input_goes_on` (#295).
 -/
 
@@ -71,11 +65,10 @@ namespace Lambo.Drain
 
 open Lambo.Receipts (Answer Entry settle Lane)
 
-/-! ## The worker loop and the close before #295; the replay's seed
+/-! ## The worker loop and the close before #295
 
 `work` runs `Base.lean`'s `workerStep` over the jobs a worker takes; `close`
-composes it with `settle_deferred`'s set-aside. The seeded cross-restart
-answers (`seed`) are used only by the examples. -/
+composes it with `settle_deferred`'s set-aside. -/
 
 /-- The worker loop **before #295** over the jobs it takes, in the order it
 takes them: run, settle, next (current worker: `runW`). `fence` and `out` are the lease state and the run result at that
@@ -88,13 +81,6 @@ def work (fence : Job → Bool) (out : Job → RunResult) (now : Int) :
     let rest := work fence out now (settleOne s j.key r.1 now) js
     (rest.1, r.2 :: rest.2)
 
-/-- Drain a lane to completion: pop until the queue is empty. -/
-def drainLane {α : Type} : Nat → Lane α → Lane α
-  | 0, l => l
-  | n + 1, l => drainLane n l.pop
-
-def drain {α : Type} (l : Lane α) : Lane α := drainLane l.queue.length l
-
 /-- `quiesce` then the final flush then `settle_deferred`, over the worker
 **before #295** (current: `closeW`). `done` is what the
 workers finished before the drain budget ran out, in the order they finished
@@ -106,25 +92,6 @@ def close (done : List Job) (fence : Job → Bool) (out : Job → RunResult) (no
     (flush : CloseFlush) (s : RStore) : RStore × List Batch :=
   let w := work fence out now s done
   (settleDeferred flush now (pendingIds w.1) w.1, w.2)
-
-/-- `abort_all_sync`, the `Drop` path: aborts without joining and settles
-nothing. -/
-def abortAllSync (s : RStore) : RStore := s
-
-/-- The seeded cross-restart answer of one row (the stale-row skip is not
-modelled). -/
-def seedAnswer (i : Intent) : Answer :=
-  match i.outcome with
-  | none => .pendingReplay
-  | some .failed => .failed
-  | some _ => .appliedAfterRestart
-
-def seed (intents : List Intent) : List (Key × Answer) :=
-  intents.map (fun i => (i.job.key, seedAnswer i))
-
-/-- The restart map after a list of `insert`s: the last insert wins. -/
-def lookupLast (m : List (Key × Answer)) (r : Key) : Option Answer :=
-  (m.reverse.find? (fun p => p.1 = r)).map (·.2)
 
 /-! ## The worker before #295
 
@@ -223,52 +190,9 @@ theorem work_lookup (fence : Job → Bool) (out : Job → RunResult) (now : Int)
       rw [lookup_update_ne s _ hne]
       exact he
 
-/-! ## Draining a lane to completion -/
+/-! ## Draining a lane through the worker before #295
 
-theorem drainLane_spec {α : Type} :
-    ∀ (n : Nat) (l : Lane α), l.queue.length = n →
-      (drainLane n l).queue = [] ∧ (drainLane n l).taken = l.history := by
-  intro n
-  induction n with
-  | zero =>
-    intro l h
-    refine ⟨List.eq_nil_of_length_eq_zero h, ?_⟩
-    show l.taken = l.taken ++ l.queue
-    rw [List.eq_nil_of_length_eq_zero h, List.append_nil]
-  | succ n ih =>
-    intro l h
-    show (drainLane n l.pop).queue = [] ∧ (drainLane n l.pop).taken = l.history
-    obtain ⟨queue, taken⟩ := l
-    cases queue with
-    | nil => simp at h
-    | cons x q =>
-      have hl : (Lane.pop ⟨x :: q, taken⟩).queue.length = n := by
-        simp [Lane.pop] at h ⊢
-        exact h
-      obtain ⟨h1, h2⟩ := ih _ hl
-      exact ⟨h1, h2.trans (Lane.pop_history _)⟩
-
-/-- **Drain applies each lane's writes in submission order, all of them.**
-However admissions and worker steps interleaved (`Receipts.run`), a lane
-drained to completion has taken exactly the submitted jobs, in submission
-order: the completion of `Receipts.lane_fifo`, whose prefix is what the
-worker had taken when the drain began. -/
-theorem drain_fifo (ops : List (Lambo.Receipts.Op Job)) :
-    (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).queue = [] ∧
-      (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).taken = Lambo.Receipts.submitted ops := by
-  obtain ⟨h1, h2⟩ := drainLane_spec _ (Lambo.Receipts.run ⟨[], []⟩ ops) rfl
-  refine ⟨h1, ?_⟩
-  unfold drain
-  rw [h2, Lambo.Receipts.run_history]
-  rfl
-
-/-- What the worker had taken when the drain began is a prefix of what the
-drain takes (`Receipts.lane_fifo` and `drain_fifo` agree). -/
-theorem drain_extends_taken {α : Type} (l : Lane α) : ∃ rest, l.taken ++ rest = (drain l).taken := by
-  refine ⟨l.queue, ?_⟩
-  unfold drain
-  rw [(drainLane_spec _ l rfl).2]
-  rfl
+`drain` and `drain_fifo` (the lane's own order) are in `Base.lean`. -/
 
 /-- **Every admitted write is settled, once, with the worker's answer.** A
 lane drained to completion (no write outstanding) settles every job it was
@@ -310,28 +234,6 @@ The theorems about `close` (`close_settles_all`, `close_final`,
 counterparts are `shutdown_no_silent_lossW`, `held_at_closeW` and
 `closeW_retry_upgradesW`. The lemmas about `deferEntry` and
 `settleDeferred` they share with the current close are in `Base.lean`. -/
-
-theorem settleDeferred_all_settled (flush : CloseFlush) (now : Int) :
-    ∀ (ids : List Key) (s : RStore), (∀ p ∈ s, p.1 ∉ ids → p.2.answer.isSettled = true) →
-      ∀ p ∈ settleDeferred flush now ids s, p.2.answer.isSettled = true := by
-  intro ids
-  induction ids with
-  | nil =>
-    intro s h p hp
-    exact h p hp (by simp)
-  | cons r ids ih =>
-    intro s h
-    apply ih
-    intro p hp hpi
-    obtain ⟨q, hq, rfl⟩ := mem_update hp
-    by_cases hqr : q.1 = r
-    · rw [ite_eq_left hqr]; exact deferEntry_settled flush now q.2
-    · rw [ite_eq_right hqr] at hpi ⊢
-      apply h q hq
-      intro hm
-      cases List.mem_cons.mp hm with
-      | inl h' => exact hqr h'
-      | inr h' => exact hpi h'
 
 /-- **No receipt is left pending by a close.** Whatever the drain finished
 before its budget, every receipt in the store is settled afterwards: the drain
@@ -413,14 +315,6 @@ theorem close_answer (all done : List Job) (fence : Job → Bool) (out : Job →
     | incomplete =>
       simp only [hm, ite_true, Option.map_some]
       rw [deferEntry_incomplete, Lambo.Receipts.settle_unsettled e _ now hu']
-
-/-- `abort_all_sync` (the `Drop` path) settles nothing: a receipt pending when
-a `Memory` is dropped without `close()` stays pending in a process that is
-going away. This is the documented exception to "no write is lost silently";
-the write survives only if an earlier flush took its intent. `abort_all_sync`
-is unchanged by #295 (it aborts the workers and settles nothing, held writes'
-receipts included), so this describes the current Rust. -/
-theorem drop_settles_nothing (s : RStore) (q : Key) : lookup (abortAllSync s) q = lookup s q := rfl
 
 /-! ## Replay (before #294 and #295)
 
@@ -635,30 +529,9 @@ theorem replay_epoch_seq_order (live : Bool) (rout : Job → RR) (l : List Inten
   apply List.Pairwise.sublist hs
   exact List.pairwise_map.mpr (load_epoch_seq_order l hmono)
 
-/-! ## How the replay settles a refusal -/
+/-! ## How the replay before #294 settles a refusal
 
-/-- A refusal that is a fact about the intent's own input settles `failed`. -/
-theorem replayStep_inputFact (img : Bool) (e : Err) (s : Streaks) (h : e.inputFact = true) :
-    (replayStep img (.run (.err e)) s).1 = .failed := by
-  cases e <;> simp_all [Err.inputFact, replayStep]
-
-/-- So does a stored payload this build refuses to decode (#129). -/
-theorem replayStep_decode (img : Bool) (s : Streaks) :
-    replayStep img .decodeRefused s = (.failed, s) := rfl
-
-/-- A cycle refusal settles `failed` and leaves both streaks alone: it is
-decided before any embed, so it says nothing about the embedder
-(`StoreError::is_cycle_refusal`, #116). -/
-theorem replayStep_cycle (img : Bool) (s : Streaks) :
-    replayStep img (.run (.err .cycle)) s = (.failed, s) := rfl
-
-/-- Any other error that is neither transient nor a fact about the input
-stops the replay: a non-cycle store error (another `Invariant`, a
-`NotFound`, a backend error), `Config`, a lost lease (`Conflict`), anything
-else. -/
-theorem replayStep_sessionWide (img : Bool) (e : Err) (s : Streaks) (h1 : e.inputFact = false)
-    (h2 : e.transient = false) : ∃ b, (replayStep img (.run (.err e)) s).1 = .stop b := by
-  cases e <;> simp_all [Err.inputFact, Err.transient, replayStep]
+Over the old `loop`; the step's arms are in `Base.lean`. -/
 
 /-- **An input refusal settles `failed` and the replay continues.** For a
 refusal that is a fact about the intent's input (`Embed`, `ImageIdTaken`,
@@ -687,21 +560,6 @@ theorem sessionWide_stops (rout : Job → RR) (s : Streaks) (i : Intent) (rest :
   refine ⟨b, loop_stop (s' := (replayStep i.job.image (rout i.job) s).2) ?_⟩
   rw [he]
   exact Prod.ext hb rfl
-
-/-- A transient embed answer below the threshold leaves the intent unconsumed
-and moves on to the next one. -/
-theorem unavailable_skips (img : Bool) (s : Streaks) (h : s.transient + 1 < sickThreshold) :
-    replayStep img (.run (.err .unavailable)) s =
-      (.skip, { s with transient := s.transient + 1 }) := by
-  simp only [replayStep]
-  rw [ite_eq_right (by omega)]
-
-/-- The third transient in a row with nothing answered between stops the
-replay as `embedder` (`EMBEDDER_SICK_THRESHOLD`). -/
-theorem unavailable_stops (img : Bool) (s : Streaks) (h : sickThreshold ≤ s.transient + 1) :
-    (replayStep img (.run (.err .unavailable)) s).1 = .stop .embedder := by
-  simp only [replayStep]
-  rw [ite_eq_left h]
 
 /-- The old replay sends an input refusal to the stop arm (pins the code
 before #294; `store_error_blocks_backlog` is the backlog it blocks). -/

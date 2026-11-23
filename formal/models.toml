@@ -366,12 +366,13 @@ rust = [
 #
 # Base: the worker step's batch shape (the consume under the commit's lock
 # hold), the receipt store's settle, `settle_deferred`'s set-aside, the
-# intent log, the adapters' load order, the error classes and the replay's
-# constants.
+# `Drop` path (`abort_all_sync`, from `Memory`'s `Drop`), the intent log, the
+# adapters' load order, the error classes, the replay's step, its constants
+# and the restart map's seed (`spawn_replay`).
 [[model]]
 lean = "formal/LamboProofs/Drain/Base.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:f67684751068529c7c6a6e3d4b5fe46f2b58876aec76040bf4d606c126671cf2"
+read_digest = "v2:sha256:b9566666e7a4465a2a498cb514bd540466143e2235dcfa49ce280f0fc88ded26"
 rust = [
   "src/writeq/execution.rs#WriteCtx::run",
   "src/writeq/execution.rs#ConsumeStamp",
@@ -379,6 +380,9 @@ rust = [
   "src/writeq/drain.rs#CloseFlush",
   "src/writeq/drain.rs#WritePipeline::abort_workers",
   "src/writeq/drain.rs#WritePipeline::settle_deferred",
+  "src/writeq/drain.rs#WritePipeline::abort_all_sync",
+  "src/memory/shutdown.rs#Memory::drop",
+  "src/writeq/replay.rs#WritePipeline::spawn_replay",
   "src/writeq/replay.rs#EMBEDDER_SICK_THRESHOLD",
   "src/writeq/replay.rs#REPLAY_LOOKUP_TIMEOUT_LIMIT",
   "src/graph/graph/mutation_log.rs#record_write_intent",

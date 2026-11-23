@@ -8,11 +8,12 @@ namespace `Lambo.Drain`, so a theorem's name does not say which file holds
 it:
 
 * `Drain/Base.lean` (this file): writes, run results and the mutation log;
-  the lane worker's batches (`workerStep`) and the receipt store;
-  `settle_deferred`'s set-aside (`CloseFlush`, `deferEntry`,
-  `settleDeferred`); durable intents, the intent table and the load order;
-  the replay's step, streaks and constants (`replayStep`, `sickThreshold`,
-  `lookupTimeoutLimit`).
+  the lane worker's batches (`workerStep`), the receipt store and the lane
+  drain (`drain`); `settle_deferred`'s set-aside (`CloseFlush`, `deferEntry`,
+  `settleDeferred`) and the `Drop` path (`abortAllSync`); durable intents,
+  the intent table and the load order; the replay's step, its arms,
+  streaks and constants (`replayStep`, `sickThreshold`,
+  `lookupTimeoutLimit`) and the restart map's seed (`seed`).
 * `Drain/Replay.lean`: the replay fixes (#294, #295), the order invariant
   across passes, the in-session hold (`workH`) and the replay's retry pass.
 * `Drain/Worker.lean`: the current lane worker (`stepW`, `runW`), with
@@ -21,8 +22,8 @@ it:
   (`closeW`), dead-lettered batches at close (#345), worker panics and the
   dead-lettered set, and where the lookup-timeout streak resets (#346).
 * `Drain/Examples.lean`: worked examples and the findings about the Rust.
-* `Drain/History.lean`: the lane worker before #295 (`work`, `close`) and the
-  replay before #294 (`replay`'s theorems), kept as the evidence for the
+* `Drain/History.lean`: the lane worker loop before #295 (`work`, `close`)
+  and the replay loop before #294 (`replay`'s theorems), kept as the evidence for the
   findings they show. It describes no current Rust: it is not checked against
   the Rust for drift, and the docs do not cite it.
 
@@ -72,6 +73,18 @@ process's sequence starts at 1.
 
 ## Results
 
+* `drain_fifo`, `drain_extends_taken`: a lane drained to completion has taken
+  exactly the submitted jobs in submission order; what it had taken before is
+  a prefix (agrees with `Receipts.lane_fifo`).
+* `settleDeferred_all_settled`: `settle_deferred` leaves every set-aside
+  entry settled. `drop_settles_nothing`: the `Drop` path (`abort_all_sync`),
+  the documented exception, settles nothing; it is definitional
+  (`abortAllSync` is the identity on receipts) and is there to name the gap.
+* `replayStep_inputFact`, `replayStep_decode`, `replayStep_cycle`: a refusal
+  that is a fact about the intent's input settles `failed`;
+  `replayStep_sessionWide`: any other non-transient error stops the replay;
+  `unavailable_skips`, `unavailable_stops`: the transient arm. The current
+  step hands these answers to `replayStep`.
 * `workerStep_atomic`, `workerStep_keys`: a write in a worker batch has its
   consume beside it, and a batch names only its own job. They are stated
   over `workerStep`, the worker step before #295, and carry over to the
@@ -934,5 +947,162 @@ theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
   obtain ⟨b, hb, hmb⟩ := List.mem_flatten.mp hm
   obtain ⟨j, _, rfl⟩ := List.mem_map.mp ((List.take_sublist n _).subset hb)
   exact ⟨j, List.mem_singleton.mp hmb⟩
+
+/-! ## Draining a lane to completion
+
+`drainLane` pops a lane until its queue is empty. What it takes is the lane's order, which the lane worker, before #295 and since, takes its writes in (`Receipts.lane_fifo`). -/
+
+/-- Drain a lane to completion: pop until the queue is empty. -/
+def drainLane {α : Type} : Nat → Lane α → Lane α
+  | 0, l => l
+  | n + 1, l => drainLane n l.pop
+
+def drain {α : Type} (l : Lane α) : Lane α := drainLane l.queue.length l
+
+theorem drainLane_spec {α : Type} :
+    ∀ (n : Nat) (l : Lane α), l.queue.length = n →
+      (drainLane n l).queue = [] ∧ (drainLane n l).taken = l.history := by
+  intro n
+  induction n with
+  | zero =>
+    intro l h
+    refine ⟨List.eq_nil_of_length_eq_zero h, ?_⟩
+    show l.taken = l.taken ++ l.queue
+    rw [List.eq_nil_of_length_eq_zero h, List.append_nil]
+  | succ n ih =>
+    intro l h
+    show (drainLane n l.pop).queue = [] ∧ (drainLane n l.pop).taken = l.history
+    obtain ⟨queue, taken⟩ := l
+    cases queue with
+    | nil => simp at h
+    | cons x q =>
+      have hl : (Lane.pop ⟨x :: q, taken⟩).queue.length = n := by
+        simp [Lane.pop] at h ⊢
+        exact h
+      obtain ⟨h1, h2⟩ := ih _ hl
+      exact ⟨h1, h2.trans (Lane.pop_history _)⟩
+
+/-- **Drain applies each lane's writes in submission order, all of them.**
+However admissions and worker steps interleaved (`Receipts.run`), a lane
+drained to completion has taken exactly the submitted jobs, in submission
+order: the completion of `Receipts.lane_fifo`, whose prefix is what the
+worker had taken when the drain began. -/
+theorem drain_fifo (ops : List (Lambo.Receipts.Op Job)) :
+    (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).queue = [] ∧
+      (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).taken = Lambo.Receipts.submitted ops := by
+  obtain ⟨h1, h2⟩ := drainLane_spec _ (Lambo.Receipts.run ⟨[], []⟩ ops) rfl
+  refine ⟨h1, ?_⟩
+  unfold drain
+  rw [h2, Lambo.Receipts.run_history]
+  rfl
+
+/-- What the worker had taken when the drain began is a prefix of what the
+drain takes (`Receipts.lane_fifo` and `drain_fifo` agree). -/
+theorem drain_extends_taken {α : Type} (l : Lane α) : ∃ rest, l.taken ++ rest = (drain l).taken := by
+  refine ⟨l.queue, ?_⟩
+  unfold drain
+  rw [(drainLane_spec _ l rfl).2]
+  rfl
+
+/-! ## The `Drop` path (`abort_all_sync`)
+
+`abort_all_sync`, which only `Memory`'s `Drop` calls (`src/memory/shutdown.rs`), aborts the workers without joining them and settles nothing. -/
+
+/-- `abort_all_sync`, the `Drop` path: aborts without joining and settles
+nothing. -/
+def abortAllSync (s : RStore) : RStore := s
+
+/-- `abort_all_sync` (the `Drop` path) settles nothing: a receipt pending when
+a `Memory` is dropped without `close()` stays pending in a process that is
+going away. This is the documented exception to "no write is lost silently";
+the write survives only if an earlier flush took its intent. `abort_all_sync`
+is unchanged by #295 (it aborts the workers and settles nothing, held writes'
+receipts included), so this describes the current Rust. -/
+theorem drop_settles_nothing (s : RStore) (q : Key) : lookup (abortAllSync s) q = lookup s q := rfl
+
+/-! ## `settle_deferred` settles every set-aside entry -/
+
+theorem settleDeferred_all_settled (flush : CloseFlush) (now : Int) :
+    ∀ (ids : List Key) (s : RStore), (∀ p ∈ s, p.1 ∉ ids → p.2.answer.isSettled = true) →
+      ∀ p ∈ settleDeferred flush now ids s, p.2.answer.isSettled = true := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro s h p hp
+    exact h p hp (by simp)
+  | cons r ids ih =>
+    intro s h
+    apply ih
+    intro p hp hpi
+    obtain ⟨q, hq, rfl⟩ := mem_update hp
+    by_cases hqr : q.1 = r
+    · rw [ite_eq_left hqr]; exact deferEntry_settled flush now q.2
+    · rw [ite_eq_right hqr] at hpi ⊢
+      apply h q hq
+      intro hm
+      cases List.mem_cons.mp hm with
+      | inl h' => exact hqr h'
+      | inr h' => exact hpi h'
+
+/-! ## The restart map's seed (`spawn_replay`)
+
+Before a replay runs, `spawn_replay` seeds the restart map with one answer per stored row: `pending_replay` for an unconsumed one, `failed` or `applied_after_restart` for a consumed one, by its tag. -/
+
+/-- The seeded cross-restart answer of one row (the stale-row skip is not
+modelled). -/
+def seedAnswer (i : Intent) : Answer :=
+  match i.outcome with
+  | none => .pendingReplay
+  | some .failed => .failed
+  | some _ => .appliedAfterRestart
+
+def seed (intents : List Intent) : List (Key × Answer) :=
+  intents.map (fun i => (i.job.key, seedAnswer i))
+
+/-- The restart map after a list of `insert`s: the last insert wins. -/
+def lookupLast (m : List (Key × Answer)) (r : Key) : Option Answer :=
+  (m.reverse.find? (fun p => p.1 = r)).map (·.2)
+
+/-! ## The replay step's arms
+
+`replayStep` is the match on a run's result in `spawn_replay`. The current step (`stepQ` over `stepFixed` over `stepInput`, `Replay.lean`) overrides it for an unknown receipt format, an unparseable id and a graph-dependent input refusal and hands every other answer to it, so these arms are the current replay's. -/
+
+/-- A refusal that is a fact about the intent's own input settles `failed`. -/
+theorem replayStep_inputFact (img : Bool) (e : Err) (s : Streaks) (h : e.inputFact = true) :
+    (replayStep img (.run (.err e)) s).1 = .failed := by
+  cases e <;> simp_all [Err.inputFact, replayStep]
+
+/-- So does a stored payload this build refuses to decode (#129). -/
+theorem replayStep_decode (img : Bool) (s : Streaks) :
+    replayStep img .decodeRefused s = (.failed, s) := rfl
+
+/-- A cycle refusal settles `failed` and leaves both streaks alone: it is
+decided before any embed, so it says nothing about the embedder
+(`StoreError::is_cycle_refusal`, #116). -/
+theorem replayStep_cycle (img : Bool) (s : Streaks) :
+    replayStep img (.run (.err .cycle)) s = (.failed, s) := rfl
+
+/-- Any other error that is neither transient nor a fact about the input
+stops the replay: a non-cycle store error (another `Invariant`, a
+`NotFound`, a backend error), `Config`, a lost lease (`Conflict`), anything
+else. -/
+theorem replayStep_sessionWide (img : Bool) (e : Err) (s : Streaks) (h1 : e.inputFact = false)
+    (h2 : e.transient = false) : ∃ b, (replayStep img (.run (.err e)) s).1 = .stop b := by
+  cases e <;> simp_all [Err.inputFact, Err.transient, replayStep]
+
+/-- A transient embed answer below the threshold is a `skip`: the intent is
+left unconsumed (the loop since #295, `loopD`, then defers its agent). -/
+theorem unavailable_skips (img : Bool) (s : Streaks) (h : s.transient + 1 < sickThreshold) :
+    replayStep img (.run (.err .unavailable)) s =
+      (.skip, { s with transient := s.transient + 1 }) := by
+  simp only [replayStep]
+  rw [ite_eq_right (by omega)]
+
+/-- The third transient in a row with nothing answered between stops the
+replay as `embedder` (`EMBEDDER_SICK_THRESHOLD`). -/
+theorem unavailable_stops (img : Bool) (s : Streaks) (h : sickThreshold ≤ s.transient + 1) :
+    (replayStep img (.run (.err .unavailable)) s).1 = .stop .embedder := by
+  simp only [replayStep]
+  rw [ite_eq_left h]
 
 end Lambo.Drain
