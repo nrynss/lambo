@@ -208,6 +208,20 @@ tests:
 python3 -I scripts/formal/check-model-drift.py --self-test
 ```
 
+## Restructuring the models without changing what they prove
+
+A change that only moves, splits or tidies the models (a file split, a shared lemma moved to `LamboProofs/Lib/`) must leave every theorem's statement as it was. `scripts/formal/check-decl-equivalence.py` checks that against a base commit: it exports the base's `formal/` with `git archive`, builds it and the working tree, dumps every declaration of every module under `LamboProofs/` with `scripts/formal/DumpDecls.lean` (a Lean program that walks the elaborated environment, so it compares what Lean checked rather than the source text), and compares them by fully qualified name.
+
+```bash
+PATH="$HOME/.elan/bin:$PATH" python3 -I scripts/formal/check-decl-equivalence.py --base origin/main
+```
+
+It fails unless every theorem at the base exists with the same kind, universe parameters and statement (the kernel term, binder names included; its proof may differ), every definition, inductive and structure keeps its type and body, nothing is added, and every theorem rests on `propext`, `Quot.sound` and `Classical.choice` at most. Which module a declaration lives in is reported, not compared. A declaration may change name only when `--renames FILE` lists it as `OLD<TAB>NEW` (a helper moved to the shared library; several old names may map to one new one), and then the new one must have the old one's statement. The constants Lean generates (`foo.match_1`, `foo.proof_1`, `_auxLemma.N`) are compared by what they are, not by name, since their names follow the file layout. Its tests run without Lean:
+
+```bash
+python3 -I scripts/formal/test_check_decl_equivalence.py
+```
+
 ## Differential oracle
 
 The drift check says the Rust changed; it does not say whether the Rust and
