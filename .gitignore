@@ -29,6 +29,9 @@ spikes/*/Cargo.lock
 __pycache__/
 *.pyc
 lambo.toml
+# The macOS kit's starter config is a template with placeholders, not a local
+# config: it is tracked (#277).
+!examples/macos-solo/lambo.toml
 scripts/recording/node_modules/
 evidence/cloudops-video/
 evidence/video-raw/

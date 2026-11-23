@@ -129,7 +129,13 @@ dependencies, the protection is blind.
    you may bind a lowercase kebab-case durable `name` (`<domain>-<subject>`,
    e.g. `prod-vpc-base-sg`) via `concepts[].name` on MCP `lambo_derive` (over
    CLI, pass `--name` on `lambo derive` or bind names on existing concepts with
-   `lambo names assign`).
+   `lambo names assign`). The kebab-case shape is a convention the server does
+   not check. It compares names by a normalized key that ignores word order,
+   separators, word endings and stopwords, and case except where an ASCII
+   lowercase letter meets an ASCII uppercase one (a camelCase boundary splits
+   a word, so `ProdVpc` is `prod-vpc` but `prodvpc` is one word). So `prod-vpc-base-sg`
+   and `base sg prod vpc` are one name; the first spelling to take a key owns
+   it for good. Cite a name by that original spelling, never by its key.
 
 3. Writes are lease-held and exclusive; sequence them. Over CLI, a write waits
    for flush before returning. Over MCP, `lambo_derive` and `lambo_record_action`

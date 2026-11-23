@@ -16,7 +16,8 @@
             "group": "Get started",
             "pages": [
               "index",
-              "installation"
+              "installation",
+              "macos"
             ]
           },
           {

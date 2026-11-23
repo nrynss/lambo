@@ -19,9 +19,13 @@
 //! wrongly without failing; the two dialects pin each other. H3 is this
 //! row's live parity box.
 //!
-//! [`Dialect::vector_dim`] reads the width that `init_sql` will substitute
-//! (config pin, else 1024). B4 probes live `vector(n)` at init and
-//! preflight so reporting is not an echo of the same config value.
+//! [`Dialect::vector_dim`] reads the width that `init_sql` will substitute:
+//! the `[store] vector_dim` pin, else the embedder width the resolver
+//! threads in, else 1024. Until B4's probe of the live `vector(n)` has run,
+//! at init and at preflight (attach), that width is config, not the
+//! schema's: at resolve it echoes the pin or the embedder, so the
+//! resolve-time compatibility check cannot refuse on it. The probe binds it
+//! to the schema and fails closed before a session is served (#317).
 
 use std::borrow::Cow;
 

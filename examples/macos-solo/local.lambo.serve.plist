@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent that keeps one warm `lambo serve` running over HTTP for the
+  starter config in this directory (#277). Guide: docs/reference/macos.mdx.
+  (XML comments cannot hold a double hyphen, so flags are named in words here.)
+
+  Install as ~/Library/LaunchAgents/local.lambo.serve.plist after replacing
+  every USERNAME with your macOS account name (launchd expands neither ~ nor
+  $HOME). Check it with `plutil -lint` before loading it.
+
+  - No session flag: the pinned sessions and the /mcp default come from
+    [serve] in lambo.toml.
+  - Port 7720, not the product default 7700, so the supervised writer never
+    collides with a lambo serve started by hand on the default port.
+  - ThrottleInterval 60: launchd starts the job at most once a minute, so a
+    writer that keeps failing at startup is not respawned every 10 s. It is
+    not a delay after an exit: a writer that ran longer and then crashed is
+    restarted at once, and answers 503 for its sessions until its old lease
+    (45 s TTL) lapses, retrying every 5 to 6 s.
+  - ExitTimeOut 30 is above the 20 s shutdown watchdog, so launchd waits for
+    a clean shutdown (at most 18.5 s) before it sends SIGKILL.
+  - ProcessType Standard keeps launchd from applying background throttling.
+  - Loopback only, no token: never add a non-loopback bind address here
+    without a credential, and never put a token in this file.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.lambo.serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USERNAME/.local/bin/lambo</string>
+    <string>serve</string>
+    <string>--config</string>
+    <string>/Users/USERNAME/.config/lambo/lambo.toml</string>
+    <string>--agent</string>
+    <string>launchd-writer</string>
+    <string>--transport</string>
+    <string>http</string>
+    <string>--port</string>
+    <string>7720</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/USERNAME/.local/share/lambo</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>StandardOutPath</key>
+  <string>/Users/USERNAME/Library/Logs/lambo/serve.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/USERNAME/Library/Logs/lambo/serve.log</string>
+</dict>
+</plist>

@@ -1,0 +1,74 @@
+# Starter lambo.toml for one developer on an Apple silicon Mac (#277).
+#
+# Guide: docs/reference/macos.mdx (https://nrynss.github.io/lambo/macos/).
+# Install it as ~/.config/lambo/lambo.toml and replace USERNAME below with your
+# macOS account name (the store path is not ~-expanded). Every key here is one
+# the Metal release asset (LAMBO_FLAVOR=metal, features ship,embed-candle-metal)
+# accepts; an unknown key or an uncompiled kind stops lambo at startup.
+#
+# Layout: one LaunchAgent runs `lambo serve --transport http` against this
+# file. It pins every session in [serve] sessions:
+#   general        rulings and preferences that hold in every project
+#   general-usage  work outside any mapped project (what /mcp serves)
+#   myapp          one session per repository; add one per repo you work in
+# Every non-layer session also reads `general` on lambo_recall.
+
+# Top-level keys must stay above the first [table] header.
+#
+# Solo promotes on a recurrence score over a concept's own evidence, so one
+# developer's sessions can reach Canonical. Omitted, the default is Swarm,
+# which is built for many concurrent writers.
+promotion_policy = "Solo"
+
+[store]
+kind = "sqlite"
+# Absolute path; create the directory first (mkdir -p ~/.local/share/lambo),
+# then run `lambo --config ~/.config/lambo/lambo.toml provision` once.
+path = "/Users/USERNAME/.local/share/lambo/lambo.db"
+
+[embedder]
+# In-process BGE-M3 on the GPU. Only the Metal build carries it. The first
+# start fetches about 1.1 GB of weights from Hugging Face into the hub cache.
+kind = "candle"
+device = "metal"
+# BGE-M3's width. Lambo refuses to start if the model disagrees, and each
+# session keeps the width its vectors were written with (changing it needs a
+# re-embed).
+dim = 1024
+# Keep-warm: on Metal, lambo serve embeds one short probe every 10 seconds by
+# default so idle weights stay resident. On a laptop running on battery, set
+# it to 0 to stop waking the GPU; the first call after an idle spell may then
+# be slower.
+# keep_warm_secs = 0
+
+[serve]
+# Pinned sessions: attached at startup, each served at
+# http://127.0.0.1:7720/mcp/s/<session>. A new repository needs its own entry
+# here (and a LaunchAgent restart): with no credential configured, the serve
+# reaches pinned sessions only. Names: 1 to 128 bytes of [A-Za-z0-9._:-].
+sessions = ["general", "general-usage", "myapp"]
+# What http://127.0.0.1:7720/mcp serves: the fallback for unmapped folders.
+default_session = "general-usage"
+# Every pinned session that is not itself a layer also recalls `general`.
+layers = ["general"]
+
+# Directory map for a stdio `lambo serve` started without --session (the
+# HTTP serve ignores it and logs one warning saying so). Longest matching
+# path wins; `*` in the final component also covers sibling worktrees.
+[[serve.projects]]
+path = "~/work/myapp"
+session = "myapp"
+
+[[serve.projects]]
+path = "~/work/myapp-*"
+session = "myapp"
+
+[web]
+# The read-only window, run on demand with
+#   lambo --config ~/.config/lambo/lambo.toml serve-web --port 7721
+# The first session is served at /, each at /s/<session>/.
+sessions = ["general-usage", "myapp", "general"]
+# The page's picker lists these names. With no credential configured,
+# serve-web warns at startup that anyone who reaches the port can list them;
+# it binds to loopback.
+list_sessions = true
