@@ -42,6 +42,21 @@
   The originals stay in git history (for example at `v0.15.0`), which is what
   remaining `spec §N` and `dev-diary/` citations in comments, earlier entries
   here and `evidence/` refer to.
+- `scripts/run-llama-embed.sh` starts `llama-server` with `--batch-size` and
+  `--ubatch-size` (default: the context size; `LAMBO_LLAMA_EMBED_BATCH`
+  overrides). Without them llama-server answered HTTP 500 for any input over
+  512 tokens while `/health` passed. `--check`, and the script finding a
+  server already running, now embed a 700-word input and fail with a restart
+  hint when it is refused. The installation page's `llama-server` command
+  carries the same flags.
+- `candle` fetches weights into the cache `HF_HOME` names (and from
+  `HF_ENDPOINT`), the same cache `offline = true` reads. Before, an online
+  fetch always went to `~/.cache/huggingface/hub`, so with `HF_HOME` set an
+  offline start reported weights it had just fetched as not cached.
+- `docs/reference/config.mdx` documents the embedder keys it never listed:
+  `device`, `repo`, `revision`, `weights_file`, `offline` and `weights_dir`
+  for `candle`, `dimensions` for `bge_m3`, the four `gemini_*` keys, and
+  their environment variables.
 
 ## 0.15.0 (2026-11-22)
 

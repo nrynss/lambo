@@ -7,7 +7,7 @@
 # Usage:
 #   ./scripts/fetch-bge-m3.sh            # once, weights into models/
 #   ./scripts/run-llama-embed.sh         # foreground
-#   ./scripts/run-llama-embed.sh --check # health-check an already-running server
+#   ./scripts/run-llama-embed.sh --check # check an already-running server, long input included
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,13 +44,32 @@ check_health() {
   curl -fsS --max-time 2 "${URL%/}/health" >/dev/null 2>&1
 }
 
+# /health passes even on a server whose batch is too small for real input, so
+# also embed one text of more than 512 tokens: a server started without
+# --batch-size/--ubatch-size answers it with HTTP 500.
+check_long_input() {
+  local text body code
+  text="$(printf 'lambo%.0s ' $(seq 1 700))"
+  body="$(printf '{"input": "%s"}' "$text")"
+  code="$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' \
+    -H 'Content-Type: application/json' -d "$body" "${URL%/}/v1/embeddings" 2>/dev/null || true)"
+  [[ "$code" == "200" ]]
+}
+
+LONG_INPUT_HINT="it answers /health but cannot embed a 700-word input: restart it with \
+--batch-size and --ubatch-size at least as large as your longest input (this script does)"
+
 if [[ "${1:-}" == "--check" ]]; then
-  if check_health; then
-    echo "llama.cpp embedding server OK at ${URL}"
-    exit 0
+  if ! check_health; then
+    echo "no llama.cpp server responding at ${URL}" >&2
+    exit 1
   fi
-  echo "no llama.cpp server responding at ${URL}" >&2
-  exit 1
+  if ! check_long_input; then
+    echo "llama.cpp server at ${URL}: $LONG_INPUT_HINT" >&2
+    exit 1
+  fi
+  echo "llama.cpp embedding server OK at ${URL} (long input embedded)"
+  exit 0
 fi
 
 if [[ ! -f "$MODEL" ]]; then
@@ -66,8 +85,12 @@ command -v "$SERVER" >/dev/null 2>&1 || {
 }
 
 if check_health; then
-  echo "a server is already running at ${URL} — exiting (use --check to verify)."
-  exit 0
+  if check_long_input; then
+    echo "a server is already running at ${URL} and embeds long input — exiting."
+    exit 0
+  fi
+  echo "a server is already running at ${URL}: $LONG_INPUT_HINT" >&2
+  exit 1
 fi
 
 echo "== starting llama.cpp embedding server =="

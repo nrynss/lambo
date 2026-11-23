@@ -1305,10 +1305,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// Fetch `filename` via hf-hub (cache hit, or network download on first use).
+/// Fetch `filename` via hf-hub into the `HF_HOME` cache [`cache_get`] reads.
 fn hub_get(repo: &str, revision: &str, filename: &str) -> Result<PathBuf, EmbedError> {
-    use hf_hub::api::sync::Api;
-    let api = Api::new().map_err(|e| EmbedError::Unavailable(format!("hf-hub init: {e}")))?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build();
+    let api = api.map_err(|e| EmbedError::Unavailable(format!("hf-hub init: {e}")))?;
     let repo_api = api.repo(hf_hub::Repo::with_revision(
         repo.to_string(),
         hf_hub::RepoType::Model,
