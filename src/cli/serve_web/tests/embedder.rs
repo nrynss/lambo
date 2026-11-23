@@ -342,9 +342,11 @@ async fn embedder_off_never_loads_and_recall_says_so() {
 }
 
 /// (f) A recall dropped while the load is in flight (its client went
-/// away) releases the gate's turn without an outcome. The next recall calls
-/// `prepare` again, and that joins the load already running rather than
-/// starting a second one: one load in all, and the waiter embeds with it.
+/// away) releases the gate's turn without an outcome. A recall already
+/// waiting on the turn when it is dropped does not take an error from it
+/// (no attempt was counted, no error stored); it calls `prepare` again, and
+/// that joins the load already running rather than starting a second one:
+/// one load in all, and the waiter embeds with it.
 #[tokio::test]
 async fn a_recall_dropped_mid_load_leaves_one_load_for_the_next() {
     let (embedder, park) = Deferred::new().candle_like();
@@ -389,11 +391,33 @@ async fn a_recall_dropped_mid_load_leaves_one_load_for_the_next() {
 
     let leading = recall("user schema");
     until_prepares(1).await;
+    // Queued on the gate's turn behind the leader before it is dropped.
+    let waiter = recall("auth middleware");
+    until_arrived(&state, 2).await;
+    assert_eq!(prepares.load(Ordering::SeqCst), 1, "the waiter is queued");
     leading.abort();
     assert!(matches!(leading.await, Err(e) if e.is_cancelled()));
 
-    let waiter = recall("auth middleware");
-    until_prepares(2).await;
+    // The waiter calls `prepare` again. Had the dropped recall recorded an
+    // outcome (an attempt counted and an error stored), the waiter would
+    // take that error and finish without calling it.
+    let called_again = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if prepares.load(Ordering::SeqCst) >= 2 {
+                break true;
+            }
+            if waiter.is_finished() {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the waiter neither called prepare nor finished");
+    assert!(
+        called_again,
+        "the queued waiter took an outcome from the dropped recall"
+    );
     assert_eq!(state.embedder.prepares(), 2, "the turn was released");
     assert_eq!(loads.load(Ordering::SeqCst), 1, "no second load started");
 
@@ -485,6 +509,104 @@ async fn recalls_waiting_on_a_failed_load_share_its_outcome() {
     handle.abort();
 }
 
+/// `src` with every comment removed: `//` line comments and `/* */` blocks
+/// (nested), doc comments included. String, raw string and char literals
+/// are kept whole, so a `//` inside one is not taken for a comment; a `'`
+/// that does not open a char literal is a lifetime.
+fn without_comments(src: &str) -> String {
+    let cs: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        let next = cs.get(i + 1).copied();
+        if c == '/' && next == Some('/') {
+            while i < cs.len() && cs[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && next == Some('*') {
+            let mut depth = 0usize;
+            while i < cs.len() {
+                if cs[i] == '/' && cs.get(i + 1) == Some(&'*') {
+                    depth += 1;
+                    i += 2;
+                } else if cs[i] == '*' && cs.get(i + 1) == Some(&'/') {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(' ');
+        } else if c == 'r' && matches!(next, Some('"') | Some('#')) && {
+            let hashes = cs[i + 1..].iter().take_while(|&&h| h == '#').count();
+            cs.get(i + 1 + hashes) == Some(&'"')
+        } {
+            let hashes = cs[i + 1..].iter().take_while(|&&h| h == '#').count();
+            let close: Vec<char> = std::iter::once('"')
+                .chain(std::iter::repeat_n('#', hashes))
+                .collect();
+            let start = i;
+            i += 2 + hashes;
+            while i < cs.len() && !cs[i..].starts_with(&close) {
+                i += 1;
+            }
+            i = (i + close.len()).min(cs.len());
+            out.extend(&cs[start..i]);
+        } else if c == '"' {
+            let start = i;
+            i += 1;
+            while i < cs.len() && cs[i] != '"' {
+                i += if cs[i] == '\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(cs.len());
+            out.extend(&cs[start..i]);
+        } else if c == '\'' && (next == Some('\\') || cs.get(i + 2) == Some(&'\'')) {
+            let start = i;
+            i += 1;
+            while i < cs.len() && cs[i] != '\'' {
+                i += if cs[i] == '\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(cs.len());
+            out.extend(&cs[start..i]);
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The comment stripper the scan below relies on.
+#[test]
+fn without_comments_drops_comments_and_keeps_literals() {
+    let src = "/// doc backends.embedder\n//! inner .embed(\nlet a = 1; // .prepare()\n\
+               /* block /* nested */ .embed_query( */ let b = \"http://x\";\n\
+               let c = r#\"a // b\"#; let d = '\"'; fn f<'a>(x: &'a str) {}\n";
+    let out = without_comments(src);
+    for gone in [
+        "backends.embedder",
+        ".embed(",
+        ".prepare()",
+        ".embed_query(",
+        "nested",
+    ] {
+        assert!(!out.contains(gone), "{gone} survived: {out}");
+    }
+    for kept in [
+        "let a = 1;",
+        "\"http://x\"",
+        "r#\"a // b\"#",
+        "'\"'",
+        "fn f<'a>(x: &'a str) {}",
+    ] {
+        assert!(out.contains(kept), "{kept} lost: {out}");
+    }
+}
+
 /// The gate is the only portal source that loads the embedder: startup
 /// (`run`) and every route reach the model only through it. Calling
 /// `prepare` is not the only way to load it: candle's `embed` and
@@ -493,6 +615,7 @@ async fn recalls_waiting_on_a_failed_load_share_its_outcome() {
 /// `embedder_cfg`), any direct embed, and any `cli::recall` entry point
 /// that embeds with the resolved adapter (everything but
 /// `run_detailed_on_leg`, which takes the gate's handle) would load it too.
+/// Comments are removed first, so prose naming any of these cannot fail it.
 #[test]
 fn only_the_gate_loads_the_embedder() {
     // `run_detailed_on_leg(` is the gate's, and not matched by these.
@@ -506,9 +629,12 @@ fn only_the_gate_loads_the_embedder() {
     ];
     for (name, src) in PRODUCTION_SOURCES {
         let src = src.split("#[cfg(all(test").next().unwrap_or(src);
-        // Whitespace out, so a call chain rustfmt split across lines
-        // (`backends\n    .embedder`) still matches.
-        let src: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        // Comments out, then whitespace out, so a call chain rustfmt split
+        // across lines (`backends\n    .embedder`) still matches.
+        let src: String = without_comments(src)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         let gate = *name == "serve_web/embedder.rs";
         let count = |needle: &str| src.matches(needle).count();
 
@@ -524,7 +650,10 @@ fn only_the_gate_loads_the_embedder() {
         );
 
         // Embeds: only `Gated`'s two, after the gate's load.
-        let embeds = count(".embed(") + count(".embed_query(");
+        let embeds = [".embed(", ".embed_query(", ".embed_batch(", ".embed_image("]
+            .iter()
+            .map(|needle| count(needle))
+            .sum::<usize>();
         assert_eq!(embeds, 2 * usize::from(gate), "{name}: direct embeds");
 
         for bare in BARE_RECALLS {

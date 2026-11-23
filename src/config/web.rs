@@ -37,9 +37,9 @@
 //! `embedder = false` (or `lambo serve-web --no-embedder`) turns the vector
 //! leg off: the model is never loaded, and every recall runs on the keyword
 //! and recent legs, with a line saying the vector leg is off by
-//! configuration on a store that can search by vector. The configured embedder is still resolved (its identity
-//! and width, no weights), so the page's embedding-contract status stays
-//! exact.
+//! configuration on a store that can search by vector. The configured
+//! embedder is still resolved (its identity and width, no weights), so the
+//! page's embedding-contract status stays exact.
 //!
 //! `allowed_hosts` matters only while no credential of any kind is
 //! configured (no legacy token, no `[[web.credential]]`, none inherited): then
