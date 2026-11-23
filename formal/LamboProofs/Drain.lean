@@ -203,6 +203,14 @@ in their doc comments, and describe behaviour the current Rust no longer has.
   committed one (`closeD_retryD`). With no dead letter it is `closeW`
   (`closeD_agrees`), so the `closeW` theorems describe the current close of
   every session no flush dead-lettered.
+* Worker panics and the dead-lettered set (#345 re-review; `stepK`,
+  `stepP`): a lane worker that panics after its commit leaves its write
+  unsettled for the close to set aside, which `stepW` does not model.
+  Forgetting a dead-lettered receipt at the consume then vouches for a
+  dropped put (`keptAtConsume_vouches_after_panic`); the current Rust
+  forgets it at the settle, which never does (`settlePrune_never_vouches_dropped`,
+  `settlePrune_exact`, `settlePrune_unsettled_bounded`,
+  `settlePrune_settled_forgotten`).
 * Where the lookup streak resets (#346; `streakOld`, `streakNew`,
   `runSince`): before the fix a timeout between a commit and that write's
   settle was counted toward the old run (`streak_old_counts_across_commit`),

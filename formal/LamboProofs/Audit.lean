@@ -569,6 +569,12 @@ open Lambo
 #print axioms Lambo.Drain.closeD_durable_iff
 #print axioms Lambo.Drain.closeD_retryD
 #print axioms Lambo.Drain.closeD_keptDropped
+#print axioms Lambo.Drain.keptAtConsume_vouches_after_panic
+#print axioms Lambo.Drain.runP_inv
+#print axioms Lambo.Drain.settlePrune_never_vouches_dropped
+#print axioms Lambo.Drain.settlePrune_exact
+#print axioms Lambo.Drain.settlePrune_unsettled_bounded
+#print axioms Lambo.Drain.settlePrune_settled_forgotten
 -- Where the lookup-timeout streak resets (#346)
 #print axioms Lambo.Drain.streakNew_eq_runSince
 #print axioms Lambo.Drain.heldNew_iff

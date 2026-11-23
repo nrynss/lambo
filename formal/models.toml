@@ -184,8 +184,8 @@ rust = [
 
 [[model]]
 lean = "formal/LamboProofs/Receipts.lean"
-read_against = "a65a9d53"
-read_digest = "v2:sha256:a555a38633b20919638bb47f5fa8aa78ccd4bc9cb224d698c5b1b69d4a9f2814"
+read_against = "9b6686a1"
+read_digest = "v2:sha256:7ac694746a65cd5125643d01253d1e594dfbee209a9d457603a31f583c7ae1e7"
 rust = [
   "src/writeq/receipts.rs",
   "src/writeq/admission.rs",
@@ -359,8 +359,8 @@ rust = [
 
 [[model]]
 lean = "formal/LamboProofs/Drain.lean"
-read_against = "a65a9d53"
-read_digest = "v2:sha256:654424913d65c38c714f6ee2cb638e8d761a751bcc4c50f45c6e0fcd3f141fdc"
+read_against = "9b6686a1"
+read_digest = "v2:sha256:2b1f732196ff2ceccca8b59a86957d1a0932b025cd7b41f8dda0c0ccf9de8613"
 rust = [
   "src/writeq/execution.rs",
   "src/writeq/drain.rs",
@@ -374,6 +374,8 @@ rust = [
   "src/graph/graph/mutation_log.rs#consume_write_intent",
   "src/graph/graph/unflushed.rs#Graph::note_dead_lettered_intents",
   "src/graph/graph/unflushed.rs#Graph::intent_dead_lettered",
+  "src/graph/graph/unflushed.rs#Graph::mark_consumed_unsettled",
+  "src/graph/graph/unflushed.rs#Graph::settled_write",
   "src/store/flush.rs#FlushLoop::drain_and_flush",
   "src/store/sqlite/session_load.rs",
   "src/store/pg/session_load.rs",

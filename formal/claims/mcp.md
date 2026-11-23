@@ -120,8 +120,14 @@ PROVEN. Review then found the #346 reset still too late (in the worker's
 and moved it into the commit's critical section; it found the exactness
 claim needed scoping to a close whose final flush completes (one whose
 flush fails answers every set-aside write `close_unflushed`), and that
-the set of dead-lettered receipts now forgets a consumed one
-(`closeD_keptDropped`).
+the set of dead-lettered receipts grew for the life of the process. The
+first bound, forgetting a receipt at its write's consume
+(`closeD_keptDropped`, sound only in a model with no worker panic), was
+found by re-review to vouch for a dropped put when a lane worker panics
+after its commit and before its settle
+(`keptAtConsume_vouches_after_panic`); the set now forgets a receipt at
+its write's settle (`settlePrune_never_vouches_dropped`,
+`settlePrune_exact`), and no claim row depended on the consume-time rule.
 
 ## Summary
 

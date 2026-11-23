@@ -30,7 +30,7 @@
   theorems for close and crash accounting, and says a run of slow vector
   lookups holds every later first attempt until a write applies, not only the
   third. `scripts/formal/count-theorems.py` counts the theorems by the rule
-  `formal/README.md` states (2,478 with the #345 and #346 models below; the
+  `formal/README.md` states (2,486 with the #345 and #346 models below; the
   README said 2,393 for files it counts as 2,394).
 
 ### Fixed
