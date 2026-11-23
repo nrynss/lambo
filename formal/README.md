@@ -16,9 +16,11 @@ end results: the theorems that state a property of the Rust, or, for a
 finding, show where the Rust fell short. Each is named, so it can be read in
 its file. Most of a file's theorems are the lemmas those rest on, so how many
 theorems a file has says little about what it proves.[^count]
-`formal/audit/unreferenced-theorems.md` lists the theorems that no proof, docs
-anchor, claims ledger row, Rust test comment or audit line references, each
-with a first sort into keep, delete or unclear.
+`formal/audit/unreferenced-theorems.md` lists the theorems nothing references:
+no other proof uses or names it, and no `example`, docs anchor, claims ledger
+row, Rust comment or `#print axioms` line in `Audit.lean` cites it. Each is
+sorted into keep, deletion candidate or unclear, by the criteria at the top of
+the report.
 
 To check them yourself:
 

@@ -35,13 +35,20 @@ class and a one-line reason, from what the sources say about it:
   comment opens with a bold title (the models' mark for a result) or quotes
   the Rust or names a Rust test, or it is a closed statement about a
   concrete case;
-* (b) a leftover or superseded helper, a deletion candidate: a second proof
-  of a referenced theorem's statement, a short lemma with no doc comment, or
-  a history-layer stepping stone;
-* (c) unclear: anything else, typically a documented lemma that only other
-  doc comments mention.
+* (b) a deletion candidate, only when it is shown to be one: a referenced
+  theorem that stays states the same thing, or supersedes it (its name with
+  a current-model suffix, `foo` and `fooW`, or the counterpart its doc
+  comment names) and its doc comment does not state it as a result (a
+  finding's bold title keeps it in (a)); or it is a dead helper, an
+  undocumented `rfl` unfolding of a definition that nothing uses or names;
+* (c) unclear: anything else, such as an undocumented lemma that may be a
+  property in its own right (an asymmetry, an invariant) or a leftover.
 
-The classes are a first sort from those signals, for a person to confirm.
+Precedence: a same-statement twin (b); a result named in a header, the
+README or the CHANGELOG, or a bold title (a); a superseding counterpart (b);
+the other (a) criteria; a `@[simp]` lemma (c); a dead helper (b); the rest
+(c). The classes are a first sort from those signals, for a person to
+confirm.
 
 `--duplicates` lists theorems that state the same thing (the same `shape`:
 binders named by depth, universe parameters by position) in more than one
@@ -99,9 +106,10 @@ class Models:
     def __init__(self, repo, dump):
         self.repo = repo
         self.env = {}
-        for line in open(dump, encoding="utf-8"):
-            d = json.loads(line)
-            self.env[d["name"]] = d
+        with open(dump, encoding="utf-8") as fh:
+            for line in fh:
+                d = json.loads(line)
+                self.env[d["name"]] = d
         self.user = {n: d for n, d in self.env.items() if d["user"]}
         # The theorems count-theorems.py counts: a `theorem` line in a model file.
         files = {p.resolve() for p in ct.model_files(repo)}
@@ -302,7 +310,8 @@ def audit_refs(m):
     refs = defaultdict(set)
     audit = m.repo / "formal" / "LamboProofs" / "Audit.lean"
     for mm in re.finditer(r"^#print axioms (\S+)", audit.read_text(encoding="utf-8"), re.M):
-        n = "Lambo." + mm.group(1)
+        n = mm.group(1)
+        n = n if n.startswith("Lambo.") else "Lambo." + n
         if n in m.theorems:
             refs[n].add("Audit.lean")
     return refs
@@ -322,50 +331,72 @@ def doc_comment(src_lines, d):
 
 
 SUPERSEDING = ("W", "D", "Fixed", "_fixed", "Q", "R")
+COUNTERPART = re.compile(r"(?:[Cc]urrent counterparts?|[Ss]uperseded by|[Rr]eplaced by)[^`]{0,40}`([A-Za-z_][\w'.]*)`")
+RFL = re.compile(r":=\s*(?:by\s+)?rfl\s*$")
 
 
-def classify(m, n, d, src_lines, header, readme, changelog, doc_mentions, twins=()):
-    short = n.split(".")[-1]
+def local_name(n):
+    """`n` below its model namespace: `Cmd.mem_all` for `Lambo.Resolve.Cmd.mem_all`."""
+    ns = namespace_of(n)
+    return n.removeprefix(f"Lambo.{ns}.") if ns else n
+
+
+def counterpart(m, n, doc, referenced):
+    """A referenced theorem that supersedes `n`: its name with a current-model
+    suffix (`foo` and `fooW`), or one its doc comment names as its current
+    counterpart."""
+    for suf in SUPERSEDING:
+        if n + suf in m.theorems and referenced(n + suf):
+            return n + suf
+    ns = namespace_of(n)
+    for tok in COUNTERPART.findall(doc):
+        for cand in (f"Lambo.{ns}.{tok}", f"Lambo.{tok}"):
+            if cand in m.theorems and cand != n:
+                return cand
+    return None
+
+
+def classify(m, n, d, src_lines, header, readme, changelog, doc_mentions, twins=(),
+             referenced=lambda x: True):
+    """(class, reason) for an unreferenced theorem; see the module doc."""
+    short, local = n.split(".")[-1], local_name(n)
     if twins:
-        return "b", f"states the same as `{twins[0].removeprefix('Lambo.')}`, which is kept"
+        return "b", f"states the same as `{local_name(twins[0])}`, which stays and is referenced"
     path = module_path(m.repo, d["module"])
     rel = path.relative_to(m.repo / "formal" / "LamboProofs").as_posix()
     doc = doc_comment(src_lines, d)
-    ticked = f"`{short}`"
-    in_history = rel.endswith("History.lean")
-    if ticked in header:
+    ticks = {f"`{short}`", f"`{local}`"}
+    if any(t in header for t in ticks):
         return "a", f"named among the results in the header of `{rel}`"
-    if ticked in readme or f"`{namespace_of(n)}.{short}`" in readme:
+    if any(t in readme for t in ticks) or f"`{namespace_of(n)}.{local}`" in readme:
         return "a", "named as a result in `formal/README.md`"
-    if ticked in changelog:
+    if any(t in changelog for t in ticks):
         return "a", "named in `CHANGELOG.md` as what a change proved"
     if doc.lstrip().startswith("/-- **"):
         title = re.sub(r"\s+", " ", doc.lstrip()[4:].split("**")[1]).strip()
         return "a", f"its doc comment states it as a result: \"{title[:90]}\""
+    sup = counterpart(m, n, doc, referenced)
+    if sup:
+        return "b", f"superseded by `{local_name(sup)}`, its counterpart over the current model, which stays"
     if "∀" not in d["type"] and "forall" not in d["type"] and "->" not in d["type"]:
         return "a", "a closed statement about a concrete case (a worked example)"
+    if doc and ("Rust test" in doc or re.search(r'"[^"]{12,}"', doc)):
+        return "a", "its doc comment ties it to the Rust (quotes the source or names a Rust test)"
     above = src_lines[d["line"] - 2] if d["line"] >= 2 else ""
     if "@[simp" in src_lines[d["line"] - 1] or (above.startswith("@[") and "simp" in above):
         return "c", "a `@[simp]` lemma: `simp` may use it without naming it, so it may not be unused"
-    if in_history:
-        return "b", "history-layer stepping stone that nothing uses"
-    for suf in SUPERSEDING:
-        other = n + suf
-        if other in m.theorems:
-            return "b", f"superseded by `{short + suf}`, its counterpart over the current model"
+    body = "\n".join(src_lines[d["line"] - 1:d["span"][1]])
     span = d["span"][1] - d["span"][0] + 1
+    if not doc and RFL.search(body):
+        return "b", "a dead helper: an undocumented `rfl` unfolding of a definition that nothing uses or names"
     mentions = sorted(doc_mentions.get(short, set()) - {n})
-    if not doc and span <= 8:
-        return "b", f"short ({span}-line) lemma with no doc comment"
-    if doc and ("Rust test" in doc or re.search(r'"[^"]{12,}"', doc)):
-        return "a", "its doc comment ties it to the Rust (quotes the source or names a Rust test)"
     if mentions:
-        names = ", ".join(f"`{x.split('.')[-1]}`" for x in mentions[:2])
+        names = ", ".join(f"`{local_name(x)}`" for x in mentions[:2])
         return "c", f"documented; only the doc comment of {names} mentions it"
     if doc:
         first = re.sub(r"\s+", " ", doc.lstrip()[3:].split("-/")[0]).strip()
         return "c", f"documented but cited nowhere: \"{first[:90]}\""
-    return "c", f"undocumented {span}-line lemma"
+    return "c", f"undocumented {span}-line lemma, a property in its own right or a leftover"
 
 
 def main(argv=None):
@@ -425,8 +456,9 @@ def main(argv=None):
         p = module_path(repo, d["module"]).resolve()
         src = m.text[p]
         twins = sorted(x for x in shapes[d["shape"]] if x != n and any(refs[k].get(x) for k in SIGNALS))
-        cls, why = classify(m, n, d, src.split("\n"), header_of(src), readme, changelog, doc_mentions, twins)
-        per_file[rel].append((d["line"], n.split(".")[-1], cls, why))
+        cls, why = classify(m, n, d, src.split("\n"), header_of(src), readme, changelog, doc_mentions, twins,
+                            referenced=lambda x: any(refs[k].get(x) for k in SIGNALS))
+        per_file[rel].append((d["line"], local_name(n), cls, why))
         counts[(rel, cls)] += 1
 
     files = sorted({rel for rel, _ in counts})
@@ -443,14 +475,22 @@ def main(argv=None):
       "`lean:` anchor cites it, a claims ledger under `formal/claims/` names it with its model file, a "
       "comment in `src/` or `tests/` names it (as `Model.name`, or in backticks near a mention of its "
       "model file), or `Audit.lean` prints its axioms. The rest are listed below, each with a class:\n")
-    w("* **(a)** a standalone property worth keeping, ideally cited from a test, doc or ledger;")
-    w("* **(b)** a leftover or superseded helper, a deletion candidate;")
-    w("* **(c)** unclear.\n")
-    w("The class comes from what the sources say about the theorem (named as a result in its file's header, "
-      "`formal/README.md` or the CHANGELOG; a bold-titled doc comment, or one that quotes the Rust or names a "
-      "Rust test; a closed concrete case; a short undocumented lemma; a history-layer stepping stone; a counterpart that supersedes it) and is a first "
-      "sort for the owner to confirm. `Drain/History.lean` describes no current Rust and is kept as the "
-      "evidence for its findings; its (b) entries are listed for completeness.\n")
+    w("* **(a)** a standalone property worth keeping, ideally cited from a test, doc or ledger. Criteria: "
+      "its file's header, `formal/README.md` or the CHANGELOG names it as a result; its doc comment opens "
+      "with a bold title (the models' mark for a result), quotes the Rust or names a Rust test; or it is a "
+      "closed statement about a concrete case.")
+    w("* **(b)** a deletion candidate, only when shown to be one. Criteria: a referenced theorem that stays "
+      "states the same thing, or supersedes it (its name with a current-model suffix such as `fooW`, or "
+      "the current counterpart its doc comment names) and it is not stated as a result (a bold-titled doc "
+      "comment, such as a finding's, keeps it in (a)); or it is a dead helper, an undocumented `rfl` "
+      "unfolding of a definition that nothing uses or names.")
+    w("* **(c)** unclear: anything else, such as an undocumented lemma that may be a property in its own "
+      "right (an asymmetry, an invariant) or a leftover, or a `@[simp]` lemma `simp` may use unnamed.\n")
+    w("Precedence: a same-statement twin (b); a result named in a header, the README or the CHANGELOG, "
+      "or a bold title (a); a superseding counterpart (b); the other (a) criteria; a `@[simp]` lemma (c); "
+      "a dead helper (b); the rest (c). The result is a first sort for the owner to confirm. `Drain/History.lean` describes no current Rust "
+      "and is kept as the evidence for its findings. Names are given below their model's namespace "
+      "(`Cmd.mem_all` is `Lambo.Resolve.Cmd.mem_all`).\n")
     w("## Summary\n")
     w(f"{total['total']} theorems in {len(files)} model files; {total['a'] + total['b'] + total['c']} "
       f"unreferenced: {total['a']} (a), {total['b']} (b), {total['c']} (c).\n")
