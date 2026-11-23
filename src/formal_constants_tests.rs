@@ -440,11 +440,12 @@ fn supersession() {
     use crate::canon::formal_pins::{MIN_COVERAGE, MIN_DISTINCT};
     use crate::graph::suspected::replacement::REPLACEMENT_CANDIDATE_LIMIT;
 
-    let lean = Lean::new(model!("Supersession"));
+    let suspected = Lean::new(model!("Supersession/Suspected"));
     assert_pin!(
         REPLACEMENT_CANDIDATE_LIMIT,
-        lean.def("limit", "Nat").nat().to::<usize>()
+        suspected.def("limit", "Nat").nat().to::<usize>()
     );
+    let lean = Lean::new(model!("Supersession/Pass"));
     // Stage 2's distinct origins.
     let since = lean.captures(
         "def stage2Since (ev : Evidence) (window since : Int) : Bool :=

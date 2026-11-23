@@ -18,7 +18,9 @@ import LamboProofs.Fusion
 import LamboProofs.Confidence
 import LamboProofs.Canonical
 import LamboProofs.Dispatch
-import LamboProofs.Supersession
+import LamboProofs.Supersession.Suspected
+import LamboProofs.Supersession.Pass
+import LamboProofs.Supersession.Recall
 import LamboProofs.Policy.Sessions
 import LamboProofs.Policy.Support
 import LamboProofs.Policy.Score
