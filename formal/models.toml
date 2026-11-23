@@ -700,8 +700,8 @@ rust = [
 # Serve preflight and main's routing.
 [[model]]
 lean = "formal/LamboProofs/Resolve/Serve.lean"
-read_against = "e2c2a280"
-read_digest = "v2:sha256:5b115a88c92d6e91b3222ef657a01d4b3dd1fc1193a1bccaf8d7f6e2de4254bf"
+read_against = "bff83b0f"
+read_digest = "v2:sha256:773626edac60686ba7c979291be256cd2acab7e2e54b667b4450ddaea9027986"
 rust = [
   "src/main.rs",
   "src/mcp/serve/pinned.rs#pin_sessions",
@@ -721,8 +721,8 @@ rust = [
 # The --auth-token parsers and what their refusals print (#315).
 [[model]]
 lean = "formal/LamboProofs/Resolve/Auth.lean"
-read_against = "e2c2a280"
-read_digest = "v2:sha256:464949b5492b025fdc51d9b96c4a356f8db227397b1c6d36e5b55d2477d7ae0d"
+read_against = "bff83b0f"
+read_digest = "v2:sha256:72edc85c33ace56bca9bce909bd9bad67a62f1178fa955f63d941276d2652fe0"
 rust = [
   "src/main.rs",
   "src/mcp/serve/http_guards.rs#SecretToken",
@@ -732,8 +732,8 @@ rust = [
 # The per-command clap rules.
 [[model]]
 lean = "formal/LamboProofs/Resolve/Args.lean"
-read_against = "e2c2a280"
-read_digest = "v2:sha256:2935c702bdab3ede351a56974f5f43567def412520dc740c5a1dd8187303ef41"
+read_against = "bff83b0f"
+read_digest = "v2:sha256:4e6341463e6fcf28510fca45d5d48922a75ae94a781aef257c57738504b31d82"
 rust = [
   "src/main.rs",
 ]
