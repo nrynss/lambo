@@ -152,12 +152,6 @@ theorem refuses_self_loop (E P : ι → ι → Prop) (s : ι) (hp : P s s)
     (hcheck : ∀ s t, P s t → ¬ Reach (Combined E P) t s) : False :=
   hcheck s s hp (Reach.refl s)
 
-/-- On the `Causal`/`Dependency` graph the write gates keep acyclic, no
-concept depends on itself: `closing_edge` refuses the edge `s → s` as a
-one-edge cycle. -/
-theorem Acyclic.irrefl {R : ι → ι → Prop} (h : Acyclic R) (x : ι) : ¬ R x x :=
-  fun hxx => h x x hxx (Reach.refl x)
-
 /-- **No mutual dependency.** On the graph the write gates keep acyclic, if
 `x` depends on `y` then `y` does not depend on `x`. -/
 theorem no_mutual_dependency {R : ι → ι → Prop} (h : Acyclic R) {x y : ι} (hxy : R x y) :

@@ -46,7 +46,7 @@ oracle" below). It keeps
 module is not rebuilt. Besides the checkout pin `ci.yml` already uses, the only
 action is `actions/cache`, pinned by commit.
 
-[^count]: For the record: 2,412 theorems across 54 model files, and 18 shared
+[^count]: For the record: 2,398 theorems across 54 model files, and 18 shared
     lemmas about lists in `LamboProofs/Lib/List.lean`. The count is of `theorem`
     declarations in the model files (every `.lean` file under `LamboProofs/`,
     subdirectories included, other than `Audit.lean` and the shared lemmas under

@@ -34,7 +34,7 @@ the three conditions for one concept, before the per-sweep cap is applied:
   from the score cut and from nothing else.
 * `contradiction_keeps_nothing_alive`: connectivity is the only structural
   protection, and `Contradicts` edges do not count toward it.
-* `taken_le_budget`, `cap_ge_floor`: a sweep collects at most its cap.
+* `cap_ge_floor`: the collection cap is never below `MIN_COLLECT_CAP`.
 * `bump_mono`, `bump_never_resets`: `gc_survived` only grows.
 * `idle_never_sweeps`: "an idle session never sweeps on time alone".
 
@@ -184,27 +184,12 @@ theorem only_contradictions_is_orphan :
 /-- `collection_cap`: the larger of the floor and the fractional cap. -/
 def collectionCap (minCollectCap fractional : Nat) : Nat := max minCollectCap fractional
 
-/-- `collection_cap` is never below `MIN_COLLECT_CAP`, so a sweep can always
-collect at least that many. -/
+/-- `collection_cap` is never below `MIN_COLLECT_CAP`: the per-sweep cap always
+allows at least that many collections. -/
 theorem cap_ge_floor (minCollectCap fractional : Nat) :
     minCollectCap ≤ collectionCap minCollectCap fractional := by
   unfold collectionCap
   exact Nat.le_max_left minCollectCap fractional
-
-/-- `candidates[..take]` with `take = min(len, budget)`: a sweep removes at
-most its budget, and what it removes is a prefix of the candidate order
-(orphans, then disconnected components, then the score cut's weakest first). -/
-theorem taken_le_budget {ι : Type} (candidates : List ι) (budget : Nat) :
-    (candidates.take (min candidates.length budget)).length ≤ budget := by
-  first
-    | (rw [List.length_take]; omega)
-    | exact Nat.le_trans (List.length_take_le _ _) (Nat.min_le_right _ _)
-
-/-- A GC sweep defers no candidate exactly when the candidates fit in its
-budget. -/
-theorem none_deferred_iff {ι : Type} (candidates : List ι) (budget : Nat) :
-    candidates.length - min candidates.length budget = 0 ↔ candidates.length ≤ budget := by
-  omega
 
 /-! ## Survivor bumps -/
 

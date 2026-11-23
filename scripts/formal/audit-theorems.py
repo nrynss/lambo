@@ -380,7 +380,7 @@ RFL = re.compile(r":=\s*(?:by\s+)?rfl\s*$")
 
 
 def local_name(n):
-    """`n` below its model namespace: `Acyclic.irrefl` for `Lambo.Cite.Acyclic.irrefl`."""
+    """`n` below its model namespace: `Reach.trans` for `Lambo.Cite.Reach.trans`."""
     ns = namespace_of(n)
     return n.removeprefix(f"Lambo.{ns}.") if ns else n
 
@@ -581,7 +581,7 @@ def main(argv=None):
       "or a bold title (a); a superseding counterpart (b); the other (a) criteria; a `@[simp]` lemma (c); "
       "a dead helper (b); a documented theorem (a); the rest (c). The result is a first sort for the owner to confirm. `Drain/History.lean` describes no current Rust "
       "and is kept as the evidence for its findings. Names are given below their model's namespace "
-      "(`Acyclic.irrefl` is `Lambo.Cite.Acyclic.irrefl`).\n")
+      "(`Reach.trans` is `Lambo.Cite.Reach.trans`).\n")
     w("## Summary\n")
     w(f"{total['total']} theorems in {len(files)} model files; {total['a'] + total['b'] + total['c']} "
       f"unreferenced: {total['a']} (a), {total['b']} (b), {total['c']} (c).\n")

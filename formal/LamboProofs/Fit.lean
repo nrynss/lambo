@@ -60,7 +60,7 @@ scope)`. Elements are chars, so every cut is a char boundary; the estimator
   the marker alone. Cuts are `content_cuts` (`0`, then each position whose
   preceding char is not whitespace). A form whose cut `0` does not fit is
   skipped; the first whose cut `0` fits is binary-searched (`bsearch`, the
-  Rust loop with enough fuel, `bsearch_fuel`) and returned; nothing follows
+  Rust loop with enough fuel) and returned; nothing follows
   it. If no form's cut `0` fits, the context is empty.
 
 Exact arithmetic: `fits t m = t < usize::MAX ∧ t ≤ m` on naturals, with
@@ -410,7 +410,7 @@ while hi - lo > 1 {
 ```
 
 `fuel` bounds the iterations; each one shrinks `hi - lo`, so
-`fuel = cuts.len()` never runs out (`bsearch_fuel`). -/
+`fuel = cuts.len()` never runs out. -/
 def bsearch (p : Nat → Bool) : Nat → Nat → Nat → Nat
   | 0, lo, _ => lo
   | fuel + 1, lo, hi =>
@@ -520,31 +520,6 @@ theorem bsearch_spec (p : Nat → Bool) (n : Nat) :
           | true => exact absurd hb hm
         have := ih lo (lo + (hi - lo) / 2) (by omega) (by omega) h3 (Or.inr hf)
         exact ⟨this.1, by omega, this.2.2.1, this.2.2.2⟩
-
-/-- `fit.rs`'s binary search with `fuel = cuts.len()` gives the unbounded
-`while` loop's answer: the fuel never runs out. -/
-theorem bsearch_fuel (p : Nat → Bool) :
-    ∀ (f f' lo hi : Nat), hi - lo ≤ f + 1 → hi - lo ≤ f' + 1 →
-      bsearch p f lo hi = bsearch p f' lo hi := by
-  intro f
-  induction f with
-  | zero =>
-    intro f' lo hi h1 h2
-    cases f' with
-    | zero => rfl
-    | succ g => simp [bsearch, show hi - lo ≤ 1 by omega]
-  | succ k ih =>
-    intro f' lo hi h1 h2
-    cases f' with
-    | zero => simp [bsearch, show hi - lo ≤ 1 by omega]
-    | succ g =>
-      simp only [bsearch]
-      by_cases hs : hi - lo ≤ 1
-      · simp [hs]
-      · rw [ite_eq_right hs, ite_eq_right hs]
-        split
-        · exact ih g _ _ (by omega) (by omega)
-        · exact ih g _ _ (by omega) (by omega)
 
 /-- Downward closed below `n`: if index `i + 1` fits, so does `i`. -/
 def DownBelow (p : Nat → Bool) (n : Nat) : Prop := ∀ i, i + 1 < n → p (i + 1) = true → p i = true
@@ -1509,21 +1484,6 @@ def jEnv (est : List Nat → Nat) : Env Nat := ⟨est, [10, 10], [1], [10], fun 
 
 /-- Length up to `J`, then `10^k` more. -/
 def jumpEst (J k : Nat) (s : List Nat) : Nat := if s.length ≤ J then s.length else 10 ^ k + s.length
-
-/-- The counterexample estimator (length up to `J`, `10^k` more above) is
-monotone in the length: monotonicity alone does not make `fit`'s cut safe. -/
-theorem jumpEst_mono (J k : Nat) {s t : List Nat} (h : s.length ≤ t.length) :
-    jumpEst J k s ≤ jumpEst J k t := by
-  unfold jumpEst
-  by_cases hs : s.length ≤ J
-  · rw [ite_eq_left hs]
-    by_cases ht : t.length ≤ J
-    · rw [ite_eq_left ht]; exact h
-    · rw [ite_eq_right ht]; exact Nat.le_trans h (Nat.le_add_left _ _)
-  · rw [ite_eq_right hs]
-    have ht : ¬ t.length ≤ J := by omega
-    rw [ite_eq_right ht]
-    exact Nat.add_le_add_left h _
 
 /-- Ten content units, a one-unit label, no warnings. -/
 def jBlockA : Block Nat := ⟨List.replicate 10 5, [3], [], jMark 1⟩

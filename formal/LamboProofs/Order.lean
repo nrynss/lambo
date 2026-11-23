@@ -31,14 +31,11 @@ The last section is a **design model** of issue #280 (open, no Rust yet): a
 relevance-gated Canonical-first order, `gatedRankMembers`, next to today's,
 which it leaves unchanged. Its readings of the issue (the gate compares query
 relevance, clears at or above, `none` is off, banners not modelled) are listed
-there. Results: off (or a gate of 0) is today's order (`gatedRankMembers_off`,
-`gatedRankMembers_zero`); a Canonical member at or above the gate still
-precedes every non-promoted member (`gatedRankMembers_promoted_first`,
-`gatedRankMembers_canonical_first`); below the gate it is ordered by score
-like any other member (`gatedRankMembers_below_gate`,
-`gatedRankMembers_below_gate_score`); a gate nobody clears is the plain score
-order (`gatedRankMembers_unreachable`); and the order is still lawful, strict
-and deterministic (`gatedRankMembers_lawful`, `gatedRankMembers_separating`,
+there. Results: off is today's order (`gatedRankMembers_off`); a Canonical member
+at or above the gate still precedes every non-promoted member
+(`gatedRankMembers_promoted_first`); below the gate it is ordered by score
+like any other member (`gatedRankMembers_below_gate_score`); and the order is
+still lawful, strict and deterministic (`gatedRankMembers_lawful`, `gatedRankMembers_separating`,
 `gatedRankMembers_sorted_unique`). `gatedRankMembers_below_gate_score` is also
 the statement that the gate breaks spec §10's "always promoted first".
 
@@ -111,18 +108,6 @@ theorem Lawful.gt_of_lt (h : Lawful cmp) {a b : α} (hab : cmp a b = .lt) : cmp 
   have hs := h.swap a b
   rw [hab] at hs
   exact hs
-
-/-- A lawful separating comparator is a strict total order: of two distinct
-elements exactly one is `Less` than the other (`gt_of_lt` gives "not both"). -/
-theorem Lawful.strict_total (h : Lawful cmp) (hsep : Separating cmp) {a b : α} (hne : a ≠ b) :
-    cmp a b = .lt ∨ cmp b a = .lt := by
-  have hs := h.swap a b
-  have he := hsep a b
-  generalize cmp a b = o at hs he ⊢
-  cases o
-  · exact Or.inl rfl
-  · exact absurd (he rfl) hne
-  · exact Or.inr hs
 
 end Laws
 
@@ -429,20 +414,6 @@ theorem sorted_unique (h : Lawful cmp) :
           | inr m => exact m
       rw [ih t₂ h₁'.2 h₂'.2 htail]
 
-/-- A list strictly sorted by a lawful comparator, as `rank_members` sorts,
-holds no member twice. -/
-theorem sorted_nodup (h : Lawful cmp) {l : List α}
-    (hs : l.Pairwise (fun a b => cmp a b = .lt)) : l.Pairwise (fun a b => a ≠ b) := by
-  induction l with
-  | nil => exact List.Pairwise.nil
-  | cons a t ih =>
-    have hs' := List.pairwise_cons.mp hs
-    refine List.pairwise_cons.mpr ⟨?_, ih hs'.2⟩
-    intro x hx hax
-    have lt : cmp a x = .lt := hs'.1 x hx
-    rw [← hax, h.refl a] at lt
-    exact absurd lt (by decide)
-
 end Sorted
 
 /-! ## Gated Canonical-first (#280, design model)
@@ -500,30 +471,8 @@ def gatedRankMembers (isCanonical : ι → Bool) (rel : ι → Nat) (gate : Opti
     ι → ι → Ordering :=
   rankMembers (promoted isCanonical rel gate) scoreCmp score keyCmp key idCmp
 
-/-- Under #280's gated order (a design, not yet in the Rust), only a Canonical
-member is ever promoted. -/
-theorem promoted_canonical {isCanonical : ι → Bool} {rel : ι → Nat} {gate : Option Nat}
-    {i : ι} (h : promoted isCanonical rel gate i = true) : isCanonical i = true := by
-  unfold promoted at h
-  cases hc : isCanonical i
-  · rw [hc, Bool.false_and] at h
-    exact absurd h (by decide)
-  · rfl
-
-/-- #280's gated order (a design): raising the gate only demotes; a member
-promoted under a gate is promoted under every lower one. -/
-theorem clearsGate_mono {g g' rel : Nat} (hle : g ≤ g')
-    (h : clearsGate (some g') rel = true) : clearsGate (some g) rel = true := by
-  simp only [clearsGate, decide_eq_true_eq] at h ⊢
-  omega
-
 theorem promoted_off (isCanonical : ι → Bool) (rel : ι → Nat) :
     promoted isCanonical rel none = isCanonical := by
-  funext i
-  simp [promoted, clearsGate]
-
-theorem promoted_zero (isCanonical : ι → Bool) (rel : ι → Nat) :
-    promoted isCanonical rel (some 0) = isCanonical := by
   funext i
   simp [promoted, clearsGate]
 
@@ -536,35 +485,6 @@ theorem gatedRankMembers_off (isCanonical : ι → Bool) (rel : ι → Nat)
       = rankMembers isCanonical scoreCmp score keyCmp key idCmp := by
   unfold gatedRankMembers
   rw [promoted_off]
-
-/-- #280's gated order (a design): a gate at `0` is off, giving today's
-`rank_members` order. -/
-theorem gatedRankMembers_zero (isCanonical : ι → Bool) (rel : ι → Nat)
-    (scoreCmp : σ → σ → Ordering) (score : ι → σ) (keyCmp : κ → κ → Ordering)
-    (key : ι → Option κ) (idCmp : ι → ι → Ordering) :
-    gatedRankMembers isCanonical rel (some 0) scoreCmp score keyCmp key idCmp
-      = rankMembers isCanonical scoreCmp score keyCmp key idCmp := by
-  unfold gatedRankMembers
-  rw [promoted_zero]
-
-/-- #280's gated order (a design): a gate no member clears gives today's order
-without the Canonical partition (score, then `tie_break_by_key`). -/
-theorem gatedRankMembers_unreachable (isCanonical : ι → Bool) (rel : ι → Nat) {g : Nat}
-    (hg : ∀ i, rel i < g)
-    (scoreCmp : σ → σ → Ordering) (score : ι → σ) (keyCmp : κ → κ → Ordering)
-    (key : ι → Option κ) (idCmp : ι → ι → Ordering) :
-    gatedRankMembers isCanonical rel (some g) scoreCmp score keyCmp key idCmp
-      = scoreThenTie scoreCmp score keyCmp key idCmp := by
-  funext a b
-  have hp : ∀ i, promoted isCanonical rel (some g) i = false := by
-    intro i
-    have := hg i
-    simp [promoted, clearsGate]
-    omega
-  show (boolCmp (promoted isCanonical rel (some g) b) (promoted isCanonical rel (some g) a)).then
-      (scoreThenTie scoreCmp score keyCmp key idCmp a b) = _
-  rw [hp a, hp b]
-  rfl
 
 /-- **Still a lawful order.** -/
 theorem gatedRankMembers_lawful (isCanonical : ι → Bool) (rel : ι → Nat) (gate : Option Nat)
@@ -609,17 +529,6 @@ theorem gatedRankMembers_promoted_first (isCanonical : ι → Bool) (rel : ι �
   · simp [promoted, ha, hg]
   · exact hb
 
-/-- #280's gated order (a design, not yet in the Rust): a Canonical member
-that clears the gate orders before every non-Canonical member. -/
-theorem gatedRankMembers_canonical_first (isCanonical : ι → Bool) (rel : ι → Nat)
-    (gate : Option Nat) (scoreCmp : σ → σ → Ordering) (score : ι → σ)
-    (keyCmp : κ → κ → Ordering) (key : ι → Option κ) (idCmp : ι → ι → Ordering) {a b : ι}
-    (ha : isCanonical a = true) (hg : clearsGate gate (rel a) = true)
-    (hb : isCanonical b = false) :
-    gatedRankMembers isCanonical rel gate scoreCmp score keyCmp key idCmp a b = .lt :=
-  gatedRankMembers_promoted_first isCanonical rel gate scoreCmp score keyCmp key idCmp ha hg
-    (by simp [promoted, hb])
-
 /-- Two members neither of which is promoted are ordered by score, then
 tie-break, exactly as `rescore` and phase-1 `rank` order them. -/
 theorem gatedRankMembers_unpromoted (isCanonical : ι → Bool) (rel : ι → Nat)
@@ -632,19 +541,6 @@ theorem gatedRankMembers_unpromoted (isCanonical : ι → Bool) (rel : ι → Na
       (scoreThenTie scoreCmp score keyCmp key idCmp a b) = _
   rw [ha, hb]
   rfl
-
-/-- **Below the gate, Canonical is ordered like any other member** under
-#280's gated order (a design, not yet in the Rust): a Canonical member below
-the gate compares with a non-Canonical one exactly as two non-Canonical
-members with the same scores and keys would. -/
-theorem gatedRankMembers_below_gate (isCanonical : ι → Bool) (rel : ι → Nat)
-    (gate : Option Nat) (scoreCmp : σ → σ → Ordering) (score : ι → σ)
-    (keyCmp : κ → κ → Ordering) (key : ι → Option κ) (idCmp : ι → ι → Ordering) {a b : ι}
-    (hg : clearsGate gate (rel a) = false) (hb : isCanonical b = false) :
-    gatedRankMembers isCanonical rel gate scoreCmp score keyCmp key idCmp a b
-      = scoreThenTie scoreCmp score keyCmp key idCmp a b :=
-  gatedRankMembers_unpromoted isCanonical rel gate scoreCmp score keyCmp key idCmp
-    (by simp [promoted, hg]) (by simp [promoted, hb])
 
 /-- In particular a non-Canonical member with the higher score orders before a
 Canonical member below the gate: the order today's `rank_members` never
