@@ -5975,4 +5975,518 @@ example :
 
 end Examples
 
+/-! ## Dead-lettered batches at close (#345)
+
+`closeW` takes how the final flush ended (`CloseFlush`) and nothing else, and
+answers every set-aside write `intent_durable` when it is `.durable`: in the
+Rust, `Memory::close` passes `CloseFlush::Durable` when the final flush
+completes and when the tail is empty ("every set-aside intent was taken by an
+earlier flush, so it is durable"). Neither says the set-aside write's put
+reached the store. A background flush that the store refuses with a
+constraint violation, or a value it cannot hold, dead-letters its batch: the
+whole of `pending`, dropped while the session goes on (`Flush.lean`,
+`constraint_dead_lettered`, `value_rejected_dead_letters`). That batch can
+hold the `PutWriteIntent` of a write that is still unsettled (a held,
+`pending_replay` one, or one still queued), and then nothing durable backs
+its `intent_durable`.
+
+This section adds the flush history the close ran after, and states the
+close's answer against it.
+
+* **The history** (`Landed`, one per batch of the session's log,
+  `sessLog all st`, in log order): `committed` or `deadLettered`. It is the
+  history as a close whose final flush completed (or found an empty tail)
+  sees it: every batch of the log has left the process, through a background
+  flush, the stop's push-back and the final flush, or a dead letter
+  (`hist.length = (sessLog all st).length`). A flush carries whole batches
+  and a dead letter drops all of `pending`, so how the batches were grouped
+  into flushes does not change which puts reached the store; the model keeps
+  only each batch's fate. A degraded session's drops and a fenced session's
+  drops are not in it: the close answers both `close_unflushed` whatever the
+  history (`CloseFlush::Incomplete`, `Memory::close`, `close_fenced`).
+* **"Durable" means committed** (`committedPuts`): the write's put is in a
+  batch the store committed, not merely one a flush drained.
+* **The current rule is wrong** (`closeW_vouches_dead_lettered`, a concrete
+  case, and `closeW_vouches_dead_letteredW`, every reachable session): a
+  set-aside write whose put a dead letter dropped answers `intent_durable` at
+  a close whose flush completed, and its put is not committed.
+* **The fixed rule** (`closeD`, `settleDeferredD`; Rust: the flush records
+  the receipt ids of the puts in every batch it dead-letters,
+  `Graph::note_dead_lettered_intents`, and `settle_deferred` answers such a
+  receipt `close_unflushed` even under `CloseFlush::Durable`): a set-aside
+  write answers `intent_durable` only when the flush ended `.durable` and its
+  put is not among the dead-lettered ones (`flushFor`). It is exact, not
+  conservative: `closeD_durable_iff` (a set-aside write answers
+  `intent_durable` exactly when its put is committed), with
+  `closeD_vouches_only_committed` and `closeD_never_vouches_dropped`, and
+  `shutdown_no_silent_lossD`, the accounting of `shutdown_no_silent_lossW`
+  with the dead-lettered writes moved to `close_unflushed`. A retried close
+  keeps the rule (`closeD_retryD`): it upgrades `close_unflushed` only for a
+  write whose put was not dead-lettered. Where no batch was dead-lettered
+  the fixed close is the old one (`closeD_agrees`).
+
+Exactness rests on the receipt ids of the puts being distinct
+(`(all.map (·.key)).Nodup`; the Rust's ids are unique per process and the put
+is an upsert on the id), and on the worker's batches carrying no put
+(`runW_noPut`). -/
+
+/-- How one batch of the session's log left the process before the close:
+committed by a flush (a background one or the close's final one), or
+dropped as a dead letter. -/
+inductive Landed where
+  | committed
+  | deadLettered
+  deriving DecidableEq, Repr
+
+/-- The receipt ids whose `PutWriteIntent` is in batch `b`. -/
+def putKeys (b : Batch) : List Key :=
+  b.filterMap (fun m => match m with
+    | .put j => some j.key
+    | _ => none)
+
+/-- The receipt ids whose put is in a batch of `log` that `hist` (one fate per
+batch, in log order) says landed `f`. -/
+def keysLanded (log : List Batch) (hist : List Landed) (f : Landed) : List Key :=
+  ((log.zip hist).filter (fun p => decide (p.2 = f))).flatMap (fun p => putKeys p.1)
+
+/-- The puts a dead letter dropped: what the Rust's flush records
+(`Graph::note_dead_lettered_intents`). -/
+def droppedPuts (log : List Batch) (hist : List Landed) : List Key :=
+  keysLanded log hist .deadLettered
+
+/-- The puts the store committed. -/
+def committedPuts (log : List Batch) (hist : List Landed) : List Key :=
+  keysLanded log hist .committed
+
+/-- The session's whole log: admission's puts, then the workers' batches. -/
+def sessLog (all : List Job) (st : WS) : List Batch := admitLog all ++ st.log
+
+/-- The flush outcome the fixed close settles receipt `k` by: a write whose
+put a dead letter dropped is settled as after an incomplete flush. -/
+def flushFor (flush : CloseFlush) (dropped : List Key) (k : Key) : CloseFlush :=
+  if k ∈ dropped then .incomplete else flush
+
+/-- `settle_deferred` after #345: each set-aside receipt by `flushFor`. -/
+def settleDeferredD (flush : CloseFlush) (dropped : List Key) (now : Int) (ids : List Key)
+    (s : RStore) : RStore :=
+  ids.foldl (fun s r => update s r (deferEntry (flushFor flush dropped r) now)) s
+
+/-- `close()` after #345: `closeW` with the dead-lettered puts. -/
+def closeD (flush : CloseFlush) (dropped : List Key) (now : Int) (st : WS) : RStore :=
+  settleDeferredD flush dropped now (deferredW st) st.store
+
+/-! ### The history's puts -/
+
+theorem keysLanded_cons (b : Batch) (log : List Batch) (f : Landed) (hist : List Landed)
+    (g : Landed) :
+    keysLanded (b :: log) (f :: hist) g =
+      (if f = g then putKeys b else []) ++ keysLanded log hist g := by
+  unfold keysLanded
+  by_cases h : f = g <;> simp [h]
+
+theorem mem_putKeys {b : Batch} {j : Job} (h : Mut.put j ∈ b) : j.key ∈ putKeys b :=
+  List.mem_filterMap.mpr ⟨_, h, rfl⟩
+
+theorem keysLanded_sub : ∀ (log : List Batch) (hist : List Landed) (g : Landed) (k : Key),
+    k ∈ keysLanded log hist g → k ∈ log.flatMap putKeys
+  | [], _, _, _, h => by simp [keysLanded] at h
+  | _ :: _, [], _, _, h => by simp [keysLanded] at h
+  | b :: log, f :: hist, g, k, h => by
+    rw [keysLanded_cons] at h
+    rw [List.flatMap_cons]
+    rcases List.mem_append.mp h with h | h
+    · split at h
+      · exact List.mem_append_left _ h
+      · simp at h
+    · exact List.mem_append_right _ (keysLanded_sub log hist g k h)
+
+/-- With distinct put ids, no put is both committed and dead-lettered. -/
+theorem keysLanded_disjoint : ∀ (log : List Batch) (hist : List Landed),
+    (log.flatMap putKeys).Nodup → ∀ k, k ∈ committedPuts log hist → k ∉ droppedPuts log hist
+  | [], _, _, _, h, _ => by simp [committedPuts, keysLanded] at h
+  | _ :: _, [], _, _, h, _ => by simp [committedPuts, keysLanded] at h
+  | b :: log, f :: hist, hnd, k, hc, hd => by
+    unfold committedPuts at hc
+    unfold droppedPuts at hd
+    rw [List.flatMap_cons] at hnd
+    obtain ⟨_, hrest, hdisj⟩ := List.nodup_append.mp hnd
+    rw [keysLanded_cons] at hc hd
+    rcases List.mem_append.mp hc with hc | hc <;> rcases List.mem_append.mp hd with hd | hd
+    · split at hc
+      · split at hd
+        · rename_i h1 h2; rw [h1] at h2; cases h2
+        · simp at hd
+      · simp at hc
+    · split at hc
+      · exact hdisj _ hc _ (keysLanded_sub log hist _ k hd) rfl
+      · simp at hc
+    · split at hd
+      · exact hdisj _ hd _ (keysLanded_sub log hist _ k hc) rfl
+      · simp at hd
+    · exact keysLanded_disjoint log hist hrest k hc hd
+
+theorem landed_of_mem : ∀ (log : List Batch) (hist : List Landed), hist.length = log.length →
+    ∀ b ∈ log, ∃ f, (b, f) ∈ log.zip hist
+  | [], _, _, _, hb => by simp at hb
+  | _ :: _, [], h, _, _ => by simp at h
+  | c :: log, f :: hist, h, b, hb => by
+    rcases List.mem_cons.mp hb with rfl | hb
+    · exact ⟨f, by simp⟩
+    · obtain ⟨g, hg⟩ := landed_of_mem log hist (by simpa using h) b hb
+      exact ⟨g, by simp [hg]⟩
+
+theorem mem_keysLanded {log : List Batch} {hist : List Landed} {b : Batch} {f : Landed} {j : Job}
+    (hb : (b, f) ∈ log.zip hist) (hj : Mut.put j ∈ b) : j.key ∈ keysLanded log hist f :=
+  List.mem_flatMap.mpr ⟨(b, f), List.mem_filter.mpr ⟨hb, by simp⟩, mem_putKeys hj⟩
+
+theorem putKeys_admitLog : ∀ (all : List Job), (admitLog all).flatMap putKeys = all.map (·.key)
+  | [] => rfl
+  | j :: js => by
+    have h : admitLog (j :: js) = [Mut.put j] :: admitLog js := rfl
+    rw [h, List.flatMap_cons, putKeys_admitLog js]
+    rfl
+
+theorem putKeys_noPut (log : List Batch) (h : NoPut log.flatten) : log.flatMap putKeys = [] := by
+  apply List.eq_nil_iff_forall_not_mem.mpr
+  intro k hk
+  obtain ⟨b, hb, hk⟩ := List.mem_flatMap.mp hk
+  obtain ⟨m, hm, he⟩ := List.mem_filterMap.mp hk
+  cases m with
+  | put j => exact h _ (List.mem_flatten.mpr ⟨b, hb, hm⟩) j rfl
+  | write _ => simp at he
+  | consume _ _ => simp at he
+
+/-- The current worker's batches carry no put. -/
+theorem runW_noPut (c : Caps) (sz : Job → Nat) (now : Int) (all : List Job) (evs : List Ev) :
+    NoPut (runW c sz now (WS.init (admitStore all)) evs).log.flatten := by
+  intro m hm k he
+  obtain ⟨b, hb, hmb⟩ := List.mem_flatten.mp hm
+  obtain ⟨j', rr, rfl⟩ := runW_log_refines c sz now evs (WS.init (admitStore all))
+    (by intro b hb; simp [WS.init] at hb) b hb
+  rcases workerStep_keys hmb with h | ⟨t, h⟩ <;> rw [h] at he <;> cases he
+
+/-- Every put of the session's log has its own receipt id. -/
+theorem sessLog_puts_nodup {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hkeys : (all.map (·.key)).Nodup) : ((sessLog all st).flatMap putKeys).Nodup := by
+  subst hst
+  rw [sessLog, List.flatMap_append, putKeys_admitLog,
+    putKeys_noPut _ (runW_noPut c sz now all evs), List.append_nil]
+  exact hkeys
+
+/-- Once every batch has a fate, an admitted job's put is committed or
+dead-lettered. -/
+theorem put_landed {all : List Job} {st : WS} {hist : List Landed}
+    (hcov : hist.length = (sessLog all st).length) {j : Job} (hj : j ∈ all) :
+    j.key ∈ committedPuts (sessLog all st) hist ∨ j.key ∈ droppedPuts (sessLog all st) hist := by
+  have hb : [Mut.put j] ∈ sessLog all st :=
+    List.mem_append_left _ (List.mem_map.mpr ⟨j, hj, rfl⟩)
+  obtain ⟨f, hf⟩ := landed_of_mem _ hist hcov _ hb
+  cases f with
+  | committed => exact Or.inl (mem_keysLanded hf List.mem_cons_self)
+  | deadLettered => exact Or.inr (mem_keysLanded hf List.mem_cons_self)
+
+/-- With every batch landed and distinct put ids, a put is dead-lettered
+exactly when it is not committed. -/
+theorem dropped_iff_not_committed {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hkeys : (all.map (·.key)).Nodup) {hist : List Landed}
+    (hcov : hist.length = (sessLog all st).length) {j : Job} (hj : j ∈ all) :
+    j.key ∈ droppedPuts (sessLog all st) hist ↔ j.key ∉ committedPuts (sessLog all st) hist := by
+  constructor
+  · intro hd hc
+    exact keysLanded_disjoint _ hist (sessLog_puts_nodup hst hkeys) _ hc hd
+  · intro hc
+    rcases put_landed hcov hj with h | h
+    · exact absurd h hc
+    · exact h
+
+/-! ### The fixed close's receipts -/
+
+theorem lookup_settleDeferredD (flush : CloseFlush) (dropped : List Key) (now : Int) :
+    ∀ (ids : List Key) (s : RStore) (q : Key),
+      lookup (settleDeferredD flush dropped now ids s) q =
+        if q ∈ ids then (lookup s q).map (deferEntry (flushFor flush dropped q) now)
+        else lookup s q := by
+  intro ids
+  induction ids with
+  | nil => intro s q; simp [settleDeferredD]
+  | cons r ids ih =>
+    intro s q
+    show lookup (settleDeferredD flush dropped now ids
+      (update s r (deferEntry (flushFor flush dropped r) now))) q = _
+    rw [ih, lookup_update]
+    by_cases hr : q = r
+    · subst hr
+      by_cases hq : q ∈ ids
+      · cases h : lookup s q with
+        | none => simp
+        | some e => simp [hq, deferEntry_idem]
+      · simp [hq]
+    · by_cases hq : q ∈ ids
+      · simp [hq, hr]
+      · simp [hq, hr]
+
+/-- At each receipt the fixed close settles by its own `flushFor`. -/
+theorem lookup_settleDeferredD_eq (flush : CloseFlush) (dropped : List Key) (now : Int)
+    (ids : List Key) (s : RStore) (q : Key) :
+    lookup (settleDeferredD flush dropped now ids s) q =
+      lookup (settleDeferred (flushFor flush dropped q) now ids s) q := by
+  rw [lookup_settleDeferredD, lookup_settleDeferred]
+
+theorem ansOf_closeD (flush : CloseFlush) (dropped : List Key) (now : Int) (st : WS) (k : Key) :
+    ansOf (closeD flush dropped now st) k = ansOf (closeW (flushFor flush dropped k) now st) k := by
+  unfold ansOf closeD closeW
+  rw [lookup_settleDeferredD_eq]
+
+/-- **With no dead letter, the fixed close is the old one.** -/
+theorem closeD_agrees (flush : CloseFlush) (now : Int) (st : WS) (k : Key) :
+    ansOf (closeD flush [] now st) k = ansOf (closeW flush now st) k := by
+  rw [ansOf_closeD]
+  simp [flushFor]
+
+theorem setAside_unsettled {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) :
+    ∃ a, ansOf st.store j.key = some a ∧ a.isSettled = false := by
+  subst hst
+  have hI := sessionW_inv c sz now all evs hnd hall
+  simp only [List.mem_append] at hj
+  rcases hj with (hj | hj) | hj
+  · exact (hI.live j (List.mem_append_left _ hj)).1
+  · exact ⟨_, (hI.held j hj).1, rfl⟩
+  · exact (hI.live j (List.mem_append_right _ hj)).1
+
+theorem setAside_mem_all {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) : j ∈ all := by
+  subst hst
+  have hO := runW_ord c sz now evs _ (ordW_init (admitStore all))
+  apply hall j
+  apply (keysW_of _ hO hnd).adm j
+  simp only [DW, List.mem_append] at hj ⊢
+  rcases hj with (hj | hj) | hj
+  · exact Or.inl (Or.inl (Or.inr hj))
+  · exact Or.inl (Or.inr hj)
+  · exact Or.inr hj
+
+/-- A set-aside write's answer under the fixed close. -/
+theorem closeD_setAside {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (dropped : List Key) (now' : Int)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) :
+    ansOf (closeD flush dropped now' st) j.key =
+      some (closeAnswer (flushFor flush dropped j.key)) := by
+  obtain ⟨a, h1, h2⟩ := setAside_unsettled hst hnd hall hj
+  rw [ansOf_closeD]
+  exact (ansOf_closeW_unsettled h1 h2).2
+
+/-! ### The current rule is wrong -/
+
+/-- **#345, in general: the current close vouches for a dead-lettered put.**
+In every reachable session, a set-aside write (running, held or queued when
+the close began) whose put the history dead-lettered answers
+`intent_durable` at a close whose flush completed, though its put is not
+committed. -/
+theorem closeW_vouches_dead_letteredW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (hkeys : (all.map (·.key)).Nodup) (hist : List Landed) (now' : Int)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue)
+    (hd : j.key ∈ droppedPuts (sessLog all st) hist) :
+    ansOf (closeW .durable now' st) j.key = some .intentRecorded ∧
+      j.key ∉ committedPuts (sessLog all st) hist := by
+  obtain ⟨a, h1, h2⟩ := setAside_unsettled hst hnd hall hj
+  exact ⟨(ansOf_closeW_unsettled h1 h2).2,
+    fun hc => keysLanded_disjoint _ hist (sessLog_puts_nodup hst hkeys) _ hc hd⟩
+
+/-! ### The fixed rule -/
+
+/-- **Shutdown accounting under the fixed close (#345).** As
+`shutdown_no_silent_lossW`, except that a set-aside write answers
+`intent_durable` only when the flush completed and its put was not
+dead-lettered, and `close_unflushed` when the flush was incomplete or its put
+was dead-lettered. -/
+theorem shutdown_no_silent_lossD {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (dropped : List Key) (now' : Int) (j : Job) (hj : j ∈ st.admitted) :
+    ((j, Answer.applied) ∈ st.settled ∧
+      ansOf (closeD flush dropped now' st) j.key = some .applied ∧
+      [Mut.write j.key, .consume j.key .applied] ∈ st.log) ∨
+    ((j, Answer.failed) ∈ st.settled ∧ ansOf (closeD flush dropped now' st) j.key = some .failed ∧
+      [Mut.consume j.key .failed] ∈ st.log) ∨
+    ((j, Answer.failed) ∈ st.settled ∧ st.fenced = true ∧
+      ansOf (closeD flush dropped now' st) j.key = some .failed ∧ OwedW all st j) ∨
+    (j ∈ st.running ++ st.held ++ st.queue ∧ flush = .durable ∧ j.key ∉ dropped ∧
+      ansOf (closeD flush dropped now' st) j.key = some .intentRecorded ∧ OwedW all st j) ∨
+    (j ∈ st.running ++ st.held ++ st.queue ∧ (flush = .incomplete ∨ j.key ∈ dropped) ∧
+      ansOf (closeD flush dropped now' st) j.key = some .closeUnflushed) := by
+  rw [ansOf_closeD]
+  rcases shutdown_no_silent_lossW hst hnd hall (flushFor flush dropped j.key) now' j hj with
+    h | h | h | ⟨h1, h2, h3, h4⟩ | ⟨h1, h2, h3⟩
+  · exact Or.inl h
+  · exact Or.inr (Or.inl h)
+  · exact Or.inr (Or.inr (Or.inl h))
+  · unfold flushFor at h2
+    split at h2
+    · cases h2
+    · rename_i hn
+      exact Or.inr (Or.inr (Or.inr (Or.inl ⟨h1, h2, hn, h3, h4⟩)))
+  · unfold flushFor at h2
+    split at h2
+    · rename_i hm
+      exact Or.inr (Or.inr (Or.inr (Or.inr ⟨h1, Or.inr hm, h3⟩)))
+    · exact Or.inr (Or.inr (Or.inr (Or.inr ⟨h1, Or.inl h2, h3⟩)))
+
+/-- **The fixed close never vouches for a dropped put.** An admitted write
+whose put a dead letter dropped never answers `intent_durable`, whatever the
+flush outcome. -/
+theorem closeD_never_vouches_dropped {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (hist : List Landed) (now' : Int) (j : Job) (hj : j ∈ st.admitted)
+    (hd : j.key ∈ droppedPuts (sessLog all st) hist) :
+    ansOf (closeD flush (droppedPuts (sessLog all st) hist) now' st) j.key ≠
+      some .intentRecorded := by
+  intro hv
+  rcases shutdown_no_silent_lossD hst hnd hall flush (droppedPuts (sessLog all st) hist) now' j hj
+    with ⟨_, h, _⟩ | ⟨_, h, _⟩ | ⟨_, _, h, _⟩ | ⟨_, _, hn, _, _⟩ | ⟨_, _, h⟩
+  · rw [hv] at h; cases h
+  · rw [hv] at h; cases h
+  · rw [hv] at h; cases h
+  · exact hn hd
+  · rw [hv] at h; cases h
+
+/-- **The fixed close vouches only for committed puts.** Once every batch of
+the log has landed (a completed or empty final flush), an admitted write
+that answers `intent_durable` has its put in a committed batch. -/
+theorem closeD_vouches_only_committed {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (hist : List Landed) (now' : Int) (j : Job) (hj : j ∈ st.admitted)
+    (hcov : hist.length = (sessLog all st).length)
+    (hv : ansOf (closeD flush (droppedPuts (sessLog all st) hist) now' st) j.key =
+      some .intentRecorded) :
+    j.key ∈ committedPuts (sessLog all st) hist := by
+  rcases put_landed hcov (hall j hj) with h | h
+  · exact h
+  · exact absurd hv (closeD_never_vouches_dropped hst hnd hall flush hist now' j hj h)
+
+/-- **The fixed rule is exact.** At a close whose flush completed (every
+batch landed), a set-aside write answers `intent_durable` exactly when its
+put is committed, and `close_unflushed` otherwise. -/
+theorem closeD_durable_iff {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (hkeys : (all.map (·.key)).Nodup) (hist : List Landed) (now' : Int)
+    (hcov : hist.length = (sessLog all st).length)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) :
+    (ansOf (closeD .durable (droppedPuts (sessLog all st) hist) now' st) j.key =
+        some .intentRecorded ↔ j.key ∈ committedPuts (sessLog all st) hist) ∧
+      (j.key ∉ committedPuts (sessLog all st) hist →
+        ansOf (closeD .durable (droppedPuts (sessLog all st) hist) now' st) j.key =
+          some .closeUnflushed) := by
+  have hiff := dropped_iff_not_committed hst hkeys hcov (setAside_mem_all hst hnd hall hj)
+  rw [closeD_setAside hst hnd hall .durable _ now' hj]
+  unfold flushFor
+  by_cases hd : j.key ∈ droppedPuts (sessLog all st) hist
+  · rw [ite_eq_left hd]
+    have hc := hiff.mp hd
+    exact ⟨⟨fun h => by simp [closeAnswer] at h, fun h => absurd h hc⟩, fun _ => rfl⟩
+  · rw [ite_eq_right hd]
+    have hc : j.key ∈ committedPuts (sessLog all st) hist := by
+      exact Classical.byContradiction (fun hn => hd (hiff.mpr hn))
+    exact ⟨⟨fun _ => hc, fun _ => rfl⟩, fun hn => absurd hc hn⟩
+
+/-- **A retried close keeps the rule.** A set-aside write answers
+`close_unflushed` after an incomplete flush; a retried close whose flush
+completes upgrades it to `intent_durable` only if its put was not
+dead-lettered, and leaves it `close_unflushed` otherwise (the Rust's
+upgrade in `settle_deferred` is skipped for a dead-lettered receipt). -/
+theorem closeD_retryD {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (dropped : List Key) {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue)
+    (now1 now2 : Int) :
+    ansOf (closeD .incomplete dropped now1 st) j.key = some .closeUnflushed ∧
+      ansOf (settleDeferredD .durable dropped now2 (deferredW st)
+          (closeD .incomplete dropped now1 st)) j.key =
+        some (if j.key ∈ dropped then .closeUnflushed else .intentRecorded) := by
+  have hinc : ∀ k, flushFor .incomplete dropped k = .incomplete := by
+    intro k; unfold flushFor; split <;> rfl
+  obtain ⟨a, h1, h2⟩ := setAside_unsettled hst hnd hall hj
+  have hm := (ansOf_closeW_unsettled (flush := .incomplete) (now := now1) h1 h2).1
+  have hc1 : ansOf (closeD .incomplete dropped now1 st) j.key = some .closeUnflushed := by
+    rw [ansOf_closeD, hinc]; exact (ansOf_closeW_unsettled h1 h2).2
+  refine ⟨hc1, ?_⟩
+  have hl : lookup (closeD .incomplete dropped now1 st) j.key =
+      lookup (closeW .incomplete now1 st) j.key := by
+    unfold closeD closeW; rw [lookup_settleDeferredD_eq, hinc]
+  unfold ansOf
+  rw [lookup_settleDeferredD, ite_eq_left hm, hl]
+  unfold flushFor
+  by_cases hd : j.key ∈ dropped
+  · rw [ite_eq_left hd, ite_eq_left hd]
+    unfold ansOf at hc1
+    rw [hl] at hc1
+    cases hx : lookup (closeW .incomplete now1 st) j.key with
+    | none => rw [hx] at hc1; cases hc1
+    | some x =>
+      rw [hx] at hc1
+      have hxa : x.answer = .closeUnflushed := by simpa using hc1
+      have hs : x.answer.isSettled = true := by rw [hxa]; rfl
+      simp only [Option.map_some, deferEntry_incomplete,
+        Lambo.Receipts.settle_settled x _ now2 hs, hxa]
+  · rw [ite_eq_right hd, ite_eq_right hd]
+    have hr := (closeW_retry_upgradesW hst hnd hall j hj now1 now2).2
+    unfold ansOf at hr
+    rw [lookup_settleDeferred, ite_eq_left hm] at hr
+    exact hr
+
+/-- **#345, the concrete case: the current close vouches for a dead-lettered
+put.** `j1` meets an embedder outage and is held (`pending_replay`); the
+background flush that drained its put dead-letters the batch, so every batch
+of the log has landed and the close's tail is empty. The current close
+(`closeW .durable`, the empty-tail branch's `CloseFlush::Durable`) answers it
+`intent_durable`, though its put is not committed; the fixed close answers it
+`close_unflushed`. Rust test
+`a_close_with_an_empty_tail_does_not_vouch_for_a_dead_lettered_intent`. -/
+theorem closeW_vouches_dead_lettered :
+    let st := runW capsT one 0 (WS.init (admitStore [j1]))
+      [.submit j1, .start 0, .finish 0 (.err .unavailable)]
+    let log := sessLog [j1] st
+    let hist := [Landed.deadLettered]
+    hist.length = log.length ∧ ansOf st.store j1.key = some .pendingReplay ∧
+      ansOf (closeW .durable 1 st) j1.key = some .intentRecorded ∧
+      j1.key ∉ committedPuts log hist ∧
+      ansOf (closeD .durable (droppedPuts log hist) 1 st) j1.key = some .closeUnflushed := by
+  decide
+
+/-- The retried close on the second Rust test's scenario: `j1`'s put is
+dead-lettered, then `j2` is held behind it and its put rides the tail. The
+first close's final flush fails (`close_unflushed` for both); the retry's
+lands the tail, so `j2` is upgraded to `intent_durable` and `j1` stays
+`close_unflushed`, where the current close upgraded both. Rust test
+`a_retried_close_upgrades_only_the_intents_it_can_vouch_for`. -/
+example :
+    let st := runW capsT one 0 (WS.init (admitStore [j1, j2]))
+      [.submit j1, .start 0, .finish 0 (.err .unavailable), .submit j2, .start 0]
+    let log := sessLog [j1, j2] st
+    let hist := [Landed.deadLettered, Landed.committed]
+    let d := droppedPuts log hist
+    st.held = [j1, j2] ∧ hist.length = log.length ∧
+      [j1.key, j2.key].map (ansOf (closeD .incomplete d 1 st)) =
+        [some .closeUnflushed, some .closeUnflushed] ∧
+      [j1.key, j2.key].map
+        (ansOf (settleDeferredD .durable d 2 (deferredW st) (closeD .incomplete d 1 st))) =
+        [some .closeUnflushed, some .intentRecorded] ∧
+      [j1.key, j2.key].map
+        (ansOf (settleDeferred .durable 2 (deferredW st) (closeW .incomplete 1 st))) =
+        [some .intentRecorded, some .intentRecorded] := by
+  decide
+
 end Lambo.Drain
