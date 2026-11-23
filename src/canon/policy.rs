@@ -1487,7 +1487,7 @@ mod tests {
     /// which keeps the dependent-origin dating, still credits day 0.
     ///
     /// Mirrors `Policy.own_origin_is_the_writing_turn` and
-    /// `Policy.dependentOriginsW_not_own` in `formal/LamboProofs/Policy.lean`.
+    /// `Policy.dependentOriginsW_not_own` in `formal/LamboProofs/Policy/Support.lean`.
     #[test]
     fn a_dependence_written_in_the_pillars_own_turn_no_longer_counts() {
         use crate::graph::action::{record_action, Action};
