@@ -121,17 +121,9 @@ fn a_loaded_graph_has_nothing_unflushed() {
     assert!(!loaded.contract_unflushed());
 }
 
-/// #345 review: the receipts of dead-lettered intents are kept only while
-/// their write is unconsumed. A consumed write (applied, or failed, after
-/// its put was dead-lettered) is never set aside by a close, so its receipt
-/// is forgotten at the consume and the set does not grow for the life of the
-/// process. A dead-lettered intent whose write is still unconsumed stays.
-///
-/// Mirrors `Drain.closeD_keptDropped`.
-#[test]
-fn a_consumed_write_leaves_the_dead_lettered_intents() {
-    let (mut g, iid, _cid) = small_graph();
-    let intent = |receipt: &str| crate::types::WriteIntent {
+/// A write intent of `iid` with receipt `receipt`.
+fn intent_of(iid: NodeId, receipt: &str) -> crate::types::WriteIntent {
+    crate::types::WriteIntent {
         session_id: sid(),
         receipt: receipt.into(),
         agent: crate::types::AgentId::from("agent-a"),
@@ -145,68 +137,96 @@ fn a_consumed_write_leaves_the_dead_lettered_intents() {
         },
         created_at: ts(0),
         outcome: None,
-    };
-    g.record_write_intent(intent("lwr1.1.1.1"));
-    g.record_write_intent(intent("lwr1.1.1.2"));
+    }
+}
+
+fn applied() -> crate::types::WriteIntentOutcome {
+    crate::types::WriteIntentOutcome {
+        tag: "applied".into(),
+        summary: "applied".into(),
+        consumed_at: ts(1),
+    }
+}
+
+/// A lane worker's consume: the consume and the consumed-unsettled record in
+/// one hold, as `WorkerCommit::at_commit` and the failure consume do.
+fn worker_consume(g: &mut Graph, receipt: &str) {
+    g.consume_write_intent(receipt.into(), applied());
+    g.mark_consumed_unsettled(receipt);
+}
+
+/// #345 review and re-review: a dead-lettered receipt is kept until its
+/// write settles, not until its consume. A worker can panic between the two
+/// (the close then sets the write aside), so a consumed, unsettled write
+/// stays in the set; its settle forgets it, so the set does not grow for the
+/// life of the process.
+///
+/// Mirrors `Drain.settlePrune_never_vouches_dropped`,
+/// `Drain.settlePrune_settled_forgotten`.
+#[test]
+fn a_settled_write_leaves_the_dead_lettered_intents() {
+    let (mut g, iid, _cid) = small_graph();
+    g.record_write_intent(intent_of(iid, "lwr1.1.1.1"));
+    g.record_write_intent(intent_of(iid, "lwr1.1.1.2"));
     let dropped = g.drain_log();
     g.note_dead_lettered_intents(&dropped.mutations);
     assert!(g.intent_dead_lettered("lwr1.1.1.1"));
     assert!(g.intent_dead_lettered("lwr1.1.1.2"));
 
-    g.consume_write_intent(
-        "lwr1.1.1.1".into(),
-        crate::types::WriteIntentOutcome {
-            tag: "applied".into(),
-            summary: "applied".into(),
-            consumed_at: ts(1),
-        },
+    worker_consume(&mut g, "lwr1.1.1.1");
+    assert!(
+        g.intent_dead_lettered("lwr1.1.1.1"),
+        "consumed but not settled: a panic here leaves it for the close to set aside"
     );
+    g.settled_write("lwr1.1.1.1");
     assert!(
         !g.intent_dead_lettered("lwr1.1.1.1"),
-        "a consumed write is never set aside: its receipt is forgotten"
+        "a settled write is never set aside: its receipt is forgotten"
     );
     assert!(
         g.intent_dead_lettered("lwr1.1.1.2"),
-        "an unconsumed dead-lettered intent stays"
+        "an unsettled dead-lettered intent stays"
     );
 }
 
-/// #345 review: a put whose write was consumed before the dead letter (its
-/// consume in the dropped batch, or still in the log behind it) is never
-/// noted, so the set does not keep a receipt no close will set aside.
+/// #345 review and re-review: a put whose write was consumed and settled
+/// before the dead letter (its consume in the dropped batch, or still in the
+/// log behind it) is not noted. One consumed but not settled (its worker
+/// panicked after the commit) is noted, consume in the batch or in the log.
+///
+/// Mirrors `Drain.keptAtConsume_vouches_after_panic` (both cases) and
+/// `Drain.settlePrune_never_vouches_dropped`.
 #[test]
-fn a_put_consumed_before_the_dead_letter_is_not_noted() {
+fn only_a_put_settled_before_the_dead_letter_is_skipped() {
     let (mut g, iid, _cid) = small_graph();
-    let intent = |receipt: &str| crate::types::WriteIntent {
-        session_id: sid(),
-        receipt: receipt.into(),
-        agent: crate::types::AgentId::from("agent-a"),
-        interaction: iid,
-        lane_seq: 1,
-        issued_ms: 0,
-        payload: crate::types::WriteIntentPayload::Derive {
-            concepts: vec![],
-            pairs: vec![],
-            receipt_destination: None,
-        },
-        created_at: ts(0),
-        outcome: None,
-    };
-    let applied = || crate::types::WriteIntentOutcome {
-        tag: "applied".into(),
-        summary: "applied".into(),
-        consumed_at: ts(1),
-    };
-    g.record_write_intent(intent("lwr1.2.1.1"));
-    g.record_write_intent(intent("lwr1.2.1.2"));
-    g.record_write_intent(intent("lwr1.2.1.3"));
-    // Consumed inside the batch the dead letter drops.
-    g.consume_write_intent("lwr1.2.1.1".into(), applied());
+    for r in [
+        "lwr1.2.1.1",
+        "lwr1.2.1.2",
+        "lwr1.2.1.3",
+        "lwr1.2.1.4",
+        "lwr1.2.1.5",
+    ] {
+        g.record_write_intent(intent_of(iid, r));
+    }
+    // Consumed inside the batch the dead letter drops: .1 settled, .3 not.
+    worker_consume(&mut g, "lwr1.2.1.1");
+    g.settled_write("lwr1.2.1.1");
+    worker_consume(&mut g, "lwr1.2.1.3");
     let dropped = g.drain_log();
-    // Consumed after the drain, before the dead letter: still in the log.
-    g.consume_write_intent("lwr1.2.1.2".into(), applied());
+    // Consumed after the drain, before the dead letter: .2 settled, .4 not.
+    worker_consume(&mut g, "lwr1.2.1.2");
+    g.settled_write("lwr1.2.1.2");
+    worker_consume(&mut g, "lwr1.2.1.4");
     g.note_dead_lettered_intents(&dropped.mutations);
     assert!(!g.intent_dead_lettered("lwr1.2.1.1"));
     assert!(!g.intent_dead_lettered("lwr1.2.1.2"));
-    assert!(g.intent_dead_lettered("lwr1.2.1.3"));
+    assert!(
+        g.intent_dead_lettered("lwr1.2.1.3"),
+        "consumed in the batch, not settled"
+    );
+    assert!(
+        g.intent_dead_lettered("lwr1.2.1.4"),
+        "consumed in the log, not settled"
+    );
+    assert!(g.intent_dead_lettered("lwr1.2.1.5"), "never consumed");
 }

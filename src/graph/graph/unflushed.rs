@@ -44,14 +44,28 @@
 //! completed settles, been committed: the background flushes and the final
 //! one carry the whole log, and a degraded or fenced session's drops make the
 //! close answer `close_unflushed` anyway. So the set is exact, not a
-//! conservative bound (Lean: `Drain.closeD_durable_iff`). It holds only the
-//! receipts whose write is still unconsumed: [`Graph::consume_write_intent`]
-//! forgets a receipt, and a put whose consume was appended before the dead
-//! letter (in the dropped batch or still in the log) is never noted. A
-//! consumed write is settled, never set aside, so this changes no close
-//! answer (Lean: `Drain.closeD_keptDropped`); what stays is one receipt per
-//! dead-lettered write still held, queued or running, or refused after a
-//! lost lease (whose close answers `close_unflushed` anyway).
+//! conservative bound (Lean: `Drain.closeD_durable_iff`).
+//!
+//! It holds only the receipts whose write has not settled. A consumed write
+//! is not necessarily settled: a lane worker can panic after its commit and
+//! consume and before `settle_one`, and the close sets its write aside (#345
+//! re-review; pruning at the consume vouched for it,
+//! `Drain.keptAtConsume_vouches_after_panic`). So:
+//!
+//! * the worker records a write it consumes as consumed and not yet settled
+//!   ([`Graph::mark_consumed_unsettled`], in the consume's lock hold);
+//! * its settle forgets the receipt from both sets ([`Graph::settled_write`]);
+//! * the note skips a put only when its write is consumed (the consume is in
+//!   the dropped batch or still in the log) and no longer in that record,
+//!   that is, settled.
+//!
+//! A dropped put whose write is not settled therefore stays in the set,
+//! panics included (Lean: `Drain.settlePrune_never_vouches_dropped`,
+//! `Drain.settlePrune_exact`). What stays is one receipt per dead-lettered
+//! write held, queued or running, or whose worker panicked, or refused after
+//! a lost lease (whose close answers `close_unflushed` anyway); the record
+//! holds one per worker between its commit and its settle, plus one per
+//! panicked worker (`Drain.settlePrune_unsettled_bounded`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -128,10 +142,12 @@ impl Graph {
     /// (#345). Call it with the batch the dead letter drops, before or with
     /// [`Self::pin_unflushed`].
     ///
-    /// A put whose write was already consumed is not noted: its consume is
-    /// in `mutations` or still in the log (a put precedes its consume in
-    /// log order, and the dropped batch is the flush's only pending one), and
-    /// a consumed write is never set aside.
+    /// A put whose write was already consumed **and settled** is not noted:
+    /// its consume is in `mutations` or still in the log (a put precedes its
+    /// consume in log order, and the dropped batch is the flush's only pending
+    /// one), and its receipt is no longer consumed-and-unsettled. A consumed
+    /// write that has not settled (a worker that panicked after its commit)
+    /// is noted: the close sets it aside.
     pub(crate) fn note_dead_lettered_intents(&mut self, mutations: &[Mutation]) {
         let consumed: std::collections::HashSet<&str> = mutations
             .iter()
@@ -145,7 +161,8 @@ impl Graph {
             .iter()
             .filter_map(|m| match m {
                 Mutation::PutWriteIntent { intent }
-                    if !consumed.contains(intent.receipt.as_str()) =>
+                    if !consumed.contains(intent.receipt.as_str())
+                        || self.consumed_unsettled.contains(&intent.receipt) =>
                 {
                     Some(intent.receipt.clone())
                 }
@@ -153,6 +170,20 @@ impl Graph {
             })
             .collect();
         self.dead_lettered_intents.extend(puts);
+    }
+
+    /// A lane worker consumed the intent `receipt` and has not settled its
+    /// write yet (#345 re-review). Call it in the consume's lock hold.
+    pub(crate) fn mark_consumed_unsettled(&mut self, receipt: &str) {
+        self.consumed_unsettled.insert(receipt.to_owned());
+    }
+
+    /// The lane worker settled the write `receipt`: a close will not set it
+    /// aside, so it leaves the consumed-and-unsettled record and the
+    /// dead-lettered set (#345).
+    pub(crate) fn settled_write(&mut self, receipt: &str) {
+        self.consumed_unsettled.remove(receipt);
+        self.dead_lettered_intents.remove(receipt);
     }
 
     /// Whether the put of the write intent `receipt` was in a batch the

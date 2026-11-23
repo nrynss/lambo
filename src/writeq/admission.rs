@@ -646,7 +646,7 @@ pub(super) struct Lanes {
     /// settles its write `failed`; at it the store is slow for everyone and
     /// the write is held like an embedder outage. Only a write's first
     /// attempt counts. Reset when a write applies, inside its commit's
-    /// critical section (`execution::StreakReset`, this lock taken under the
+    /// critical section (`execution::WorkerCommit`, this lock taken under the
     /// graph write lock), not later in the worker's `Ok` arm or settle block
     /// (#346), so a timeout another lane meets after that commit starts a new
     /// run.

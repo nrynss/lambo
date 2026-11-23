@@ -129,9 +129,23 @@ pub(crate) struct ConsumeStamp {
     pub(super) at: DateTime<Utc>,
 }
 
-/// The lane worker's reset of `Lanes::lookup_streak` at a write's commit
-/// (#346), run by [`WriteCtx::run`] **inside the commit's critical section**,
-/// under the graph write lock, beside the intent's consume.
+/// What the lane worker does at a write's commit, run by [`WriteCtx::run`]
+/// **inside the commit's critical section**, under the graph write lock,
+/// beside the intent's consume ([`WorkerCommit::at_commit`]): it resets
+/// `Lanes::lookup_streak` (#346) and records the write as consumed and not
+/// yet settled (`Graph::mark_consumed_unsettled`, #345). The worker's failure
+/// consume records it too, in its own consume's lock hold.
+///
+/// **The record (#345 re-review).** A worker can panic after its commit and
+/// before its settle; its receipt stays unsettled, and the close sets it
+/// aside. So a dead-lettered receipt is forgotten only once its write
+/// settles (`Graph::settled_write`, in the worker's settle), not at its
+/// consume, and the flush's note skips a put only when its write is consumed
+/// and no longer in the record, that is, settled (Lean:
+/// `Drain.settlePrune_never_vouches_dropped`; pruning at the consume,
+/// `Drain.keptAtConsume_vouches_after_panic`). The replay passes no
+/// `WorkerCommit`: its writes are earlier processes', whose puts are not in
+/// this process's log.
 ///
 /// The streak counts first-attempt lookup timeouts "with nothing applied
 /// between", and a write is applied at its commit. Reset there, the commit
@@ -147,10 +161,13 @@ pub(crate) struct ConsumeStamp {
 /// (`WritePipeline::admit`); no path takes the lanes lock and then the
 /// graph's. The replay passes none: its own streak is local to the replay.
 #[derive(Clone)]
-pub(super) struct StreakReset(Arc<parking_lot::Mutex<super::Lanes>>);
+pub(super) struct WorkerCommit(Arc<parking_lot::Mutex<super::Lanes>>);
 
-impl StreakReset {
-    fn reset(&self) {
+impl WorkerCommit {
+    /// At the commit of the job with receipt `receipt`, under the graph write
+    /// lock `g` is borrowed from.
+    fn at_commit(&self, g: &mut Graph, receipt: &str) {
+        g.mark_consumed_unsettled(receipt);
         self.0.lock().lookup_streak = 0;
     }
 }
@@ -346,13 +363,14 @@ impl WriteCtx {
     /// transaction — and a crash can never leave the write durable beside a
     /// still-unconsumed intent (the double-apply this design excludes).
     ///
-    /// `streak`, when present (the lane worker's), resets the lookup-timeout
-    /// streak in that same critical section ([`StreakReset`], #346).
+    /// `worker`, when present (the lane worker's), runs in that same critical
+    /// section ([`WorkerCommit`]: the lookup-streak reset, #346, and the
+    /// consumed-unsettled record, #345).
     pub(super) async fn run(
         &self,
         job: &Job,
         consume: Option<ConsumeStamp>,
-        streak: Option<&StreakReset>,
+        worker: Option<&WorkerCommit>,
     ) -> Result<AppliedSummary, LamboError> {
         match &job.payload {
             JobPayload::Derive {
@@ -410,11 +428,11 @@ impl WriteCtx {
                         let targets = pinned.against.clone();
                         let ctx = self.clone();
                         let destination = job.receipt_destination.clone();
-                        let streak = streak.cloned();
+                        let worker = worker.cloned();
                         let on_commit: Option<hybrid::CommitHook> = Some(Box::new(
                             move |g: &mut Graph, outcome: &crate::graph::derive::DeriveOutcome| {
-                                if let Some(streak) = &streak {
-                                    streak.reset();
+                                if let Some(worker) = &worker {
+                                    worker.at_commit(g, &receipt);
                                 }
                                 if let Some(stamp) = consume {
                                     g.consume_write_intent(
@@ -463,8 +481,8 @@ impl WriteCtx {
                             pinned,
                         )?;
                         // Same lock hold as the commit — see `run`'s doc.
-                        if let Some(streak) = streak {
-                            streak.reset();
+                        if let Some(worker) = worker {
+                            worker.at_commit(&mut g, &job.receipt.to_string());
                         }
                         if let Some(stamp) = consume {
                             g.consume_write_intent(
@@ -583,8 +601,8 @@ impl WriteCtx {
                         (!embeddings.is_empty()).then(|| self.embedding.clone()),
                     )?;
                     // Same lock hold as the commit — see `run`'s doc.
-                    if let Some(streak) = streak {
-                        streak.reset();
+                    if let Some(worker) = worker {
+                        worker.at_commit(&mut g, &job.receipt.to_string());
                     }
                     if let Some(stamp) = consume {
                         g.consume_write_intent(
@@ -744,7 +762,7 @@ impl WritePipeline {
     pub(super) fn spawn_worker(&self, agent: AgentId, wake: Arc<Notify>) -> JoinHandle<()> {
         let ctx = self.ctx.clone();
         let lanes = self.lanes.clone();
-        let streak_reset = StreakReset(self.lanes.clone());
+        let worker_commit = WorkerCommit(self.lanes.clone());
         let receipts = self.receipts.clone();
         let counters = self.counters.clone();
         let settled = self.settled.clone();
@@ -872,7 +890,7 @@ impl WritePipeline {
                         tag: "applied",
                         at: (clock)(),
                     };
-                    let raw_outcome = ctx.run(&job, Some(stamp), Some(&streak_reset)).await;
+                    let raw_outcome = ctx.run(&job, Some(stamp), Some(&worker_commit)).await;
                     // Test-only (#346): hold a committed write here, after
                     // `run` returned and before the `Ok` arm, while another
                     // worker runs. See `test_pause`.
@@ -905,7 +923,7 @@ impl WritePipeline {
                     let hold_cause = match &raw_outcome {
                         Ok(_) => {
                             // No `lookup_streak` reset here: `run` reset it
-                            // inside the commit (`StreakReset`, #346). Here is
+                            // inside the commit (`WorkerCommit`, #346). Here is
                             // already past the index mirroring, so a timeout
                             // another lane met in between would have counted
                             // toward the old run (Lean:
@@ -943,8 +961,10 @@ impl WritePipeline {
                         } else {
                             model_safe_failure(e)
                         };
-                        ctx.graph.write().consume_write_intent(
-                            job.receipt.to_string(),
+                        let receipt = job.receipt.to_string();
+                        let mut g = ctx.graph.write();
+                        g.consume_write_intent(
+                            receipt.clone(),
                             WriteIntentOutcome {
                                 tag: "failed".into(),
                                 summary: super::receipts::durable_summary(
@@ -954,6 +974,9 @@ impl WritePipeline {
                                 consumed_at: (clock)(),
                             },
                         );
+                        // Consumed, not yet settled, in the consume's own
+                        // lock hold (`WorkerCommit`, #345).
+                        g.mark_consumed_unsettled(&receipt);
                     }
                     // Two strings from here on: the class for the model, the
                     // error for the operator.
@@ -1037,7 +1060,7 @@ impl WritePipeline {
                         *n = n.saturating_sub(1);
                     }
                     // No `lookup_streak` reset here: it is reset at the commit
-                    // (`StreakReset`, inside `run`). A second reset here would forget
+                    // (`WorkerCommit`, inside `run`). A second reset here would forget
                     // timeouts that came after the commit (Lean:
                     // `Drain.streak_both_forgets_run`).
                     if retried {
@@ -1086,6 +1109,12 @@ impl WritePipeline {
                     }
                 };
                 settle_one(&receipts, &job.receipt, answer, (clock)());
+                // Settled: a close will not set it aside, so the graph
+                // forgets it as consumed-and-unsettled and as dead-lettered
+                // (#345). After `settle_one`, on its own graph lock hold: a
+                // panic before here leaves both records, and the close
+                // answers a dead-lettered one `close_unflushed`.
+                ctx.graph.write().settled_write(&job.receipt.to_string());
                 settled.notify_waiters();
             }
         })
