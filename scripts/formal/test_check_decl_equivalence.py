@@ -114,6 +114,14 @@ class Equivalence(unittest.TestCase):
                             value="_private.LamboProofs.A.Part.0.Lambo.A.q")]
         self.assertEqual(self.run_check(base, head)[0], 0)
 
+    def test_going_private_or_public_fails(self):
+        base = BASE + [decl("Lambo.A.p", kind="def", type_="Nat", value="0")]
+        head = BASE + [decl("Lambo.A.p", kind="def", type_="Nat", value="0", private=True)]
+        code, out = self.run_check(base, head)
+        self.assertEqual(code, 1)
+        self.assertIn("Lambo.A.p: public at the base, private at HEAD", out)
+        self.assertEqual(self.run_check(head, base)[0], 1)
+
     def test_listed_moves_merge_duplicates(self):
         lib = decl("Lambo.Lib.List.helper", type_=BASE[1]["type"], module="LamboProofs.Lib.List")
         head = [d for d in BASE if not d["name"].endswith(".helper")] + [lib]

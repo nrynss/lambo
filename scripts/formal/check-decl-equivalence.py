@@ -26,7 +26,8 @@ not the source text), and compares the two by fully qualified name:
 
 Which module a declaration lives in is reported (a summary of the moves), not
 compared, so splitting a model file into several is allowed. A private name
-is compared as its user-facing name, and a binder name without its macro
+is compared as its user-facing name (a declaration that goes private or
+public fails: that changes its kernel name), and a binder name without its macro
 scopes (a hygienic name records the module it was elaborated in). Only declarations written in the source
 are compared; the constants Lean generates for them (`foo.proof_1`,
 `foo.match_1`, `_auxLemma.N`, ...) are not, as their numbering follows the
@@ -97,11 +98,12 @@ class Dump:
 
     def __init__(self, path, renames):
         self.user, self.all = {}, {}
-        for line in open(path, encoding="utf-8"):
-            d = json.loads(line)
-            self.all[d["name"]] = d
-            if d["user"]:
-                self.user[d["name"]] = d
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                d = json.loads(line)
+                self.all[d["name"]] = d
+                if d["user"]:
+                    self.user[d["name"]] = d
         self.renames = renames
         self._aux = {}
 
@@ -182,7 +184,10 @@ def compare(bd, hd, renames):
         if b["kind"] != "theorem" and bd.norm(b["value"]) != hd.norm(h["value"]):
             errors.append(f"{name}: definition body changed")
         if b["private"] != h["private"]:
-            notes.append(f"{name}: private {b['private']} -> {h['private']}")
+            # A private name is `_private.<module>.0.<name>` in the kernel, so
+            # going private or public renames the declaration.
+            errors.append(f"{name}: {'private' if b['private'] else 'public'} at the base, "
+                          f"{'private' if h['private'] else 'public'} at HEAD")
     for name in sorted(set(head) - set(base)):
         if name not in targets:
             errors.append(f"{name}: {head[name]['kind']} added at HEAD (not a listed move)")

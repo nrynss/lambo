@@ -18,6 +18,7 @@ on:
       - 'scripts/formal/count-theorems.py'
       - 'scripts/formal/test_count_theorems.py'
       - 'scripts/formal/check-decl-equivalence.py'
+      - 'scripts/formal/DumpDecls.lean'
       - 'scripts/formal/test_check_decl_equivalence.py'
       - 'scripts/formal/audit-theorems.py'
       - 'scripts/formal/test_audit_theorems.py'
@@ -29,6 +30,7 @@ on:
       - 'scripts/formal/count-theorems.py'
       - 'scripts/formal/test_count_theorems.py'
       - 'scripts/formal/check-decl-equivalence.py'
+      - 'scripts/formal/DumpDecls.lean'
       - 'scripts/formal/test_check_decl_equivalence.py'
       - 'scripts/formal/audit-theorems.py'
       - 'scripts/formal/test_audit_theorems.py'
@@ -85,6 +87,13 @@ jobs:
           set -euo pipefail
           lean --version
           lake build --wfail 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      # scripts/formal/DumpDecls.lean (the dump check-decl-equivalence.py and
+      # audit-theorems.py read) is run by hand, not here; elaborate it so a
+      # Lean upgrade that breaks it fails CI rather than its next user.
+      - name: Elaborate DumpDecls.lean
+        working-directory: formal
+        run: lake env lean ../scripts/formal/DumpDecls.lean
 
       # The differential oracle (#291): rebuild the exporter, regenerate
       # formal/oracle/*.json from the models and fail if the committed vectors
