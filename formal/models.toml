@@ -410,23 +410,42 @@ rust = [
   "src/graph/graph.rs#record_edge",
 ]
 
+# The hot list itself.
 [[model]]
-lean = "formal/LamboProofs/Hotlist.lean"
-read_against = "514da8d7"
-read_digest = "v2:sha256:76dcf8b50f11d0d6932d8665ee242cb9adddd68fa817939df6eb01690619580d"
+lean = "formal/LamboProofs/Hotlist/List.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:dab4b297f2e5197c26bc3e613125fc0994ca6b7c4654fefb83b19f742697b699"
 rust = [
   "src/daemon/hotlist.rs",
-  "src/daemon/mod.rs#detect_into_hot_list",
+  "src/types/mod.rs#HotListPayload",
+]
+
+# How recall consumes the hot list.
+[[model]]
+lean = "formal/LamboProofs/Hotlist/Recall.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:0a11bbecf7d39eebcc8212abce86b5c43e170bc9ae334fabfe9f1ca7728032fd"
+rust = [
   "src/recall/assemble.rs#forces",
   "src/recall/assemble.rs#contradiction_companions",
   "src/recall/assemble.rs#emitted",
   "src/recall/assemble.rs#assemble_with_graph_relevance",
+  "src/recall/assemble.rs#same_session_concept",
   "src/daemon/contradiction.rs#forces_inclusion",
   "src/recall/format.rs#hot_warning",
   "src/recall/format.rs#contradiction_warning",
-  "src/types/mod.rs#HotListPayload",
+]
+
+# The daemon's cycle over the hot list, before and since #298.
+[[model]]
+lean = "formal/LamboProofs/Hotlist/Cycle.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:32a8a469d975714590c6ce02eb28f2399fdc41f06d4ad6625b7b5b5335c16968"
+rust = [
+  "src/daemon/mod.rs#detect_into_hot_list",
   "src/daemon/mod.rs#condition_set",
-  "src/recall/assemble.rs#same_session_concept",
+  "src/daemon/hotlist.rs#HotList::sync_cycle",
+  "src/daemon/hotlist.rs#HotList::retain_conditions",
 ]
 
 # The drain model is split by subsystem; each file is listed against the Rust

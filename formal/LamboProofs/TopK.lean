@@ -24,7 +24,7 @@ for s in ranked {
 that must be shown whatever their rank: a member with a live hot-list conflict,
 high-risk, drift or stale payload, a contradiction on a Canonical or Venerable
 concept and its companion, and in cold mode a kept reservation holder
-(`Hotlist.lean` derives this predicate from the hot list, `forces_iff`).
+(`Hotlist/Recall.lean` derives this predicate from the hot list, `forces_iff`).
 
 ## Model
 

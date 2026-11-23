@@ -551,7 +551,7 @@ fn conflict() {
 
 #[test]
 fn hotlist() {
-    let lean = Lean::new(model!("Hotlist"));
+    let lean = Lean::new(model!("Hotlist/List"));
     assert_pin!(
         HOT_LIST_MAX,
         lean.def("hotListMax", "Nat").nat().to::<usize>()

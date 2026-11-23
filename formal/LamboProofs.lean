@@ -26,7 +26,9 @@ import LamboProofs.Policy.Support
 import LamboProofs.Policy.Score
 import LamboProofs.Conflict.Detect
 import LamboProofs.Conflict.Contradiction
-import LamboProofs.Hotlist
+import LamboProofs.Hotlist.List
+import LamboProofs.Hotlist.Recall
+import LamboProofs.Hotlist.Cycle
 import LamboProofs.Drain.Base
 import LamboProofs.Drain.Replay
 import LamboProofs.Drain.Worker
