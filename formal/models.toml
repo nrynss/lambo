@@ -365,18 +365,25 @@ rust = [
 # other files' definitions) model no Rust of their own and have no entry.
 #
 # Base: the worker step's batch shape (the consume under the commit's lock
-# hold), the receipt store's settle, `settle_deferred`'s set-aside, the
+# hold, and which failures consume the intent), receipt ids (epoch, sequence)
+# and the intent rows they key, the replay's block reasons, the receipt store's settle, `settle_deferred`'s set-aside, the
 # `Drop` path (`abort_all_sync`, from `Memory`'s `Drop`), the intent log, the
 # adapters' load order, the error classes, the replay's step, its constants
 # and the restart map's seed (`spawn_replay`).
 [[model]]
 lean = "formal/LamboProofs/Drain/Base.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:b9566666e7a4465a2a498cb514bd540466143e2235dcfa49ce280f0fc88ded26"
+read_digest = "v2:sha256:b70366842a99765cb17cba130badf374743a647e42343d9d4201b6cc38b6aa8f"
 rust = [
   "src/writeq/execution.rs#WriteCtx::run",
   "src/writeq/execution.rs#ConsumeStamp",
+  "src/writeq/execution.rs#WritePipeline::spawn_worker",
   "src/writeq/receipts.rs#settle_one",
+  "src/writeq/receipts.rs#ReceiptId",
+  "src/writeq/receipts.rs#next_receipt",
+  "src/writeq/counters.rs#ReplayBlockReason",
+  "src/types/mod.rs#WriteIntent",
+  "src/types/mod.rs#WriteIntentOutcome",
   "src/writeq/drain.rs#CloseFlush",
   "src/writeq/drain.rs#WritePipeline::abort_workers",
   "src/writeq/drain.rs#WritePipeline::settle_deferred",
@@ -394,15 +401,17 @@ rust = [
   "src/types/mod.rs#is_lookup_timeout",
 ]
 
-# Replay: the replay loop, its deferral, retry pass and load order (#294,
-# #295), and the in-session hold's first model (`workH`), which reads the
+# Replay: the replay loop, its deferral, retry pass, quarantine of another
+# receipt format, block reason and load order (#294, #295), and the in-session hold's first model (`workH`), which reads the
 # lane worker.
 [[model]]
 lean = "formal/LamboProofs/Drain/Replay.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:a4f519c63bcd006211f941c9ddc8b1f613007aecd3ba1fa13457a0da1691dfea"
+read_digest = "v2:sha256:42252cfe0ef797b12112c5eab8ca5d32f6071d3c025cf145ed798beed8a34a17"
 rust = [
   "src/writeq/replay.rs",
+  "src/writeq/receipts.rs#ReceiptId",
+  "src/writeq/counters.rs#ReplayBlockReason",
   "src/writeq/execution.rs#WritePipeline::spawn_worker",
   "src/store/sqlite/session_load.rs",
   "src/store/pg/session_load.rs",
@@ -410,26 +419,29 @@ rust = [
   "src/types/mod.rs#is_input_refusal",
 ]
 
-# Worker: the current lane worker (held writes, admission and its caps,
-# retries, the fence) and the serve's block reason (`serveR`).
+# Worker: the current lane worker (held writes, admission and its cap check,
+# `WritePipeline::admit`; retries, the fence) and the serve's block reason
+# (`serveR`). The caps' values are parameters, so their constants are not
+# refs.
 [[model]]
 lean = "formal/LamboProofs/Drain/Worker.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:041256adfebbde53a5d29059d2f8d60556105b11ee1328b80bceeaa9c2be2b4f"
+read_digest = "v2:sha256:99241c6a9832cbb4aee05018de7fb053e9b75479791ae3b387f54fb09a9da537"
 rust = [
   "src/writeq/execution.rs",
   "src/writeq/admission.rs#Lanes",
+  "src/writeq/admission.rs#WritePipeline::admit",
   "src/writeq/receipts.rs#settle_one",
   "src/writeq/receipts.rs#hold_one",
   "src/writeq/replay.rs#WritePipeline::spawn_replay",
 ]
 
 # Close: the close over the current worker, the dead-lettered set (#345, with
-# worker panics) and where the lookup streak resets (#346, at the commit).
+# worker panics after `WriteCtx::run`'s commit) and where the lookup streak resets (#346, at the commit).
 [[model]]
 lean = "formal/LamboProofs/Drain/Close.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:93aa2a8d24ada17aac16bbe4d70d959c0c0b1ff9b555e947310bf60b407c4a50"
+read_digest = "v2:sha256:a8df4dcc27d39030be6903e2033fd92667b932cc4b2ee018a3b7885417db3c99"
 rust = [
   "src/writeq/drain.rs",
   "src/memory/shutdown.rs#Memory::close",
@@ -440,6 +452,7 @@ rust = [
   "src/graph/graph/unflushed.rs#Graph::mark_consumed_unsettled",
   "src/graph/graph/unflushed.rs#Graph::settled_write",
   "src/store/flush.rs#FlushLoop::drain_and_flush",
+  "src/writeq/execution.rs#WriteCtx::run",
   "src/writeq/execution.rs#WorkerCommit",
   "src/writeq/execution.rs#WritePipeline::spawn_worker",
   "src/writeq/admission.rs#Lanes",
