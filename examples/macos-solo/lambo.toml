@@ -31,6 +31,9 @@ path = "/Users/USERNAME/.local/share/lambo/lambo.db"
 # start fetches about 1.1 GB of weights from Hugging Face into the hub cache.
 kind = "candle"
 device = "metal"
+# BGE-M3's width. Lambo refuses to start if the model disagrees, and each
+# session keeps the width its vectors were written with (changing it needs a
+# re-embed).
 dim = 1024
 # Keep-warm: on Metal, lambo serve embeds one short probe every 10 seconds by
 # default so idle weights stay resident. On a laptop running on battery, set
