@@ -38,7 +38,9 @@ import LamboProofs.Drain.History
 import LamboProofs.Flush.Retry
 import LamboProofs.Flush.Loop
 import LamboProofs.Flush.Errors
-import LamboProofs.BatchQueue
+import LamboProofs.BatchQueue.Pure
+import LamboProofs.BatchQueue.Worker
+import LamboProofs.BatchQueue.Runs
 import LamboProofs.Registry.Step
 import LamboProofs.Registry.Pure
 import LamboProofs.Registry.Runs

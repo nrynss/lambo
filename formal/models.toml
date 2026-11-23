@@ -595,10 +595,31 @@ rust = [
   "src/store/flush.rs#FlushLoop::drain_and_flush",
 ]
 
+# The worker's pieces, each without the state machine.
+[[model]]
+lean = "formal/LamboProofs/BatchQueue/Pure.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:0320437c81f8831a1b0956ddc4ef1ee39d8b389bc80e4ce01fdb0b8d81829547"
+rust = [
+  "src/embed/candle.rs#take_prioritized",
+  "src/embed/candle.rs#length_chunks",
+  "src/embed/candle.rs#forward_isolated",
+  "src/embed/candle.rs#serve_take",
+]
+
 # Left out: the files issue #273 proposes splitting candle.rs into.
 [[model]]
-lean = "formal/LamboProofs/BatchQueue.lean"
-read_against = "514da8d7"
+lean = "formal/LamboProofs/BatchQueue/Worker.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:c218f50a35ab430e950c694da788fcd4e723b4509aa56b24518fb7f047f7b8e6"
+rust = [
+  "src/embed/candle.rs",
+]
+
+# The coalescer tests' scenarios.
+[[model]]
+lean = "formal/LamboProofs/BatchQueue/Runs.lean"
+read_against = "e9b647cf"
 read_digest = "v2:sha256:c218f50a35ab430e950c694da788fcd4e723b4509aa56b24518fb7f047f7b8e6"
 rust = [
   "src/embed/candle.rs",

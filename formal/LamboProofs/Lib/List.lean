@@ -21,7 +21,7 @@ namespace Lambo.Lib
 
 /-! ## Membership, `any` and `map`
 
-Moved from `BatchQueue.lean`, `Fusion.lean` (now `Fusion/`), `Hotlist.lean` (now `Hotlist/`). -/
+Moved from `BatchQueue.lean` (now `BatchQueue/`), `Fusion.lean` (now `Fusion/`), `Hotlist.lean` (now `Hotlist/`). -/
 
 theorem any_of_mem {ι : Type} {ids : List ι} {f : ι → Bool} {n : ι} (hn : n ∈ ids) (h : f n = true) :
     ids.any f = true := List.any_eq_true.mpr ⟨n, hn, h⟩
@@ -140,7 +140,7 @@ theorem two_le_length_iff {A : Type} {l : List A} (h : l.Nodup) :
 
 /-! ## Permutations and prefixes
 
-Moved from `BatchQueue.lean`, `Flush.lean` (now `Flush/Loop.lean`). -/
+Moved from `BatchQueue.lean` (now `BatchQueue/`), `Flush.lean` (now `Flush/Loop.lean`). -/
 
 theorem eraseIdx_perm {α : Type} (g : List α) (i : Nat) (h : i < g.length) :
     g.Perm (g[i] :: g.eraseIdx i) := by

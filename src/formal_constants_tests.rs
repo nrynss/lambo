@@ -614,7 +614,7 @@ fn flush() {
 
 #[test]
 fn batch_queue() {
-    let lean = Lean::new(model!("BatchQueue"));
+    let lean = Lean::new(model!("BatchQueue/Pure"));
     let cfg_fields = lean.fields("Cfg");
     let cfg = lean.def("Cfg.rust", "Cfg");
     let field = |name: &str| cfg.anon(&cfg_fields, name).nat().to::<usize>();

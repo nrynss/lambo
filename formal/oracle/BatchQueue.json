@@ -1,6 +1,6 @@
 {
 "model": "BatchQueue",
-"lean": "formal/LamboProofs/BatchQueue.lean",
+"lean": "formal/LamboProofs/BatchQueue/Pure.lean",
 "generator": "formal/OracleExport/Main.lean",
 "seed": 284563882824,
 "notes": [
