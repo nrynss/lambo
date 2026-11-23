@@ -607,17 +607,42 @@ rust = [
 # Left out: src/store/flush.rs's stale-write latch, a match arm inside the
 # flush loop that Flush/Loop.lean already covers; the files issue #273 proposes.
 [[model]]
-lean = "formal/LamboProofs/Registry.lean"
-read_against = "514da8d7"
-read_digest = "v2:sha256:3a2f3488c9a6af870e63a17adff301ce8cd63af89172e76920d0c1e6d4635c0b"
+lean = "formal/LamboProofs/Registry/Step.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:1fc1718a5e80d88a3bf3879dba40b9046494aa39ba2811b34bb4a5f1dda01ef0"
 rust = [
   "src/mcp/serve/registry.rs",
   "src/mcp/serve/registry/on_demand.rs",
   "src/mcp/serve/registry/erase.rs",
-  "src/mcp/serve/registry/views.rs",
   "src/memory/leases.rs",
+]
+
+# The registry's stateless functions.
+[[model]]
+lean = "formal/LamboProofs/Registry/Pure.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:5305ed80731e9416ceb9977c4bc20fe6c285502d860884ccb9c4872308d5c752"
+rust = [
+  "src/mcp/serve/registry/on_demand.rs",
+  "src/mcp/serve/registry/views.rs",
+  "src/mcp/serve/registry.rs#answer_for",
+  "src/mcp/serve/registry.rs#LeaseLossPolicy::for_scope",
+  "src/mcp/serve/registry.rs#PINNED_RETRY",
+  "src/mcp/serve/registry.rs#pinned_retry",
+  "src/mcp/serve/registry.rs#SessionRegistry::lookup",
   "src/main.rs#too_many_stdio_sessions",
   "src/mcp/serve/http_guards.rs#credential_share",
+]
+
+# Concrete runs of the step relation.
+[[model]]
+lean = "formal/LamboProofs/Registry/Runs.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:5ac6dd397d812ef24decce3c9f78a34de10c4e1c2d6e0a545fcc3ab941877763"
+rust = [
+  "src/mcp/serve/registry.rs",
+  "src/mcp/serve/registry/on_demand.rs",
+  "src/mcp/serve/registry/erase.rs",
 ]
 
 # What each command builds, and from which lambo.toml. Left out: the

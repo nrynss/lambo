@@ -684,7 +684,8 @@ fn registry() {
         NEGATIVE_TTL, PINNED_RETRY, PREVIOUS_HANDLE_WAIT, UNPLACED_PER_PLACE,
     };
 
-    let lean = Lean::new(model!("Registry"));
+    let lean = Lean::new(model!("Registry/Pure"));
+    let runs = Lean::new(model!("Registry/Runs"));
 
     // pinnedRetry (milliseconds): at the Rust's election retry, and swept
     // across the floor so both branches are compared.
@@ -712,8 +713,9 @@ fn registry() {
         );
     }
 
-    // cfgEx's fixed constants, in milliseconds.
-    let cfg = lean.def("cfgEx", "Cfg");
+    // cfgEx's fixed constants, in milliseconds. cfgEx is in Registry/Runs;
+    // its `pr` and `cap` call Registry/Pure's functions, evaluated there.
+    let cfg = runs.def("cfgEx", "Cfg");
     assert_pin!(ELECTION_RETRY, cfg.record("er").nat().ms());
     assert_pin!(PINNED_RETRY, lean.eval_val(&cfg.record("pr")).ms());
     assert_pin!(PREVIOUS_HANDLE_WAIT, cfg.record("wait").nat().ms());
@@ -721,7 +723,7 @@ fn registry() {
     assert_pin!(NEGATIVE_TTL, cfg.record("ttl").nat().ms());
 
     // dropped_flight_fences_next's doc: the TTL and the release grace.
-    let doc = lean.doc_captures(
+    let doc = runs.doc_captures(
         "delayed past `NEGATIVE_TTL` ($ s; the release itself is bounded by
          `LEASE_RELEASE_GRACE`, $ s,",
     );

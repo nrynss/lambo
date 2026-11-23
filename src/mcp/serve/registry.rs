@@ -2088,9 +2088,10 @@ impl super::http_guards::LiveSessions for SessionRegistry {
 }
 
 /// Test-only aliases of the serve's retry and grace constants, for
-/// `crate::formal_constants_tests` (#291): `formal/LamboProofs/Registry.lean`
-/// hard-codes them in `pinnedRetry`, `unplacedCap` and `cfgEx`. They live in
-/// private modules, so the aliases sit here, where all of them are visible.
+/// `crate::formal_constants_tests` (#291): `formal/LamboProofs/Registry/Pure.lean`
+/// hard-codes them in `pinnedRetry` and `unplacedCap`, and `Registry/Runs.lean`
+/// in `cfgEx`. They live in private modules, so the aliases sit here, where all
+/// of them are visible.
 #[cfg(test)]
 pub(crate) mod formal_pins {
     use std::time::Duration;
