@@ -714,6 +714,19 @@ impl WritePipeline {
         self.arm_test_pause(super::admission::PausePoint::AfterCommit)
     }
 
+    /// Test-only (#345 review): the next worker whose write commits panics
+    /// right after `WriteCtx::run` returns, before its settle.
+    #[cfg(test)]
+    pub(crate) fn panic_after_commit(&self) {
+        self.lanes.lock().panic_after_commit = true;
+    }
+
+    /// Test-only: whether a worker has taken that panic.
+    #[cfg(test)]
+    pub(crate) fn test_panicked(&self) -> bool {
+        self.lanes.lock().test_panicked
+    }
+
     #[cfg(test)]
     fn arm_test_pause(&self, point: super::admission::PausePoint) -> (Arc<Notify>, Arc<Notify>) {
         let reached = Arc::new(Notify::new());
@@ -866,6 +879,16 @@ impl WritePipeline {
                     #[cfg(test)]
                     if raw_outcome.is_ok() {
                         test_pause(&lanes, super::admission::PausePoint::AfterCommit).await;
+                        // Test-only (#345 review): a panic after the commit.
+                        let panic_now = {
+                            let mut l = lanes.lock();
+                            let armed = std::mem::take(&mut l.panic_after_commit);
+                            l.test_panicked |= armed;
+                            armed
+                        };
+                        if panic_now {
+                            panic!("test-only panic after a commit, before its settle");
+                        }
                     }
                     // Which failures hold the write rather than consume it.
                     // An embedder outage says nothing about the input, so the

@@ -664,6 +664,15 @@ pub(super) struct Lanes {
     /// then (it panics), so no test can close over a paused worker.
     #[cfg(test)]
     pub(super) test_paused: bool,
+    /// Test-only, one-shot: the next worker whose write committed panics
+    /// right after `WriteCtx::run` returns, before its `Ok` arm and its
+    /// settle, as a panic in the index mirroring or the ledger append would
+    /// (#345 review). Its receipt stays unsettled for the close to set aside.
+    #[cfg(test)]
+    pub(super) panic_after_commit: bool,
+    /// Test-only: set by the worker just before that panic.
+    #[cfg(test)]
+    pub(super) test_panicked: bool,
 }
 
 /// Where a test pause stops a worker whose write committed (test-only).

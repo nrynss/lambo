@@ -619,6 +619,93 @@ async fn a_retried_close_upgrades_only_the_intents_it_can_vouch_for() {
     assert_eq!(receipts, [kept.to_string()]);
 }
 
+/// Unreachable (`EmbedError::Unavailable`) while `down` is set, the fixture
+/// embedder otherwise.
+struct SwitchEmbedder {
+    inner: FixtureEmbedder,
+    down: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Embedder for SwitchEmbedder {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(crate::embed::EmbedError::Unavailable(
+                "llama.cpp unreachable: connection refused".into(),
+            ));
+        }
+        self.inner.embed(text).await
+    }
+}
+
+/// **#345 re-review**: a lane worker can panic after its commit (the graph
+/// write and the intent's consume) and before its settle, in the index
+/// mirroring or the ledger append. Its receipt stays unsettled and the close
+/// sets it aside. Here the write's put was dead-lettered while it was held;
+/// the embedder comes back, the retry commits, and the worker panics. The
+/// close must answer `close_unflushed`: the store never held the intent.
+/// With the dead-lettered set pruned at the consume, the receipt had left the
+/// set and the close answered `intent_durable`.
+///
+/// Mirrors `Drain.keptAtConsume_vouches_after_panic` (the bug) and
+/// `Drain.settlePrune_never_vouches_dropped` (the fix).
+#[tokio::test(start_paused = true)]
+async fn a_worker_that_panics_after_its_commit_does_not_get_intent_durable() {
+    let inner = Arc::new(MemoryStore::new());
+    let agent = AgentId::new("agent-a");
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let store = Arc::new(
+        FlakyStore::new(
+            Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>,
+            0,
+        )
+        .with_dead_letters(1),
+    );
+    let mem = Memory::builder()
+        .session("dead-lettered-panic")
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(100))
+        .store(store.clone() as Arc<dyn GraphStore>)
+        .embedder(Arc::new(SwitchEmbedder {
+            inner: FixtureEmbedder::new(),
+            down: down.clone(),
+        }) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    let receipt = submit_and_hold(&mem, &agent, "user schema").await;
+    until_mem(&mem, "the dead letter", |m| m.stats().dead_lettered == 1).await;
+    assert!(holds_put(&store.batches()[0], receipt));
+
+    // The embedder is back: the held write's retry commits, then its worker
+    // panics before settling it.
+    mem.pipeline().panic_after_commit();
+    down.store(false, Ordering::SeqCst);
+    until_mem(&mem, "the worker to panic after its commit", |m| {
+        m.pipeline().test_panicked()
+    })
+    .await;
+    assert_ne!(
+        mem.pipeline().lookup(&agent, receipt).tag(),
+        "applied",
+        "the panic came before the settle"
+    );
+
+    let _ = mem.close().await;
+    let answer = mem.pipeline().lookup(&agent, receipt);
+    assert_eq!(
+        answer.tag(),
+        "close_unflushed",
+        "a close must not vouch for an intent a dead letter dropped, after a worker panic: \
+         {answer:?}"
+    );
+}
+
 /// A consumed intent row older than the retention window
 /// must not answer better for having survived a restart than the same id
 /// would in a process that never restarted.
