@@ -873,11 +873,9 @@ impl FlushLoop {
                 let batch_len = self.pending.len();
                 // #345: the write intents this batch put never reached the
                 // store either; a close must not answer them
-                // `intent_durable`. Noted before `pending` is cleared.
-                self.graph
-                    .write()
-                    .note_dead_lettered_intents(&self.pending.mutations);
-                self.drop_pending();
+                // `intent_durable`. Noted under the same graph lock hold as
+                // the pin, before `pending` is cleared.
+                self.dead_letter_pending();
                 self.retry_after = None;
                 self.shared.dead_lettered.fetch_add(1, Ordering::AcqRel);
                 self.refresh_depth();
@@ -1188,13 +1186,26 @@ impl FlushLoop {
         self.clear_pending();
     }
 
-    /// `pending` is dropped without reaching the store (a dead letter, a
-    /// degraded session, a lost lease): keep what it touched marked as not
+    /// `pending` is dropped without reaching the store (a degraded session, a
+    /// lost lease; a dead letter goes through [`Self::dead_letter_pending`],
+    /// which does this too): keep what it touched marked as not
     /// durable in the graph (#60), then clear it. A later successful stamp
     /// must not count these writes as committed.
     fn drop_pending(&mut self) {
         if !self.pending.mutations.is_empty() {
             self.graph.write().pin_unflushed(&self.pending.mutations);
+        }
+        self.clear_pending();
+    }
+
+    /// `pending` is dead-lettered: [`Self::drop_pending`], and in the same
+    /// graph write lock hold the write intents it put are noted as never
+    /// durable (`Graph::note_dead_lettered_intents`, #345).
+    fn dead_letter_pending(&mut self) {
+        if !self.pending.mutations.is_empty() {
+            let mut graph = self.graph.write();
+            graph.note_dead_lettered_intents(&self.pending.mutations);
+            graph.pin_unflushed(&self.pending.mutations);
         }
         self.clear_pending();
     }
