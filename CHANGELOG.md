@@ -4,24 +4,26 @@
 
 ### Changes
 
-- Formal models are reorganized without changing what they prove. The large
-  models are split along their Rust seams into directories in the same
+- Formal models are reorganized; no kept theorem's statement changes. The
+  large models are split along their Rust seams into directories in the same
   namespace (`Drain/`, `Conflict/`, `Policy/`, `Contract/`, `Supersession/`,
   `Hotlist/`, `Flush/`, `Resolve/`, `Fusion/`, `Registry/`, `Tiered/`,
-  `BatchQueue/`), generic list facts move to `LamboProofs/Lib/List.lean`, and
-  every model's header now says what it models, which Rust, its end results and
-  what it does not cover. Every theorem is used by another proof or has a doc
-  comment stating what it guarantees about which Rust behaviour, and CI checks
-  that rule (`scripts/formal/audit-theorems.py --check`). The 70 theorems that
-  met neither, or whose doc comment did not hold up against the Rust on review
+  `BatchQueue/`), the runs of the Rust before a fix move to `History.lean`
+  files the docs may not cite (`Drain/`, `Tiered/`), generic list facts move
+  to `LamboProofs/Lib/List.lean`, and every model's header now says what it
+  models, which Rust, its end results and what it does not cover. Every
+  theorem is used by another proof or has a doc comment stating what it
+  guarantees about which Rust behaviour, and CI checks that rule
+  (`scripts/formal/audit-theorems.py --check`). The 70 theorems that met
+  neither, or whose doc comment did not hold up against the Rust on review
   (pure order theory or arithmetic, a design not in the Rust), are deleted,
-  each listed with its reason in `formal/audit/deleted-theorems.tsv`. A theorem
-  nothing else references keeps its place only with a reviewed verdict in
-  `formal/audit/reviewed-theorems.tsv`, and `--check` fails on one without. `scripts/formal/check-decl-equivalence.py`
-  compares the Lean environments of two trees and confirms that every other
-  theorem is stated exactly as before, with the moved helpers in
-  `formal/audit/moved-helpers.tsv`. Earlier entries below name model files as
-  they were before the split.
+  each listed with its reason in `formal/audit/deleted-theorems.tsv`. A
+  theorem nothing else references keeps its place only with a reviewed verdict
+  in `formal/audit/reviewed-theorems.tsv`, and `--check` fails on one without.
+  `scripts/formal/check-decl-equivalence.py` compares the Lean environments of
+  two trees and confirms that every other theorem is stated exactly as before,
+  with the moved helpers in `formal/audit/moved-helpers.tsv`. Earlier entries
+  below name model files as they were before the split.
 - Formal models: `formal/LamboProofs/Drain.lean` states the close, crash and
   shutdown accounting over the current write-queue worker (#295's held
   writes, retries and fence), not only over the worker before #295, under
