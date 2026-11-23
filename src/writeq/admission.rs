@@ -657,28 +657,28 @@ pub(super) struct Lanes {
     /// of the same iteration (#346). Taken by that worker; `None` otherwise,
     /// and then the worker does not await there. See
     /// `execution::test_pause` for what holds while a worker waits.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(super) test_pause: Option<TestPause>,
     /// Test-only: `true` while a worker waits at a test pause, between a
     /// commit and its settle. [`WritePipeline::abort_workers`] and
     /// `abort_all_sync` refuse to run then (they panic; the latter not while
     /// a test is already panicking), so no test can close or drop a session
     /// over a paused worker.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(super) test_paused: bool,
     /// Test-only, one-shot: the next worker whose write committed panics
     /// right after `WriteCtx::run` returns, before its `Ok` arm and its
     /// settle, as a panic in the index mirroring or the ledger append would
     /// (#345 review). Its receipt stays unsettled for the close to set aside.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(super) panic_after_commit: bool,
     /// Test-only: set by the worker just before that panic.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(super) test_panicked: bool,
 }
 
 /// Where a test pause stops a worker whose write committed (test-only).
-#[cfg(test)]
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PausePoint {
     /// After `WriteCtx::run` returned `Ok`, before the worker's `Ok` arm.
@@ -688,7 +688,7 @@ pub(crate) enum PausePoint {
 }
 
 /// An armed test pause (test-only): see [`Lanes::test_pause`].
-#[cfg(test)]
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 pub(super) struct TestPause {
     pub(super) point: PausePoint,
     pub(super) reached: std::sync::Arc<tokio::sync::Notify>,

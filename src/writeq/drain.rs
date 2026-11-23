@@ -157,7 +157,7 @@ impl WritePipeline {
         // Test builds only: a worker waiting at a test pause has committed a
         // write it has not settled, so aborting it would break "aborted means
         // not written" (`execution::test_pause`).
-        #[cfg(test)]
+        #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
         assert!(
             !self.lanes.lock().test_paused,
             "abort_workers ran while a worker waits at a test pause: resume it before the close"
@@ -385,7 +385,7 @@ impl WritePipeline {
         // Test builds only, as in `abort_workers`: never abort a worker
         // waiting at a test pause. Skipped while a test is already
         // panicking, where a second panic would abort the process.
-        #[cfg(test)]
+        #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
         if !std::thread::panicking() {
             assert!(
                 !lanes.test_paused,

@@ -682,7 +682,7 @@ pub(crate) fn held_retry_backoff(attempts: u32) -> std::time::Duration {
 /// `Memory`, unless the test is already panicking) panic while it is set: a
 /// test must notify `resume` before it closes or drops the session. Unarmed (every other test, and
 /// every non-test build, which has no pause at all), nothing here awaits.
-#[cfg(test)]
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 async fn test_pause(lanes: &parking_lot::Mutex<super::Lanes>, point: super::admission::PausePoint) {
     let pause = {
         let mut l = lanes.lock();
@@ -719,7 +719,7 @@ impl WritePipeline {
     /// commits notifies the first `Notify` and waits for the second before
     /// its settle block. The test must notify `resume` before it closes the
     /// session: see [`test_pause`].
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn pause_before_settle(&self) -> (Arc<Notify>, Arc<Notify>) {
         self.arm_test_pause(super::admission::PausePoint::BeforeSettle)
     }
@@ -728,25 +728,25 @@ impl WritePipeline {
     /// `WriteCtx::run` has returned and before the worker's `Ok` arm. The
     /// test must notify `resume` before it closes the session: see
     /// [`test_pause`].
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn pause_after_commit(&self) -> (Arc<Notify>, Arc<Notify>) {
         self.arm_test_pause(super::admission::PausePoint::AfterCommit)
     }
 
     /// Test-only (#345 review): the next worker whose write commits panics
     /// right after `WriteCtx::run` returns, before its settle.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn panic_after_commit(&self) {
         self.lanes.lock().panic_after_commit = true;
     }
 
     /// Test-only: whether a worker has taken that panic.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn test_panicked(&self) -> bool {
         self.lanes.lock().test_panicked
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     fn arm_test_pause(&self, point: super::admission::PausePoint) -> (Arc<Notify>, Arc<Notify>) {
         let reached = Arc::new(Notify::new());
         let resume = Arc::new(Notify::new());
@@ -895,7 +895,7 @@ impl WritePipeline {
                     // Test-only (#346): hold a committed write here, after
                     // `run` returned and before the `Ok` arm, while another
                     // worker runs. See `test_pause`.
-                    #[cfg(test)]
+                    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
                     if raw_outcome.is_ok() {
                         test_pause(&lanes, super::admission::PausePoint::AfterCommit).await;
                         // Test-only (#345 review): a panic after the commit.
@@ -1044,7 +1044,7 @@ impl WritePipeline {
                 // Test-only (#346): hold a committed write here, between its
                 // commit and its settle block, while another worker runs. See
                 // `test_pause` for what that costs and how it is guarded.
-                #[cfg(test)]
+                #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
                 if outcome.is_ok() {
                     test_pause(&lanes, super::admission::PausePoint::BeforeSettle).await;
                 }
