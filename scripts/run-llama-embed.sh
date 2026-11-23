@@ -35,6 +35,10 @@ fi
 
 MODEL="${LAMBO_BGE_M3_MODEL:-$ROOT/models/bge-m3/bge-m3-FP16.gguf}"
 CTX="${LAMBO_LLAMA_EMBED_CTX:-8192}"
+# An embedding is computed in one physical batch, so the batch sizes must cover
+# the longest input. llama-server defaults to a 512-token ubatch and answers
+# HTTP 500 for longer input while /health still passes; match both to the context.
+BATCH="${LAMBO_LLAMA_EMBED_BATCH:-$CTX}"
 
 check_health() {
   curl -fsS --max-time 2 "${URL%/}/health" >/dev/null 2>&1
@@ -71,6 +75,7 @@ echo "  model : $MODEL"
 echo "  bind  : $HOST:$PORT"
 echo "  url   : ${URL}"
 echo "  ctx   : $CTX"
+echo "  batch : $BATCH"
 
 # `--embedding` exposes the /v1/embeddings (and /embedding) endpoints.
 exec "$SERVER" \
@@ -78,5 +83,7 @@ exec "$SERVER" \
   --host "$HOST" \
   --port "$PORT" \
   -c "$CTX" \
+  --batch-size "$BATCH" \
+  --ubatch-size "$BATCH" \
   --embedding \
   "$@"
