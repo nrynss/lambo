@@ -6468,6 +6468,75 @@ theorem closeD_retryD {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
     rw [lookup_settleDeferred, ite_eq_left hm] at hr
     exact hr
 
+/-! ### What the Rust keeps of the dead-lettered puts
+
+The Rust does not keep every dead-lettered put for the life of the process:
+`Graph::consume_write_intent` forgets a receipt once its write's consume is
+appended (a dead-lettered held write retried and applied, say), so the set
+holds the dropped puts whose writes the log has not consumed
+(`keptDropped`). A set-aside write's intent is never consumed (`InvW`), so
+forgetting the consumed ones changes no answer the close gives
+(`closeD_keptDropped`), and the exactness theorems above hold of the kept
+set as they do of `droppedPuts`. -/
+
+/-- Whether the log consumes receipt `k`. -/
+def consumedIn (log : List Batch) (k : Key) : Bool :=
+  log.flatten.any (fun m => match m with
+    | .consume k' _ => decide (k' = k)
+    | _ => false)
+
+/-- The dead-lettered puts the Rust still holds at close
+(`Graph::dead_lettered_intents`): those whose write the log has not
+consumed. -/
+def keptDropped (log : List Batch) (dropped : List Key) : List Key :=
+  dropped.filter (fun k => !consumedIn log k)
+
+theorem consumedIn_false {log : List Batch} {k : Key} (h : Untouched k log) :
+    consumedIn log k = false := by
+  unfold consumedIn
+  rw [List.any_eq_false]
+  intro m hm
+  cases m with
+  | put _ => simp
+  | write _ => simp
+  | consume k' t =>
+    simp only [decide_eq_true_eq]
+    intro hk
+    subst hk
+    exact h t hm
+
+theorem setAside_untouched {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) : Untouched j.key st.log := by
+  subst hst
+  have hI := sessionW_inv c sz now all evs hnd hall
+  simp only [List.mem_append] at hj
+  rcases hj with (hj | hj) | hj
+  · exact (hI.live j (List.mem_append_left _ hj)).2
+  · exact (hI.held j hj).2
+  · exact (hI.live j (List.mem_append_right _ hj)).2
+
+/-- **Forgetting consumed receipts changes no set-aside write's answer.** The
+close over the kept set answers every set-aside write as the close over all
+the dead-lettered puts does. -/
+theorem closeD_keptDropped {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (dropped : List Key) (now' : Int)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) :
+    ansOf (closeD flush (keptDropped st.log dropped) now' st) j.key =
+      ansOf (closeD flush dropped now' st) j.key := by
+  rw [closeD_setAside hst hnd hall flush _ now' hj, closeD_setAside hst hnd hall flush _ now' hj]
+  have hc := consumedIn_false (setAside_untouched hst hnd hall hj)
+  have hm : j.key ∈ keptDropped st.log dropped ↔ j.key ∈ dropped := by
+    unfold keptDropped
+    simp [hc]
+  unfold flushFor
+  by_cases hd : j.key ∈ dropped
+  · rw [ite_eq_left (hm.mpr hd), ite_eq_left hd]
+  · rw [ite_eq_right (fun h => hd (hm.mp h)), ite_eq_right hd]
+
 /-- **#345, the concrete case: the current close vouches for a dead-lettered
 put.** `j1` meets an embedder outage and is held (`pending_replay`); the
 background flush that drained its put dead-letters the batch, so every batch
