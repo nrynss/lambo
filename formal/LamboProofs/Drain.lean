@@ -6476,14 +6476,19 @@ theorem closeD_retryD {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
 
 /-! ### What the Rust keeps of the dead-lettered puts
 
-The Rust does not keep every dead-lettered put for the life of the process:
-`Graph::consume_write_intent` forgets a receipt once its write's consume is
-appended (a dead-lettered held write retried and applied, say), so the set
-holds the dropped puts whose writes the log has not consumed
-(`keptDropped`). A set-aside write's intent is never consumed (`InvW`), so
-forgetting the consumed ones changes no answer the close gives
-(`closeD_keptDropped`), and the exactness theorems above hold of the kept
-set as they do of `droppedPuts`. -/
+`keptDropped` is the set a first version of the #345 review fix kept
+(`1b4d89e4`): `Graph::consume_write_intent` forgot a receipt once its
+write's consume was appended, so the set held the dropped puts whose writes
+the log had not consumed. In this model a set-aside write's intent is never
+consumed (`InvW`), so forgetting the consumed ones changes no answer
+(`closeD_keptDropped`). **That premise is the model's, not the Rust's:** a
+lane worker that panics after its commit and before its settle leaves a
+consumed write unsettled, and the close sets it aside. `stepW` has no
+panic, so `closeD_keptDropped` does not see it; the section "Worker panics
+and the dead-lettered set" models it, shows the consume-time pruning
+vouching for a dropped put there (`keptAtConsume_vouches_after_panic`), and
+proves the current Rust's rule, pruning at the settle
+(`settlePrune_never_vouches_dropped`). -/
 
 /-- Whether the log consumes receipt `k`. -/
 def consumedIn (log : List Batch) (k : Key) : Bool :=
@@ -6523,9 +6528,13 @@ theorem setAside_untouched {c : Caps} {sz : Job → Nat} {now : Int} {all : List
   · exact (hI.held j hj).2
   · exact (hI.live j (List.mem_append_right _ hj)).2
 
-/-- **Forgetting consumed receipts changes no set-aside write's answer.** The
-close over the kept set answers every set-aside write as the close over all
-the dead-lettered puts does. -/
+/-- **Forgetting consumed receipts changes no set-aside write's answer**, in
+this model: the close over the kept set answers every set-aside write as the
+close over all the dead-lettered puts does. It rests on `InvW` (a set-aside
+write's intent is unconsumed), which a lane worker that panics after its
+commit breaks in the Rust; `stepW` has no panic. With one, consume-time
+pruning vouches for a dropped put (`keptAtConsume_vouches_after_panic`); the
+current Rust prunes at the settle (`settlePrune_never_vouches_dropped`). -/
 theorem closeD_keptDropped {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
     {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
     (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
@@ -6584,6 +6593,234 @@ example :
         (ansOf (settleDeferred .durable 2 (deferredW st) (closeW .incomplete 1 st))) =
         [some .intentRecorded, some .intentRecorded] := by
   decide
+
+/-! ## Worker panics and the dead-lettered set (#345 review)
+
+`stepW` has no panic. In the Rust a lane worker can panic after its commit
+(the graph write and the intent's consume, under one graph lock hold) and
+before `settle_one`: in the index mirroring, the receipt summary or the
+ledger append. Its receipt stays unsettled (`Lanes::worker_alive`), and the
+close sets it aside like a running write. This focused model follows one
+session's receipts through the steps that touch the dead-lettered set
+(`Graph::dead_lettered_intents`):
+
+* `consume k`: the write's consume is appended (its commit, or a failure's
+  consume), under the graph lock;
+* `settle k`: the worker's settle block, after `settle_one`;
+* `deadLetter ks`: a background flush dead-letters a batch whose puts are
+  `ks`. A put precedes its consume in log order and the dropped batch is the
+  flush's only pending one, so a consume of `k` appended before this step is
+  in that batch or still in the log, which is what the Rust's note-time skip
+  looks at.
+
+A panic is a `consume k` with no `settle k` after it. At close, a receipt not
+settled is set aside, and a close whose final flush completed answers it
+`intent_durable` exactly when it is not in the set.
+
+* `stepK` (the rule at `1b4d89e4`): a consume forgets the receipt, and the
+  note skips a put already consumed. `keptAtConsume_vouches_after_panic`
+  (`decide`): a write whose put was dead-lettered, then consumed, then whose
+  worker panicked, is set aside and out of the set, so the close vouches for
+  it; the same when the consume rode the dropped batch.
+* `stepP` (the current Rust): a worker's consume also records the receipt as
+  consumed and not yet settled (`Graph::consumed_unsettled`); the settle
+  block forgets it from both sets; the note skips a put only when its write
+  is consumed and no longer in that record, that is, settled.
+  `settlePrune_never_vouches_dropped`: over every trace, a dropped put whose
+  write is not settled is in the set, so no close vouches for it, panics
+  included. `settlePrune_exact`: for a write not settled, it is in the set
+  exactly when its put was dropped, so the close's exactness
+  (`closeD_durable_iff`) carries over. `settlePrune_settled_forgotten`: a
+  settled write whose consume came before its settle, as the worker's always
+  does, leaves the set at its settle and is not noted again, so the set
+  holds only writes not yet settled, or never consumed (refused after a lost
+  lease, whose close answers `close_unflushed` anyway).
+  `settlePrune_unsettled_bounded`: the record of consumed, unsettled writes
+  holds only such writes: at most one per worker between its commit and its
+  settle, plus one per panicked worker. -/
+
+/-- A step that touches the dead-lettered set. -/
+inductive DEv where
+  | consume (k : Key)
+  | settle (k : Key)
+  | deadLetter (ks : List Key)
+  deriving DecidableEq, Repr
+
+/-- The bookkeeping: the set (`dl`), the consumed-and-unsettled record
+(`cu`), and, for the statements, which writes were consumed and settled and
+which puts were dropped. -/
+structure DS where
+  dl : List Key
+  cu : List Key
+  consumed : List Key
+  settled : List Key
+  dropped : List Key
+  deriving DecidableEq, Repr
+
+def DS.init : DS := ⟨[], [], [], [], []⟩
+
+/-- The rule at `1b4d89e4`: prune at the consume, skip a consumed put at the
+note. -/
+def stepK (s : DS) : DEv → DS
+  | .consume k => { s with consumed := k :: s.consumed, dl := s.dl.filter (· ≠ k) }
+  | .settle k => { s with settled := k :: s.settled }
+  | .deadLetter ks =>
+    { s with dropped := ks ++ s.dropped, dl := ks.filter (fun k => k ∉ s.consumed) ++ s.dl }
+
+/-- The current rule: prune at the settle; skip at the note only a put whose
+write is consumed and settled (consumed, and out of `cu`). -/
+def stepP (s : DS) : DEv → DS
+  | .consume k => { s with consumed := k :: s.consumed, cu := k :: s.cu }
+  | .settle k =>
+    { s with settled := k :: s.settled, cu := s.cu.filter (· ≠ k), dl := s.dl.filter (· ≠ k) }
+  | .deadLetter ks =>
+    { s with dropped := ks ++ s.dropped,
+             dl := ks.filter (fun k => k ∉ s.consumed ∨ k ∈ s.cu) ++ s.dl }
+
+/-- What a close whose final flush completed answers a set-aside receipt
+`k` (one not settled), given the set. -/
+def vouches (s : DS) (k : Key) : Bool := decide (k ∉ s.settled) && decide (k ∉ s.dl)
+
+private def kP : Key := (0, 1000, 1)
+
+/-- **#345 review: pruning at the consume vouches for a dropped put after a
+worker panic.** The write's put is dead-lettered while it is queued; it
+commits (its consume is appended, which forgets it); its worker panics
+before the settle. At close it is set aside and out of the set, so the close
+answers `intent_durable`, though its put was dropped. Second case: the put
+and the consume ride the dropped batch together, and the note skips it. The
+current rule keeps both in the set. Rust test
+`a_worker_that_panics_after_its_commit_does_not_get_intent_durable`. -/
+theorem keptAtConsume_vouches_after_panic :
+    let t1 := [DEv.deadLetter [kP], .consume kP]
+    let t2 := [DEv.consume kP, .deadLetter [kP]]
+    (t1.foldl stepK DS.init).dropped = [kP] ∧ vouches (t1.foldl stepK DS.init) kP = true ∧
+      (t2.foldl stepK DS.init).dropped = [kP] ∧ vouches (t2.foldl stepK DS.init) kP = true ∧
+      vouches (t1.foldl stepP DS.init) kP = false ∧ vouches (t2.foldl stepP DS.init) kP = false := by
+  decide
+
+/-- The current rule's invariant. -/
+structure PInv (s : DS) : Prop where
+  /-- A dropped put whose write is not settled is in the set. -/
+  sound : ∀ k ∈ s.dropped, k ∉ s.settled → k ∈ s.dl
+  /-- The set holds only dropped puts. -/
+  sub : ∀ k ∈ s.dl, k ∈ s.dropped
+  /-- A consumed write not yet settled is in the record. -/
+  cu_of : ∀ k ∈ s.consumed, k ∉ s.settled → k ∈ s.cu
+  /-- The record holds only consumed, unsettled writes. -/
+  cu_sub : ∀ k ∈ s.cu, k ∈ s.consumed ∧ k ∉ s.settled
+
+theorem pinv_init : PInv DS.init := by
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> intro k hk <;> simp [DS.init] at hk
+
+/-- The step a worker can take: it never consumes a write it already
+settled (a write is consumed at most once, before its settle). -/
+def DEv.ok (s : DS) : DEv → Prop
+  | .consume k => k ∉ s.settled
+  | _ => True
+
+theorem stepP_inv (s : DS) (e : DEv) (hI : PInv s) (he : e.ok s) : PInv (stepP s e) := by
+  cases e with
+  | consume k =>
+    simp only [DEv.ok] at he
+    refine ⟨hI.sound, hI.sub, ?_, ?_⟩
+    · intro x hx hs
+      simp only [stepP, List.mem_cons] at hx hs ⊢
+      rcases hx with rfl | hx
+      · exact Or.inl rfl
+      · exact Or.inr (hI.cu_of x hx hs)
+    · intro x hx
+      simp only [stepP, List.mem_cons] at hx ⊢
+      rcases hx with rfl | hx
+      · exact ⟨Or.inl rfl, he⟩
+      · exact ⟨Or.inr (hI.cu_sub x hx).1, (hI.cu_sub x hx).2⟩
+  | settle k =>
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · intro x hx hs
+      simp only [stepP, List.mem_cons, not_or] at hx hs ⊢
+      exact List.mem_filter.mpr ⟨hI.sound x hx hs.2, by simp [hs.1]⟩
+    · intro x hx
+      simp only [stepP] at hx ⊢
+      exact hI.sub x (List.mem_filter.mp hx).1
+    · intro x hx hs
+      simp only [stepP, List.mem_cons, not_or] at hx hs ⊢
+      exact List.mem_filter.mpr ⟨hI.cu_of x hx hs.2, by simp [hs.1]⟩
+    · intro x hx
+      simp only [stepP, List.mem_cons, not_or] at hx ⊢
+      have h1 := List.mem_filter.mp hx
+      have h2 := hI.cu_sub x h1.1
+      refine ⟨h2.1, ?_, h2.2⟩
+      intro hk; subst hk; simp at h1
+  | deadLetter ks =>
+    refine ⟨?_, ?_, hI.cu_of, hI.cu_sub⟩
+    · intro x hx hs
+      simp only [stepP, List.mem_append] at hx hs ⊢
+      rcases hx with hx | hx
+      · refine Or.inl (List.mem_filter.mpr ⟨hx, ?_⟩)
+        by_cases hc : x ∈ s.consumed
+        · simp [hI.cu_of x hc hs]
+        · simp [hc]
+      · exact Or.inr (hI.sound x hx hs)
+    · intro x hx
+      simp only [stepP, List.mem_append] at hx ⊢
+      rcases hx with hx | hx
+      · exact Or.inl (List.mem_filter.mp hx).1
+      · exact Or.inr (hI.sub x hx)
+
+/-- Every step of a worker trace keeps the invariant. -/
+def DOk : DS → List DEv → Prop
+  | _, [] => True
+  | s, e :: es => e.ok s ∧ DOk (stepP s e) es
+
+theorem runP_inv : ∀ (evs : List DEv) (s : DS), PInv s → DOk s evs → PInv (evs.foldl stepP s)
+  | [], _, hI, _ => hI
+  | e :: es, s, hI, ⟨he, hr⟩ => runP_inv es (stepP s e) (stepP_inv s e hI he) hr
+
+/-- **The current rule never vouches for a dropped put, panics included.**
+Over every worker trace, a write whose put was dead-lettered and that is not
+settled (set aside by the close, a panicked worker's included) is in the
+set, so the close answers it `close_unflushed`. -/
+theorem settlePrune_never_vouches_dropped (evs : List DEv) (h : DOk DS.init evs) (k : Key)
+    (hd : k ∈ (evs.foldl stepP DS.init).dropped) :
+    vouches (evs.foldl stepP DS.init) k = false := by
+  have hI := runP_inv evs DS.init pinv_init h
+  unfold vouches
+  by_cases hs : k ∈ (evs.foldl stepP DS.init).settled
+  · simp [hs]
+  · simp [hI.sound k hd hs]
+
+/-- **The current rule is exact for the writes a close sets aside.** For a
+write not settled, it is in the set exactly when its put was dropped. -/
+theorem settlePrune_exact (evs : List DEv) (h : DOk DS.init evs) (k : Key)
+    (hs : k ∉ (evs.foldl stepP DS.init).settled) :
+    k ∈ (evs.foldl stepP DS.init).dl ↔ k ∈ (evs.foldl stepP DS.init).dropped := by
+  have hI := runP_inv evs DS.init pinv_init h
+  exact ⟨hI.sub k, fun hd => hI.sound k hd hs⟩
+
+/-- **The record of consumed, unsettled writes is bounded by them**: every
+entry is a write consumed and not settled (in the Rust, one per worker
+between its commit and its settle, plus one per panicked worker). -/
+theorem settlePrune_unsettled_bounded (evs : List DEv) (h : DOk DS.init evs) (k : Key)
+    (hk : k ∈ (evs.foldl stepP DS.init).cu) :
+    k ∈ (evs.foldl stepP DS.init).consumed ∧ k ∉ (evs.foldl stepP DS.init).settled :=
+  (runP_inv evs DS.init pinv_init h).cu_sub k hk
+
+/-- After a settle, a consumed write is out of the set and out of the
+record, and a later dead letter of its put does not note it. -/
+theorem settlePrune_settled_forgotten (s : DS) (k : Key) (hc : k ∈ s.consumed)
+    (ks : List Key) :
+    k ∉ (stepP s (.settle k)).dl ∧ k ∉ (stepP s (.settle k)).cu ∧
+      k ∉ (stepP (stepP s (.settle k)) (.deadLetter ks)).dl := by
+  have h1 : k ∉ (stepP s (.settle k)).dl := by simp [stepP]
+  have h2 : k ∉ (stepP s (.settle k)).cu := by simp [stepP]
+  refine ⟨h1, h2, ?_⟩
+  intro hm
+  simp only [stepP, List.mem_append] at hm
+  rcases hm with hm | hm
+  · have hk := (List.mem_filter.mp hm).2
+    simp at hk
+    exact hk hc
+  · simp at hm
 
 /-! ## Where the lookup-timeout streak resets (#346)
 
