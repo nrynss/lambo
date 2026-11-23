@@ -1,3 +1,4 @@
+import LamboProofs.Lib.List
 import LamboProofs.Score
 import LamboProofs.Order
 import LamboProofs.Expand

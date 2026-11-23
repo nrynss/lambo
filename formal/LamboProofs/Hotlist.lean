@@ -1,4 +1,5 @@
 import LamboProofs.TopK
+import LamboProofs.Lib.List
 
 /-
 # The daemon hot list and recall's force-inclusion
@@ -180,6 +181,8 @@ does not change.
 -/
 
 namespace Lambo.Hotlist
+
+open Lambo.Lib (eq_of_nodup_map length_le_of_nodup_subset)
 
 /-! ## Conditions, payloads, entries -/
 
@@ -944,19 +947,6 @@ end Insert
 
 /-! ## The invariant every reachable list satisfies -/
 
-theorem eq_of_nodup_map {α β : Type} (f : α → β) :
-    ∀ {l : List α}, (l.map f).Nodup → ∀ {x y : α}, x ∈ l → y ∈ l → f x = f y → x = y
-  | [], _, _, _, hx, _, _ => by simp at hx
-  | z :: zs, h, x, y, hx, hy, hf => by
-    have hz := List.nodup_cons.mp (show (f z :: zs.map f).Nodup from h)
-    rcases List.mem_cons.mp hx with hx1 | hx2
-    · rcases List.mem_cons.mp hy with hy1 | hy2
-      · rw [hx1, hy1]
-      · rw [hx1] at hf; exact absurd (hf ▸ List.mem_map_of_mem hy2) hz.1
-    · rcases List.mem_cons.mp hy with hy1 | hy2
-      · rw [hy1] at hf; exact absurd (hf.symm ▸ List.mem_map_of_mem hx2) hz.1
-      · exact eq_of_nodup_map f hz.2 hx2 hy2 hf
-
 theorem enforce_map_nodup {α : Type} (f : Entry ν → α) (max cmax : Nat) (es : List (Entry ν))
     (h : (es.map f).Nodup) : ((enforce max cmax es).1.map f).Nodup :=
   (((sortPrio_perm es).map f).nodup_iff.mpr h).sublist
@@ -1602,20 +1592,6 @@ theorem insertMany_inv {l : HotList ν} (hl : Inv l) (es : List (ν × Cond × P
 end Reachable
 
 /-! ## The cycle since #298: retain, then enforce once -/
-
-theorem length_le_of_nodup_subset {α : Type} [DecidableEq α] :
-    ∀ {l₁ : List α} (l₂ : List α), l₁.Nodup → (∀ x ∈ l₁, x ∈ l₂) → l₁.length ≤ l₂.length
-  | [], _, _, _ => by simp
-  | a :: t, l₂, hn, hs => by
-    have hn' := List.nodup_cons.mp hn
-    have ha : a ∈ l₂ := hs a List.mem_cons_self
-    have ht : ∀ x ∈ t, x ∈ l₂.erase a := fun x hx =>
-      (List.mem_erase_of_ne (fun h : x = a => hn'.1 (by rw [← h]; exact hx))).mpr (hs x (List.mem_cons_of_mem _ hx))
-    have h1 := length_le_of_nodup_subset (l₂.erase a) hn'.2 ht
-    rw [List.length_erase_of_mem ha] at h1
-    have := List.length_pos_of_mem ha
-    simp only [List.length_cons]
-    omega
 
 section Fixed
 

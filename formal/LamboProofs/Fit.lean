@@ -1,3 +1,5 @@
+import LamboProofs.Lib.List
+
 /-
 # The token budget keeps the longest ranked prefix of whole blocks
 
@@ -136,6 +138,8 @@ three slices as given).
 -/
 
 namespace Lambo.Fit
+
+open Lambo.Lib (getD_mem getD_mono getD_eq_getElem)
 
 /-- The loop, with `rem` blocks still to try and `whole` accepted so far. -/
 def fitFrom (ok : Nat → Bool) : Nat → Nat → Nat
@@ -647,18 +651,6 @@ theorem contentCuts_length_pos (ws : α → Bool) (xs : List α) :
     0 < (contentCuts ws xs).length := by
   simp [contentCuts]
 
-theorem getD_mem {l : List Nat} {i : Nat} (h : i < l.length) : l.getD i 0 ∈ l := by
-  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h]
-  exact List.getElem_mem h
-
-theorem getD_mono {l : List Nat} (hp : l.Pairwise (· < ·)) {i j : Nat} (hij : i ≤ j)
-    (hj : j < l.length) : l.getD i 0 ≤ l.getD j 0 := by
-  rw [List.getD_eq_getElem?_getD, List.getD_eq_getElem?_getD,
-    List.getElem?_eq_getElem (by omega), List.getElem?_eq_getElem hj]
-  by_cases e : i = j
-  · subst e; exact Nat.le_refl _
-  · exact Nat.le_of_lt (List.pairwise_iff_getElem.mp hp i j (by omega) hj (by omega))
-
 /-! ### One form, and the loop over the forms -/
 
 theorem fits_anti {t t' m : Nat} (h : t ≤ t') (h' : fits t' m = true) : fits t m = true := by
@@ -1088,10 +1080,6 @@ theorem okCut_down (h : Steady e b w G) (maxT : Nat) (f : Form) :
   apply h.mono
   apply render_wsum_mono h f
   exact getD_mono (contentCuts_pairwise _ _) (Nat.le_succ i) hi
-
-theorem getD_eq_getElem {l : List Nat} {i : Nat} (h : i < l.length) : l.getD i 0 = l[i] := by
-  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h]
-  rfl
 
 /-- **The longest head, and the first form that fits.** Under `Steady`, the
 truncated block is the chosen form at the longest cut that fits, and no

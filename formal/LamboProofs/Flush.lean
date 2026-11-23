@@ -1,4 +1,5 @@
 import LamboProofs.Lease
+import LamboProofs.Lib.List
 
 /-
 # The store flush path: retry ladder, dead letters, fence and shutdown
@@ -290,6 +291,8 @@ every run, realizable or not.
 -/
 
 namespace Lambo.Flush
+
+open Lambo.Lib (prefix_drop)
 
 /-! ## Errors and attempt outcomes -/
 
@@ -1400,17 +1403,6 @@ theorem retained_leads {s : St α} (e : Ev α) :
     ∃ new, (step P st s e).calls = s.calls ++ new ∧ ∀ c ∈ new, s.pending <+: c.1 := by
   obtain ⟨_, _, new, hnew, hb⟩ := step_shape (P := P) (st := st) s e
   exact ⟨new, hnew, fun c hc => by rw [hb c hc]; exact List.prefix_append _ _⟩
-
-theorem prefix_drop {l₁ l₂ : List α} (h : l₁ <+: l₂) (k : Nat) : l₁.drop k <+: l₂.drop k := by
-  obtain ⟨r, rfl⟩ := h
-  rw [List.drop_append]
-  by_cases hk : k ≤ l₁.length
-  · have : k - l₁.length = 0 := by omega
-    rw [this, List.drop_zero]
-    exact List.prefix_append _ _
-  · have : l₁.drop k = [] := List.drop_eq_nil_of_le (by omega)
-    rw [this]
-    simp
 
 theorem run_cons (s : St α) (e : Ev α) (evs : List (Ev α)) :
     run P st s (e :: evs) = run P st (step P st s e) evs := rfl

@@ -1,3 +1,5 @@
+import LamboProofs.Lib.List
+
 /-
 # Conflict detection and contradiction dating
 
@@ -169,6 +171,8 @@ Contradiction:
 -/
 
 namespace Lambo.Conflict
+
+open Lambo.Lib (two_le_length_iff)
 
 /-! ## Edges, sources, the timeline -/
 
@@ -484,23 +488,6 @@ theorem agentsOf_nodup (tl : List (Interaction A)) (es : List (Edge A)) :
     · exact nodup_foldl_pushNew _ h
 
 omit [DecidableEq A] [Ord A] in
-/-- A duplicate-free list has two elements iff it holds two distinct ones. -/
-theorem two_le_length_iff {l : List A} (h : l.Nodup) :
-    2 ≤ l.length ↔ ∃ a ∈ l, ∃ b ∈ l, a ≠ b := by
-  constructor
-  · intro hl
-    match l, hl, h with
-    | a :: b :: _, _, h =>
-      rw [List.nodup_cons] at h
-      exact ⟨a, by simp, b, by simp, fun hab => h.1 (by simp [hab])⟩
-  · rintro ⟨a, ha, b, hb, hab⟩
-    match l, ha, hb with
-    | [], ha, _ => simp at ha
-    | [c], ha, hb =>
-      simp at ha hb
-      exact absurd (ha.trans hb.symm) hab
-    | _ :: _ :: _, _, _ => simp
-
 /-! ### The newest qualifying write -/
 
 omit [DecidableEq A] [Ord A] in

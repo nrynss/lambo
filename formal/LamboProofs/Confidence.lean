@@ -1,3 +1,5 @@
+import LamboProofs.Lib.List
+
 /-
 # A recall's top legs and its provisional confidence (#256, #288)
 
@@ -178,6 +180,8 @@ keyword slot. `noisyOr_none` records the `None` cases of `noisy_or`.
 -/
 
 namespace Lambo.Confidence
+
+open Lambo.Lib (foldl_max_ge_init foldl_max_ge foldl_max_mem)
 
 /-! ## `f64` values -/
 
@@ -782,34 +786,6 @@ theorem mem_filterMap_finiteOf {l : List F64} {x : Int} :
     cases a <;> simp [finiteOf] at hx
     subst hx; exact ha
   · intro h; exact ⟨_, h, rfl⟩
-
-theorem foldl_max_ge_init (xs : List Int) (x : Int) : x ≤ xs.foldl max x := by
-  induction xs generalizing x with
-  | nil => simp
-  | cons y ys ih =>
-    simp only [List.foldl_cons]
-    exact Int.le_trans (by omega) (ih (max x y))
-
-theorem foldl_max_ge (xs : List Int) (x y : Int) (hy : y ∈ xs) : y ≤ xs.foldl max x := by
-  induction xs generalizing x with
-  | nil => cases hy
-  | cons z zs ih =>
-    simp only [List.foldl_cons]
-    rcases List.mem_cons.mp hy with rfl | h
-    · exact Int.le_trans (by omega) (foldl_max_ge_init zs (max x y))
-    · exact ih _ h
-
-theorem foldl_max_mem (xs : List Int) (x : Int) : xs.foldl max x ∈ x :: xs := by
-  induction xs generalizing x with
-  | nil => simp
-  | cons y ys ih =>
-    simp only [List.foldl_cons]
-    rcases List.mem_cons.mp (ih (max x y)) with h | h
-    · rw [h]
-      by_cases hxy : x ≤ y
-      · rw [show max x y = y by omega]; simp
-      · rw [show max x y = x by omega]; simp
-    · simp [h]
 
 /-- **The fold is the maximum**: `some x` exactly when `x` is a finite member
 at least every finite member. -/

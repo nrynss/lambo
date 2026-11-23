@@ -8,19 +8,24 @@ MOD is each module to import (`LamboProofs.Drain.Base`, ...). Every constant
 whose module is under `LamboProofs` is written, auxiliary ones included, as
 
   {"name", "private", "module", "kind", "user", "line", "span", "levels",
-   "type", "value", "uses", "axioms"}
+   "type", "shape", "value", "uses", "axioms"}
 
-`user` is true when the declaration has a source range (the elaborator gives
+`user` is true when the declaration has a source range: the elaborator gives
 one to every declaration written in the source, and none to the constants it
-generates: `foo.proof_1`, `foo.match_1`, `foo.eq_1`, `_auxLemma`, recursors,
-...). `type` is the kernel type as `Expr.dbgToString` prints it, so binder
-names count; `value` is the same for a definition's body (a theorem's proof is
-left out: a proof may change, its statement may not), with binder names'
-macro scopes erased (`clean`); a generated constant's binders are named by
-depth instead (`canon`). `uses` is every constant
-the type and value mention. `axioms` (theorems only) is what `#print axioms`
-would answer. Names are printed as Lean prints them; a private name is printed
-as its user-facing name, with "private": true.
+generates (`foo.proof_1`, `foo.match_1`, `foo.eq_1`, `_auxLemma`, recursors,
+...). `line` is the line of its name in its module's source, and `span` the
+first and last lines of its declaration, doc comment included. `type` is the
+kernel type as `Expr.dbgToString` prints it, so binder names count; `value`
+is the same for a definition's body (a theorem's proof is left out: a proof
+may change, its statement may not). Both have binder names' macro scopes
+erased (`clean`); a generated constant's binders are named by depth instead
+(`canon`). `shape` is the type with its binders named by depth and its
+universe parameters by position, so two declarations have the same shape
+exactly when they state the same thing (for finding duplicated lemmas).
+`uses` is every constant the type and value mention. `axioms` (theorems
+only) is what `#print axioms` would answer. Names are printed as Lean prints
+them; a private name is printed as its user-facing name, with "private":
+true.
 -/
 import Lean
 
@@ -106,6 +111,8 @@ def main (args : List String) : IO UInt32 := do
         ("span", span),
         ("levels", toJson (ci.levelParams.map toString)),
         ("type", toJson (toString (norm ci.type))),
+        ("shape", toJson (toString (canon 0 (ci.type.instantiateLevelParams ci.levelParams
+          ((List.range ci.levelParams.length).map fun i => .param (.mkSimple s!"u{i}")))))),
         ("value", value),
         ("uses", toJson uses),
         ("axioms", axioms)]

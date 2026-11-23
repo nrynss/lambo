@@ -1,4 +1,5 @@
 import LamboProofs.Canon
+import LamboProofs.Lib.List
 
 /-
 # The solo canonization policy: sessions, score, bands, admission
@@ -231,6 +232,8 @@ Admission:
 -/
 
 namespace Lambo.Policy
+
+open Lambo.Lib (nodup_eraseDups length_eraseDups_le_cons)
 
 /-! ## Sort ascending, deduplicate -/
 
@@ -1307,28 +1310,6 @@ theorem causal_not_recurrenceW (g : Graph) (st : Edge → Stamp) (c : Nat) (e : 
   unfold recurrenceSessionsW supportingTimesW
   rw [supportTimeW_edges]
   simp [hn]
-
-/-- `eraseDups` leaves no duplicates. -/
-theorem nodup_eraseDups : ∀ (n : Nat) (l : List Nat), l.length ≤ n → l.eraseDups.Nodup
-  | _, [], _ => by simp [List.eraseDups, List.eraseDupsBy, List.eraseDupsBy.loop]
-  | 0, _ :: _, h => by simp at h
-  | n + 1, a :: as, h => by
-    rw [List.eraseDups_cons, List.nodup_cons]
-    constructor
-    · intro hm
-      rw [List.mem_eraseDups, List.mem_filter] at hm
-      simp at hm
-    · apply nodup_eraseDups n
-      have := List.length_filter_le (fun b => !b == a) as
-      simp only [List.length_cons] at h
-      omega
-
-/-- One more element never shortens the deduplicated list. -/
-theorem length_eraseDups_le_cons (x : Nat) (l : List Nat) :
-    l.eraseDups.length ≤ (x :: l).eraseDups.length :=
-  List.Nodup.length_le_of_subset (nodup_eraseDups _ l (Nat.le_refl _)) (fun y hy => by
-    rw [List.mem_eraseDups] at hy ⊢
-    exact List.mem_cons_of_mem _ hy)
 
 theorem depOriginW_edges (g : Graph) (st : Edge → Stamp) (es : List Edge) :
     depOriginW { g with edges := es } st = depOriginW g st := rfl

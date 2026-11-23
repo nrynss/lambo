@@ -1,3 +1,5 @@
+import LamboProofs.Lib.List
+
 /-
 # The candle embedder's batch queue (#125)
 
@@ -184,6 +186,8 @@ panic message text, and memory: a death is an event, not a cause.
 -/
 
 namespace Lambo.BatchQueue
+
+open Lambo.Lib (eraseIdx_perm map_eq_pointwise)
 
 /-! ## Constants -/
 
@@ -995,12 +999,6 @@ theorem lengthChunks_slack_edge : lengthChunks Cfg.rust [100, 10, 84, 85] = [[1,
 
 
 /-! ## Taking a chunk out of a group -/
-
-theorem eraseIdx_perm {α : Type} (g : List α) (i : Nat) (h : i < g.length) :
-    g.Perm (g[i] :: g.eraseIdx i) := by
-  rw [List.eraseIdx_eq_take_drop_succ]
-  conv => lhs; rw [← List.take_append_drop i g, List.drop_eq_getElem_cons h]
-  exact List.perm_middle
 
 theorem removeDesc_perm {α : Type} (g : List α) (is : List Nat) :
     ((removeDesc g is).1 ++ (removeDesc g is).2).Perm g := by
@@ -2755,17 +2753,6 @@ theorem step_obs_new {c : Cfg} {f : Fwd} {dim : Nat} {s : St} (e : Ev) :
 /-- Every vector or error a caller is answered with is its own text's. -/
 def IsoObs (row : Txt → Option Vec) (dim : Nat) (s : St) : Prop :=
   ∀ r x, (r, Obs.res x) ∈ s.obs → x = soloRes row dim r.txt
-
-theorem map_eq_pointwise {α β : Type} {g h : α → β} {l : List α} (e : l.map g = l.map h) :
-    ∀ a ∈ l, g a = h a := by
-  induction l with
-  | nil => simp
-  | cons x xs ih =>
-    simp only [List.map_cons, List.cons.injEq] at e
-    intro a ha
-    rcases List.mem_cons.mp ha with rfl | ha
-    · exact e.1
-    · exact ih e.2 a ha
 
 /-- With a row-wise forward of fixed width and a canary that embeds, an
 answer being sent is its own request's solo answer. -/

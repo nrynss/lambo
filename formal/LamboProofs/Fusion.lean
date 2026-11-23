@@ -1,3 +1,5 @@
+import LamboProofs.Lib.List
+
 /-
 # Phase-1 leg fusion and the exact-name step (#288)
 
@@ -261,6 +263,8 @@ The exact-name step under RRF (`raiseFullName` against the table before it):
 
 namespace Lambo.Fusion
 
+open Lambo.Lib (any_of_mem length_filter_mono length_filter_lt length_filter_shift)
+
 /-! ## Scores -/
 
 /-- `1.0` at scale 1000. -/
@@ -411,14 +415,6 @@ theorem beats_of_raise_rev {sc sc' : ι → Option Int} {tb : ι → ι → Bool
     · by_cases hs : sc j = sc t
       · exact Or.inr ⟨hs, htb⟩
       · exact Or.inl (oLt_of_le_of_ne (heq ▸ hup) (Ne.symm hs))
-
-theorem length_filter_mono {l : List ι} {p q : ι → Bool} (h : ∀ x, p x = true → q x = true) :
-    (l.filter p).length ≤ (l.filter q).length := by
-  induction l with
-  | nil => simp
-  | cons x rest ih =>
-    simp only [List.filter_cons]
-    cases hp : p x <;> cases hq : q x <;> simp_all <;> omega
 
 /-! ## Phase 1 -/
 
@@ -1358,21 +1354,6 @@ theorem beats_asymm {tb : ι → ι → Bool} (htb : StrictTotal tb) (sc : ι �
   fun h' => beats_irrefl htb sc a (beats_trans htb sc h h')
 
 omit [DecidableEq ι] in
-theorem length_filter_lt {l : List ι} {p q : ι → Bool} (h : ∀ x, p x = true → q x = true)
-    {a : ι} (ha : a ∈ l) (hq : q a = true) (hp : p a = false) :
-    (l.filter p).length < (l.filter q).length := by
-  induction l with
-  | nil => simp at ha
-  | cons x rest ih =>
-    have hmono := length_filter_mono (l := rest) h
-    simp only [List.filter_cons]
-    rcases List.mem_cons.mp ha with hx | ha'
-    · subst hx
-      simp [hq, hp]
-      omega
-    · have := ih ha'
-      cases hpx : p x <;> cases hqx : q x <;> simp <;> first | omega | (have := h x hpx; simp_all)
-
 omit [DecidableEq ι] in
 /-- A member that sorts ahead of another has a strictly smaller `ahead`. -/
 theorem ahead_lt_of_beats {tb : ι → ι → Bool} (htb : StrictTotal tb) (sc : ι → Option Int)
@@ -1564,9 +1545,6 @@ theorem rrf_le_iff_key (a b : ι) : RLe (R.rrf legs a) (R.rrf legs b) ↔ OLe (R
     omega
 
 omit [DecidableEq ι] in
-theorem any_of_mem {ids : List ι} {f : ι → Bool} {n : ι} (hn : n ∈ ids) (h : f n = true) :
-    ids.any f = true := List.any_eq_true.mpr ⟨n, hn, h⟩
-
 omit [DecidableEq ι] in
 /-- The sum never exceeds `best`. -/
 theorem num_le_best {n : ι} (hn : n ∈ R.ids) : R.num legs n ≤ R.best legs := by
@@ -1897,36 +1875,6 @@ def Passes (sc sc' : ι → Option Int) (tb : ι → ι → Bool) (ids : List ι
 instance (sc sc' : ι → Option Int) (tb : ι → ι → Bool) (ids : List ι) (t n : ι) :
     Decidable (Passes sc sc' tb ids t n) := by
   unfold Passes; infer_instance
-
-theorem length_filter_shift {l : List ι} (hnd : l.Nodup) (p q : ι → Bool) (t : ι)
-    (heq : ∀ x, x ≠ t → q x = p x) (hpt : p t = true → q t = true) :
-    (l.filter q).length =
-      (l.filter p).length + (if t ∈ l ∧ q t = true ∧ p t = false then 1 else 0) := by
-  induction l with
-  | nil => simp
-  | cons x rest ih =>
-    rw [List.nodup_cons] at hnd
-    have ih := ih hnd.2
-    simp only [List.filter_cons]
-    by_cases hx : x = t
-    · subst hx
-      have hc : ¬ (x ∈ rest ∧ q x = true ∧ p x = false) := fun h => hnd.1 h.1
-      rw [ite_eq_right hc] at ih
-      cases hp : p x <;> cases hq : q x <;> simp_all
-    · have hqx := heq x hx
-      have hmem : (t ∈ x :: rest) ↔ t ∈ rest := by
-        simp only [List.mem_cons]; constructor
-        · rintro (h | h)
-          · exact absurd h.symm hx
-          · exact h
-        · exact Or.inr
-      by_cases hc : t ∈ rest ∧ q t = true ∧ p t = false
-      · have hc' : t ∈ x :: rest ∧ q t = true ∧ p t = false := ⟨hmem.mpr hc.1, hc.2⟩
-        rw [ite_eq_left hc] at ih; rw [ite_eq_left hc']
-        cases hp : p x <;> simp_all <;> omega
-      · have hc' : ¬ (t ∈ x :: rest ∧ q t = true ∧ p t = false) := fun h => hc ⟨hmem.mp h.1, h.2⟩
-        rw [ite_eq_right hc] at ih; rw [ite_eq_right hc']
-        cases hp : p x <;> simp_all
 
 /-- **Another node moves at most one place**, and exactly when the named
 concept passes it. -/
