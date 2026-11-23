@@ -69,7 +69,10 @@ The loop, over every run from `St.init` (`good_reachable`):
   dropped or counted ("Never dropped (except dead letters)").
 * `constraint_dead_lettered`, `Good.dead`: a constraint violation costs one
   call, sends the whole batch to the ledger as a dead letter and adds exactly
-  one to `dead_lettered` ("never retried, never retained").
+  one to `dead_lettered` ("never retried, never retained"). Since #345 the
+  arm also notes the receipt ids of the write intents the batch put
+  (`Graph::note_dead_lettered_intents`), a graph-side record this model does
+  not carry; what the close answers for them is `Drain.closeD`.
 * `cycle_held`, `cycle_poll_waits`: no call during the post-retry hold, nor on
   a poll below `max_batch`.
 * `degraded_silent`, `run_stopped_silent`, `fenced_stops`: a degraded session

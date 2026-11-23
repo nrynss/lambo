@@ -23,17 +23,44 @@
   theorems stay, each labelled as describing the worker before #295 and
   naming its counterpart; `outage_failed_but_owed` and
   `outage_failed_then_applied` say the current Rust does not behave that
-  way. The model found no Rust defect. It does not model a write refused at
-  admission, which in the Rust answers `dropped` with no intent: the theorems
-  speak only of admitted writes. Nor does it model a batch a background
-  flush dead-lettered before the close, which can drop a set-aside write's
-  intent while the close still answers `intent_durable` (#345, a Rust defect
-  tracked separately). `docs/reference/mcp.mdx` now cites the new
+  way. It does not model a write refused at admission, which in the Rust
+  answers `dropped` with no intent: the theorems speak only of admitted
+  writes. Review of this model found the two Rust defects under Fixed
+  below (#345, #346), each now modelled. `docs/reference/mcp.mdx` now cites the new
   theorems for close and crash accounting, and says a run of slow vector
   lookups holds every later first attempt until a write applies, not only the
   third. `scripts/formal/count-theorems.py` counts the theorems by the rule
   `formal/README.md` states (2,439; the README said 2,393 for files it counts
   as 2,394).
+
+### Fixed
+
+- **A close no longer answers `intent_durable` for a write whose intent a
+  dead letter dropped (#345).** A background flush the store refuses with a
+  constraint violation (or a value it cannot hold) drops its whole batch
+  while the session goes on, and that batch can hold the intent of a write
+  still held or queued. The close then found nothing left to flush and
+  answered that write `intent_durable`, though the next serve had nothing
+  to replay. The flush now notes the receipt ids of the intents in every
+  batch it dead-letters, and the close answers those writes
+  `close_unflushed` (ledger reason `intent_dead_lettered`), whatever its
+  final flush does; a retried close no longer upgrades them. The rule is
+  exact: the close answers `intent_durable` exactly when the write's intent
+  reached the store. `close_unflushed`'s description now says the close
+  could not confirm the write was saved, since an incomplete final flush is
+  no longer its only cause. Modelled first in
+  `formal/LamboProofs/Drain.lean` (`closeW_vouches_dead_lettered`, the
+  defect; `closeD_durable_iff`, `closeD_retryD`, `shutdown_no_silent_lossD`,
+  the fix).
+- **A lookup timeout that follows a successful write no longer counts
+  toward the run of slow lookups (#346).** The in-session streak of lookup
+  timeouts reset in a write's settle block, after its commit, so another
+  agent's timeout landing between the two counted as part of the old run
+  and could be held instead of settled `failed`. The streak now resets at
+  the commit, which is the documented rule: three timeouts in a row with
+  nothing applied between. Modelled first in `Drain.lean`
+  (`streak_old_counts_across_commit`, the defect; `streakNew_eq_runSince`,
+  `heldNew_iff`, the fix).
 
 ## 0.15.0 (2026-11-22)
 
