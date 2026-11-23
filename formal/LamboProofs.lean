@@ -40,7 +40,10 @@ import LamboProofs.Flush.Loop
 import LamboProofs.Flush.Errors
 import LamboProofs.BatchQueue
 import LamboProofs.Registry
-import LamboProofs.Resolve
+import LamboProofs.Resolve.Construction
+import LamboProofs.Resolve.Serve
+import LamboProofs.Resolve.Auth
+import LamboProofs.Resolve.Args
 import LamboProofs.Tiered
 import LamboProofs.Discovery
 import LamboProofs.Audit

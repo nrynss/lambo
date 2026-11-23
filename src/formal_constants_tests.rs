@@ -775,7 +775,8 @@ fn resolve() {
     use crate::embed::{EmbedderConfig, EmbedderKind};
     use crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
 
-    let lean = Lean::new(model!("Resolve"));
+    let lean = Lean::new(model!("Resolve/Construction"));
+    let serve = Lean::new(model!("Resolve/Serve"));
 
     // The `EmbedderConfig` default width: defaultDim, and Raw.dim's default.
     let default_dim = lean.def("defaultDim", "Nat").nat().to::<usize>();
@@ -786,7 +787,7 @@ fn resolve() {
     );
     assert_pin!(
         MAX_BEARER_CREDENTIAL_BYTES,
-        lean.def("maxBearer", "Nat").nat().to::<usize>()
+        serve.def("maxBearer", "Nat").nat().to::<usize>()
     );
     assert_pin!(
         DEFAULT_MAX_ATTACHED,

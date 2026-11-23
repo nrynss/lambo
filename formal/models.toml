@@ -607,13 +607,17 @@ rust = [
   "src/mcp/serve/http_guards.rs#credential_share",
 ]
 
-# Left out: the integration tests the header names.
+# What each command builds, and from which lambo.toml. Left out: the
+# integration tests the header names.
 [[model]]
-lean = "formal/LamboProofs/Resolve.lean"
-read_against = "514da8d7"
-read_digest = "v2:sha256:7eaba610a078723323d097b4ada91864a7bb69cd91c399443ce04f681a61a123"
+lean = "formal/LamboProofs/Resolve/Construction.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:4cab7ef63edef981f280e32b4d76cff432cd7e66ad52c8272dca330d2a58bd70"
 rust = [
-  "src/main.rs",
+  "src/main.rs#Commands::needs_embedder",
+  "src/main.rs#Commands::allow_embedding_mismatch",
+  "src/main.rs#Commands::name",
+  "src/main.rs#resolve_for_command",
   "src/resolve.rs",
   "src/store/mod.rs#build_store_with_options",
   "src/store/mod.rs#GraphStore::vector_dimensions",
@@ -627,6 +631,15 @@ rust = [
   "src/embed/mod.rs#EmbedderKind::is_compiled",
   "src/embed/mod.rs#EmbedderKind::is_ready",
   "src/config.rs#load_resolved",
+]
+
+# Serve preflight and main's routing.
+[[model]]
+lean = "formal/LamboProofs/Resolve/Serve.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:a86d7fed84becd381c0256a1edb9dbb7ea12feba4aab241238682cab4a8fc74d"
+rust = [
+  "src/main.rs",
   "src/mcp/serve/pinned.rs#pin_sessions",
   "src/mcp/serve/layers.rs#plan_layers",
   "src/mcp/serve/http_guards.rs#resolve_auth_token",
@@ -635,6 +648,26 @@ rust = [
   "src/mcp/serve/http_guards.rs#SecretToken",
   "src/surface/bearer.rs#check_configured_token",
   "src/config/credential.rs#check_credential_set",
+]
+
+# The --auth-token parsers and what their refusals print (#315).
+[[model]]
+lean = "formal/LamboProofs/Resolve/Auth.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:91e201d38ab5871a2bca33ffa7003eddf6470e2aae88d4d9e98dc6da49647e87"
+rust = [
+  "src/main.rs",
+  "src/mcp/serve/http_guards.rs#SecretToken",
+  "src/surface/bearer.rs#check_configured_token",
+]
+
+# The per-command clap rules.
+[[model]]
+lean = "formal/LamboProofs/Resolve/Args.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:883580ef0bce148a72a8d8c60d9d27049114f1cd6ee4c603373785bccf644233"
+rust = [
+  "src/main.rs",
 ]
 
 # Left out: the files issue #273 proposes splitting tiered/mod.rs into.

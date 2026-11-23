@@ -279,7 +279,7 @@ score and a leg's score; "holder" is also used for the owner of a soft lock
 
 By model. Each is a claim the page makes that today rests on a test or the code.
 
-- **`Resolve.lean`:** a general theorem that every non-loopback HTTP bind with
+- **`Resolve/Serve.lean`:** a general theorem that every non-loopback HTTP bind with
   no credential is refused (T-07; only `bind_refused_after_build`, one instance,
   exists).
 - **`Drain/Close.lean`:** that a held write's intent is durable once a flush takes
