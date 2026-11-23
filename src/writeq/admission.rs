@@ -644,8 +644,55 @@ pub(super) struct Lanes {
     /// Lookup timeouts in a row, across lanes, with nothing applied between
     /// (#295, the replay's rule): below `REPLAY_LOOKUP_TIMEOUT_LIMIT` one
     /// settles its write `failed`; at it the store is slow for everyone and
-    /// the write is held like an embedder outage.
+    /// the write is held like an embedder outage. Only a write's first
+    /// attempt counts. Reset when a write applies, inside its commit's
+    /// critical section (`execution::WorkerCommit`, this lock taken under the
+    /// graph write lock), not later in the worker's `Ok` arm or settle block
+    /// (#346), so a timeout another lane meets after that commit starts a new
+    /// run.
     pub(super) lookup_streak: usize,
+    /// Test-only, one-shot: the next worker whose write committed and that
+    /// reaches the pause's point signals `reached` and waits on `resume`, so a
+    /// test can put another worker's step between a commit and a later step
+    /// of the same iteration (#346). Taken by that worker; `None` otherwise,
+    /// and then the worker does not await there. See
+    /// `execution::test_pause` for what holds while a worker waits.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(super) test_pause: Option<TestPause>,
+    /// Test-only: `true` while a worker waits at a test pause, between a
+    /// commit and its settle. [`WritePipeline::abort_workers`] and
+    /// `abort_all_sync` refuse to run then (they panic; the latter not while
+    /// a test is already panicking), so no test can close or drop a session
+    /// over a paused worker.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(super) test_paused: bool,
+    /// Test-only, one-shot: the next worker whose write committed panics
+    /// right after `WriteCtx::run` returns, before its `Ok` arm and its
+    /// settle, as a panic in the index mirroring or the ledger append would
+    /// (#345 review). Its receipt stays unsettled for the close to set aside.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(super) panic_after_commit: bool,
+    /// Test-only: set by the worker just before that panic.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(super) test_panicked: bool,
+}
+
+/// Where a test pause stops a worker whose write committed (test-only).
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PausePoint {
+    /// After `WriteCtx::run` returned `Ok`, before the worker's `Ok` arm.
+    AfterCommit,
+    /// Before the worker's settle block.
+    BeforeSettle,
+}
+
+/// An armed test pause (test-only): see [`Lanes::test_pause`].
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+pub(super) struct TestPause {
+    pub(super) point: PausePoint,
+    pub(super) reached: std::sync::Arc<tokio::sync::Notify>,
+    pub(super) resume: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl Lanes {

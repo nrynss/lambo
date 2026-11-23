@@ -140,7 +140,7 @@ ANSWER_PREFIXES = (
     ("pending", "pending"),
     ("FAILED, nothing was written", "failed"),
     ("not applied before this session closed", "intent_durable"),
-    ("close did not finish its final flush", "close_unflushed"),
+    ("close could not confirm this write was saved", "close_unflushed"),
     ("DROPPED before it was attempted", "dropped"),
     ("expired", "expired"),
     ("restart-lost", "restart_lost"),

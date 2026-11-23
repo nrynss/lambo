@@ -480,7 +480,7 @@ impl WritePipeline {
                 let decode_refused = decode_error.is_some();
                 let result = match decode_error {
                     Some(error) => Err(error),
-                    None => this.ctx.run(&job, Some(stamp)).await,
+                    None => this.ctx.run(&job, Some(stamp), None).await,
                 };
                 let answer = match result {
                     Ok(summary) => {

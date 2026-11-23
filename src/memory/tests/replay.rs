@@ -443,6 +443,269 @@ async fn a_write_reached_during_an_in_session_embedder_outage_is_not_consumed() 
     );
 }
 
+// -- #345: a dead letter drops the puts it held -------------------------
+
+/// A session whose embedder is down (every write is held) over `store`,
+/// with a short flush interval so the background flush runs.
+async fn held_write_session(session: &str, store: Arc<dyn GraphStore>) -> Memory {
+    Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(100))
+        .store(store)
+        .embedder(Arc::new(DeadEmbedder) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build a session whose embedder is dead")
+}
+
+/// Wait (bounded, wall clock) until `done` holds.
+async fn until_mem(mem: &Memory, what: &str, done: impl Fn(&Memory) -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !done(mem) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Submit one write of `agent` and wait until the worker holds it.
+async fn submit_and_hold(mem: &Memory, agent: &AgentId, content: &str) -> crate::writeq::ReceiptId {
+    let submitted = mem
+        .derive_async_as(
+            agent,
+            &[(content, ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack");
+    assert!(!submitted.dropped(), "{}", submitted.answer.describe());
+    let receipt = submitted.receipt;
+    until_mem(mem, "the worker to hold the write", |m| {
+        m.pipeline().lookup(agent, receipt).tag() == "pending_replay"
+    })
+    .await;
+    receipt
+}
+
+/// Whether `batch` carries the `PutWriteIntent` of `receipt`.
+fn holds_put(batch: &MutationBatch, receipt: crate::writeq::ReceiptId) -> bool {
+    let receipt = receipt.to_string();
+    batch
+        .mutations
+        .iter()
+        .any(|m| matches!(m, Mutation::PutWriteIntent { intent } if intent.receipt == receipt))
+}
+
+/// **#345**: a background flush the store refuses with a constraint
+/// violation dead-letters its whole batch, and the session goes on. Here
+/// that batch holds the put of a write the worker is holding
+/// (`pending_replay`), so its intent never reached the store. The close then
+/// finds an empty tail. Before the fix it took that as "every set-aside
+/// intent was taken by an earlier flush" and answered the write
+/// `intent_durable`, and the next serve had nothing to replay. It must answer
+/// `close_unflushed`.
+///
+/// Mirrors `Drain.closeW_vouches_dead_lettered` (the bug) and
+/// `Drain.closeD_never_vouches_dropped`, `Drain.closeD_durable_iff` (the
+/// fix).
+#[tokio::test(start_paused = true)]
+async fn a_close_with_an_empty_tail_does_not_vouch_for_a_dead_lettered_intent() {
+    let inner = Arc::new(MemoryStore::new());
+    let sid = SessionId::new("dead-lettered-intent");
+    let agent = AgentId::new("agent-a");
+    let store = Arc::new(
+        FlakyStore::new(
+            Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>,
+            0,
+        )
+        .with_dead_letters(1),
+    );
+    let mem = held_write_session("dead-lettered-intent", store.clone()).await;
+    let receipt = submit_and_hold(&mem, &agent, "user schema").await;
+
+    // The first background flush takes the put and dead-letters the batch.
+    until_mem(&mem, "the dead letter", |m| m.stats().dead_lettered == 1).await;
+    assert!(
+        holds_put(&store.batches()[0], receipt),
+        "the dead-lettered batch held the held write's put"
+    );
+    let stats = mem.stats();
+    assert_eq!(
+        (stats.log_depth, stats.flush_depth),
+        (0, 0),
+        "nothing is left to flush: the close's tail is empty"
+    );
+
+    mem.close().await.expect("clean close");
+    let answer = mem.pipeline().lookup(&agent, receipt);
+    assert_eq!(
+        answer.tag(),
+        "close_unflushed",
+        "a close must not vouch for an intent a dead letter dropped: {answer:?}"
+    );
+    let intents = inner
+        .load_session(&sid)
+        .await
+        .map(|s| s.write_intents.len())
+        .unwrap_or(0);
+    assert_eq!(intents, 0, "the store never held the intent");
+}
+
+/// **#345, the flushed tail and the retried close**: the first write's put
+/// is dead-lettered; the second write, held behind it, has its put in the
+/// close's tail. The first close's final flush fails, so both answer
+/// `close_unflushed`. The retried close lands the tail: it upgrades the
+/// second write, whose intent is now in the store, to `intent_durable`, and
+/// leaves the first `close_unflushed`. Before the fix the retry upgraded
+/// both.
+///
+/// Mirrors `Drain.closeD_retryD` and the example after
+/// `Drain.closeW_vouches_dead_lettered`.
+#[tokio::test(start_paused = true)]
+async fn a_retried_close_upgrades_only_the_intents_it_can_vouch_for() {
+    let inner = Arc::new(MemoryStore::new());
+    let sid = SessionId::new("dead-lettered-retry");
+    let agent = AgentId::new("agent-a");
+    let store = Arc::new(
+        FlakyStore::new(
+            Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>,
+            0,
+        )
+        .with_dead_letters(1),
+    );
+    let mem = held_write_session("dead-lettered-retry", store.clone()).await;
+    let dropped = submit_and_hold(&mem, &agent, "user schema").await;
+    until_mem(&mem, "the dead letter", |m| m.stats().dead_lettered == 1).await;
+    assert!(holds_put(&store.batches()[0], dropped));
+
+    // From here every flush fails, so the second put stays in the tail.
+    store.fail_next(usize::MAX);
+    let kept = submit_and_hold(&mem, &agent, "billing schema").await;
+    mem.close()
+        .await
+        .expect_err("the final flush fails, so the close does");
+    for receipt in [dropped, kept] {
+        assert_eq!(
+            mem.pipeline().lookup(&agent, receipt).tag(),
+            "close_unflushed"
+        );
+    }
+
+    store.fail_next(0);
+    mem.close().await.expect("the retried close lands the tail");
+    assert_eq!(
+        mem.pipeline().lookup(&agent, kept).tag(),
+        "intent_durable",
+        "the retry made the second write's intent durable"
+    );
+    let answer = mem.pipeline().lookup(&agent, dropped);
+    assert_eq!(
+        answer.tag(),
+        "close_unflushed",
+        "a retried close must not vouch for an intent a dead letter dropped: {answer:?}"
+    );
+    let snap = inner.load_session(&sid).await.expect("reload");
+    let receipts: Vec<String> = snap
+        .write_intents
+        .iter()
+        .map(|i| i.receipt.clone())
+        .collect();
+    assert_eq!(receipts, [kept.to_string()]);
+}
+
+/// Unreachable (`EmbedError::Unavailable`) while `down` is set, the fixture
+/// embedder otherwise.
+struct SwitchEmbedder {
+    inner: FixtureEmbedder,
+    down: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Embedder for SwitchEmbedder {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(crate::embed::EmbedError::Unavailable(
+                "llama.cpp unreachable: connection refused".into(),
+            ));
+        }
+        self.inner.embed(text).await
+    }
+}
+
+/// **#345 re-review**: a lane worker can panic after its commit (the graph
+/// write and the intent's consume) and before its settle, in the index
+/// mirroring or the ledger append. Its receipt stays unsettled and the close
+/// sets it aside. Here the write's put was dead-lettered while it was held;
+/// the embedder comes back, the retry commits, and the worker panics. The
+/// close must answer `close_unflushed`: the store never held the intent.
+/// With the dead-lettered set pruned at the consume, the receipt had left the
+/// set and the close answered `intent_durable`.
+///
+/// Mirrors `Drain.keptAtConsume_vouches_after_panic` (the bug) and
+/// `Drain.settlePrune_never_vouches_dropped` (the fix).
+#[tokio::test(start_paused = true)]
+async fn a_worker_that_panics_after_its_commit_does_not_get_intent_durable() {
+    let inner = Arc::new(MemoryStore::new());
+    let agent = AgentId::new("agent-a");
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let store = Arc::new(
+        FlakyStore::new(
+            Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>,
+            0,
+        )
+        .with_dead_letters(1),
+    );
+    let mem = Memory::builder()
+        .session("dead-lettered-panic")
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(100))
+        .store(store.clone() as Arc<dyn GraphStore>)
+        .embedder(Arc::new(SwitchEmbedder {
+            inner: FixtureEmbedder::new(),
+            down: down.clone(),
+        }) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    let receipt = submit_and_hold(&mem, &agent, "user schema").await;
+    until_mem(&mem, "the dead letter", |m| m.stats().dead_lettered == 1).await;
+    assert!(holds_put(&store.batches()[0], receipt));
+
+    // The embedder is back: the held write's retry commits, then its worker
+    // panics before settling it.
+    mem.pipeline().panic_after_commit();
+    down.store(false, Ordering::SeqCst);
+    until_mem(&mem, "the worker to panic after its commit", |m| {
+        m.pipeline().test_panicked()
+    })
+    .await;
+    assert_ne!(
+        mem.pipeline().lookup(&agent, receipt).tag(),
+        "applied",
+        "the panic came before the settle"
+    );
+
+    let _ = mem.close().await;
+    let answer = mem.pipeline().lookup(&agent, receipt);
+    assert_eq!(
+        answer.tag(),
+        "close_unflushed",
+        "a close must not vouch for an intent a dead letter dropped, after a worker panic: \
+         {answer:?}"
+    );
+}
+
 /// A consumed intent row older than the retention window
 /// must not answer better for having survived a restart than the same id
 /// would in a process that never restarted.
@@ -1221,8 +1484,15 @@ async fn a_stale_flush_during_close_answers_close_unflushed() {
 }
 
 /// [`VectorSearchable`] whose checked vector lookup is slower than a write's
-/// whole I/O budget, every time (#125).
-struct SlowLookup(VectorSearchable);
+/// whole I/O budget (#125): every time, or while its switch is on (#346).
+struct SlowLookup(VectorSearchable, Arc<std::sync::atomic::AtomicBool>);
+
+impl SlowLookup {
+    /// Slow on every lookup.
+    fn always(inner: VectorSearchable) -> Self {
+        Self(inner, Arc::new(std::sync::atomic::AtomicBool::new(true)))
+    }
+}
 
 #[async_trait::async_trait]
 impl GraphStore for SlowLookup {
@@ -1268,8 +1538,10 @@ impl GraphStore for SlowLookup {
         _expected_contract: &crate::types::EmbeddingContract,
         _limit: usize,
     ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
-        // Slower than any write's whole budget, every time.
-        tokio::time::sleep(crate::graph::hybrid::HYBRID_IO_TIMEOUT * 2).await;
+        // Slower than any write's whole budget, while switched on.
+        if self.1.load(Ordering::SeqCst) {
+            tokio::time::sleep(crate::graph::hybrid::HYBRID_IO_TIMEOUT * 2).await;
+        }
         Ok(Vec::new())
     }
     async fn blast_radius(
@@ -1386,7 +1658,7 @@ async fn a_lookup_timeout_at_replay_settles_failed_and_a_run_of_them_stops_it() 
         .session("intent-slow-lookup")
         .agent("agent-a")
         .flush_interval(Duration::from_secs(3_600))
-        .store(Arc::new(SlowLookup(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
+        .store(Arc::new(SlowLookup::always(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
         .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(MatchStrategy::Hybrid)
@@ -2228,7 +2500,7 @@ async fn a_lookup_timeout_in_session_settles_failed_and_holds_nothing() {
         .session("in-session-slow-lookup")
         .agent("agent-a")
         .flush_interval(Duration::from_secs(3_600))
-        .store(Arc::new(SlowLookup(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
+        .store(Arc::new(SlowLookup::always(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
         .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(MatchStrategy::Hybrid)
@@ -2538,7 +2810,7 @@ async fn a_lookup_timeout_run_holds_the_third_write_and_its_retry_settles_it() {
         .session("in-session-lookup-run")
         .agent("agent-a")
         .flush_interval(Duration::from_secs(3_600))
-        .store(Arc::new(SlowLookup(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
+        .store(Arc::new(SlowLookup::always(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
         .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(MatchStrategy::Hybrid)
@@ -2591,4 +2863,137 @@ async fn a_lookup_timeout_run_holds_the_third_write_and_its_retry_settles_it() {
         other => panic!("the retry of the held write settles it: {other:?}"),
     }
     mem.close().await.expect("clean close");
+}
+
+/// Submit one write of `agent` and wait (bounded) until it leaves `pending`.
+async fn submit_until_answered(
+    mem: &Memory,
+    agent: &AgentId,
+    content: &str,
+) -> crate::writeq::ReceiptId {
+    let submitted = mem
+        .derive_async_as(
+            agent,
+            &[(content, ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack");
+    assert!(!submitted.dropped(), "{}", submitted.answer.describe());
+    let receipt = submitted.receipt;
+    until_mem(mem, "the write to leave pending", |m| {
+        m.pipeline().lookup(agent, receipt).tag() != "pending"
+    })
+    .await;
+    receipt
+}
+
+/// Two lookup timeouts settle `failed`; agent b's write commits and its
+/// worker is held at the test pause `arm` sets; agent c's first attempt then
+/// times out. Returns c's answer, after resuming b, checking it applied and
+/// closing the session.
+async fn timeout_after_a_paused_commit(
+    session: &str,
+    arm: impl Fn(&crate::writeq::WritePipeline) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>),
+) -> crate::writeq::ReceiptAnswer {
+    let inner = Arc::new(MemoryStore::new());
+    let slow = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mem = Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(
+            Arc::new(SlowLookup(VectorSearchable(inner.clone()), slow.clone()))
+                as Arc<dyn GraphStore>,
+        )
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    let a = AgentId::new("agent-a");
+    let b = AgentId::new("agent-b");
+    let c = AgentId::new("agent-c");
+
+    // A run of lookup timeouts one short of the limit: each settles `failed`.
+    for i in 0..crate::writeq::REPLAY_LOOKUP_TIMEOUT_LIMIT - 1 {
+        let id = submit_until_answered(&mem, &a, &format!("slow lookup fact {i}")).await;
+        assert_eq!(mem.pipeline().lookup(&a, id).tag(), "failed");
+    }
+
+    // Agent b's write commits; its worker stops at the pause.
+    slow.store(false, Ordering::SeqCst);
+    let (reached, resume) = arm(mem.pipeline());
+    let applied = mem
+        .derive_async_as(
+            &b,
+            &[("fast lookup fact", ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack")
+        .receipt;
+    tokio::time::timeout(Duration::from_secs(60), reached.notified())
+        .await
+        .expect("agent b's write committed and reached the pause");
+
+    // A first-attempt timeout lands while b's worker waits after its commit.
+    slow.store(true, Ordering::SeqCst);
+    let after = submit_until_answered(&mem, &c, "slow lookup fact after a commit").await;
+    let answer = mem.pipeline().lookup(&c, after);
+    // Resume b whatever c answered, before anything can fail and drop the
+    // session with a paused worker: `abort_workers` and `abort_all_sync`
+    // refuse one.
+    resume.notify_one();
+    until_mem(&mem, "agent b's write to settle", |m| {
+        m.pipeline().lookup(&b, applied).tag() == "applied"
+    })
+    .await;
+    mem.close().await.expect("clean close");
+    answer
+}
+
+/// **#346**: the in-session lookup-timeout streak counts the timeouts "with
+/// nothing applied between". Two lookup timeouts settle `failed`; then agent
+/// b's write commits, and its worker is held (test-only
+/// `pause_before_settle`) between that commit and its settle block; agent
+/// c's first attempt then times out. A write applied since the other two, so
+/// c's timeout is a first timeout and settles `failed`. Before the fix the
+/// streak was reset only in the settle block, so c's timeout counted as the
+/// third of a run and was held (`pending_replay`).
+///
+/// Mirrors `Drain.streak_old_counts_across_commit` (the bug) and
+/// `Drain.timeout_after_commit_settlesW`, `Drain.heldNew_iff` (the fix).
+#[tokio::test(start_paused = true)]
+async fn a_lookup_timeout_between_a_commit_and_its_settle_settles_failed() {
+    let answer =
+        timeout_after_a_paused_commit("in-session-lookup-commit", |p| p.pause_before_settle())
+            .await;
+    assert_eq!(
+        answer.tag(),
+        "failed",
+        "a write applied since the run, so this is a first timeout: {answer:?}"
+    );
+}
+
+/// **#346, the narrower window**: as above, with agent b's worker held right
+/// after `WriteCtx::run` returned, before its `Ok` arm (test-only
+/// `pause_after_commit`). The write has committed, so c's timeout is a first
+/// timeout and settles `failed`. With the reset in the `Ok` arm (#346's first
+/// fix), c's timeout still counted as the third of a run and was held.
+///
+/// Mirrors `Drain.streak_okArm_counts_across_commit` (the bug) and
+/// `Drain.timeout_after_commit_settlesW`, `Drain.heldNew_iff` (the fix).
+#[tokio::test(start_paused = true)]
+async fn a_lookup_timeout_between_a_commit_and_its_ok_arm_settles_failed() {
+    let answer =
+        timeout_after_a_paused_commit("in-session-lookup-ok-arm", |p| p.pause_after_commit()).await;
+    assert_eq!(
+        answer.tag(),
+        "failed",
+        "a write committed since the run, so this is a first timeout: {answer:?}"
+    );
 }

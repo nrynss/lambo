@@ -12,7 +12,9 @@
 //!   function.
 //! * **No graph lock across `.await`**, and **no `.await` between a completed
 //!   graph write and its settle**, so an aborted worker always means "not
-//!   written".
+//!   written". (Test builds only: a worker waiting at an armed test pause is
+//!   the exception, and `abort_workers` refuses to run then; see
+//!   `test_pause`.)
 //! * **Per-job fence check**: a lane drained after a lost lease refuses each
 //!   job and leaves its durable intent for the session's current holder.
 
@@ -125,6 +127,49 @@ pub(super) fn truncate_ids(ids: &[NodeId]) -> Vec<String> {
 pub(crate) struct ConsumeStamp {
     pub(super) tag: &'static str,
     pub(super) at: DateTime<Utc>,
+}
+
+/// What the lane worker does at a write's commit, run by [`WriteCtx::run`]
+/// **inside the commit's critical section**, under the graph write lock,
+/// beside the intent's consume ([`WorkerCommit::at_commit`]): it resets
+/// `Lanes::lookup_streak` (#346) and records the write as consumed and not
+/// yet settled (`Graph::mark_consumed_unsettled`, #345). The worker's failure
+/// consume records it too, in its own consume's lock hold.
+///
+/// **The record (#345 re-review).** A worker can panic after its commit and
+/// before its settle; its receipt stays unsettled, and the close sets it
+/// aside. So a dead-lettered receipt is forgotten only once its write
+/// settles (`Graph::settled_write`, in the worker's settle), not at its
+/// consume, and the flush's note skips a put only when its write is consumed
+/// and no longer in the record, that is, settled (Lean:
+/// `Drain.settlePrune_never_vouches_dropped`; pruning at the consume,
+/// `Drain.keptAtConsume_vouches_after_panic`). The replay passes no
+/// `WorkerCommit`: its writes are earlier processes', whose puts are not in
+/// this process's log.
+///
+/// The streak counts first-attempt lookup timeouts "with nothing applied
+/// between", and a write is applied at its commit. Reset there, the commit
+/// and the reset are one step: the commit is visible to no one until the
+/// graph lock is released, after the reset, and a timeout's lanes-lock hold
+/// falls before both or after both. Reset later (the `Ok` arm, or the settle
+/// block before that), a timeout another lane met in between counted toward
+/// the old run (Lean: `Drain.streak_okArm_counts_across_commit`,
+/// `Drain.streak_old_counts_across_commit`; the fix,
+/// `Drain.streakNew_eq_runSince`).
+///
+/// Lock order: graph write, then lanes, as admission nests them
+/// (`WritePipeline::admit`); no path takes the lanes lock and then the
+/// graph's. The replay passes none: its own streak is local to the replay.
+#[derive(Clone)]
+pub(super) struct WorkerCommit(Arc<parking_lot::Mutex<super::Lanes>>);
+
+impl WorkerCommit {
+    /// At the commit of the job with receipt `receipt`, under the graph write
+    /// lock `g` is borrowed from.
+    fn at_commit(&self, g: &mut Graph, receipt: &str) {
+        g.mark_consumed_unsettled(receipt);
+        self.0.lock().lookup_streak = 0;
+    }
 }
 
 /// The receipt sentence for an applied derive — one function, because the
@@ -317,10 +362,15 @@ impl WriteCtx {
     /// `ConsumeWriteIntent` always travel in one batch — one store
     /// transaction — and a crash can never leave the write durable beside a
     /// still-unconsumed intent (the double-apply this design excludes).
+    ///
+    /// `worker`, when present (the lane worker's), runs in that same critical
+    /// section ([`WorkerCommit`]: the lookup-streak reset, #346, and the
+    /// consumed-unsettled record, #345).
     pub(super) async fn run(
         &self,
         job: &Job,
         consume: Option<ConsumeStamp>,
+        worker: Option<&WorkerCommit>,
     ) -> Result<AppliedSummary, LamboError> {
         match &job.payload {
             JobPayload::Derive {
@@ -378,8 +428,12 @@ impl WriteCtx {
                         let targets = pinned.against.clone();
                         let ctx = self.clone();
                         let destination = job.receipt_destination.clone();
+                        let worker = worker.cloned();
                         let on_commit: Option<hybrid::CommitHook> = Some(Box::new(
                             move |g: &mut Graph, outcome: &crate::graph::derive::DeriveOutcome| {
+                                if let Some(worker) = &worker {
+                                    worker.at_commit(g, &receipt);
+                                }
                                 if let Some(stamp) = consume {
                                     g.consume_write_intent(
                                         receipt,
@@ -427,6 +481,9 @@ impl WriteCtx {
                             pinned,
                         )?;
                         // Same lock hold as the commit — see `run`'s doc.
+                        if let Some(worker) = worker {
+                            worker.at_commit(&mut g, &job.receipt.to_string());
+                        }
                         if let Some(stamp) = consume {
                             g.consume_write_intent(
                                 job.receipt.to_string(),
@@ -544,6 +601,9 @@ impl WriteCtx {
                         (!embeddings.is_empty()).then(|| self.embedding.clone()),
                     )?;
                     // Same lock hold as the commit — see `run`'s doc.
+                    if let Some(worker) = worker {
+                        worker.at_commit(&mut g, &job.receipt.to_string());
+                    }
                     if let Some(stamp) = consume {
                         g.consume_write_intent(
                             job.receipt.to_string(),
@@ -608,6 +668,38 @@ pub(crate) fn held_retry_backoff(attempts: u32) -> std::time::Duration {
         .map_or(max, |d| d.min(max))
 }
 
+/// Test-only: wait at `point` if a test armed a pause there (#346), else
+/// return at once without awaiting.
+///
+/// **What it costs.** While a worker waits here, a test build has an
+/// `.await` between a committed graph write and its settle, so the worker's
+/// rule "no `.await` between a completed graph write and its settle"
+/// ("aborted means not written") does not hold for that worker: aborted
+/// there, it would leave a write that applied with an unsettled receipt,
+/// which a close would set aside and answer `intent_durable` or
+/// `close_unflushed`. So `Lanes::test_paused` is set for the wait, and
+/// `WritePipeline::abort_workers` (a close) and `abort_all_sync` (a dropped
+/// `Memory`, unless the test is already panicking) panic while it is set: a
+/// test must notify `resume` before it closes or drops the session. Unarmed (every other test, and
+/// every non-test build, which has no pause at all), nothing here awaits.
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+async fn test_pause(lanes: &parking_lot::Mutex<super::Lanes>, point: super::admission::PausePoint) {
+    let pause = {
+        let mut l = lanes.lock();
+        if l.test_pause.as_ref().is_some_and(|p| p.point == point) {
+            l.test_paused = true;
+            l.test_pause.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        pause.reached.notify_one();
+        pause.resume.notified().await;
+        lanes.lock().test_paused = false;
+    }
+}
+
 /// What the worker does next (one write at a time).
 enum Next {
     /// Run this write (boxed: a `Job` dwarfs the other variants).
@@ -623,11 +715,55 @@ enum Next {
 }
 
 impl WritePipeline {
+    /// Test-only (#346): arm a one-shot pause. The next worker whose write
+    /// commits notifies the first `Notify` and waits for the second before
+    /// its settle block. The test must notify `resume` before it closes the
+    /// session: see [`test_pause`].
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn pause_before_settle(&self) -> (Arc<Notify>, Arc<Notify>) {
+        self.arm_test_pause(super::admission::PausePoint::BeforeSettle)
+    }
+
+    /// Test-only (#346): arm a one-shot pause after a write's commit, once
+    /// `WriteCtx::run` has returned and before the worker's `Ok` arm. The
+    /// test must notify `resume` before it closes the session: see
+    /// [`test_pause`].
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn pause_after_commit(&self) -> (Arc<Notify>, Arc<Notify>) {
+        self.arm_test_pause(super::admission::PausePoint::AfterCommit)
+    }
+
+    /// Test-only (#345 review): the next worker whose write commits panics
+    /// right after `WriteCtx::run` returns, before its settle.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn panic_after_commit(&self) {
+        self.lanes.lock().panic_after_commit = true;
+    }
+
+    /// Test-only: whether a worker has taken that panic.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn test_panicked(&self) -> bool {
+        self.lanes.lock().test_panicked
+    }
+
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    fn arm_test_pause(&self, point: super::admission::PausePoint) -> (Arc<Notify>, Arc<Notify>) {
+        let reached = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        self.lanes.lock().test_pause = Some(super::admission::TestPause {
+            point,
+            reached: reached.clone(),
+            resume: resume.clone(),
+        });
+        (reached, resume)
+    }
+
     /// Spawn `agent`'s lane worker. Called under the lanes lock, so it takes
     /// its wake-up (`Lanes::wake_for`) from the caller rather than the lock.
     pub(super) fn spawn_worker(&self, agent: AgentId, wake: Arc<Notify>) -> JoinHandle<()> {
         let ctx = self.ctx.clone();
         let lanes = self.lanes.clone();
+        let worker_commit = WorkerCommit(self.lanes.clone());
         let receipts = self.receipts.clone();
         let counters = self.counters.clone();
         let settled = self.settled.clone();
@@ -755,7 +891,24 @@ impl WritePipeline {
                         tag: "applied",
                         at: (clock)(),
                     };
-                    let raw_outcome = ctx.run(&job, Some(stamp)).await;
+                    let raw_outcome = ctx.run(&job, Some(stamp), Some(&worker_commit)).await;
+                    // Test-only (#346): hold a committed write here, after
+                    // `run` returned and before the `Ok` arm, while another
+                    // worker runs. See `test_pause`.
+                    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+                    if raw_outcome.is_ok() {
+                        test_pause(&lanes, super::admission::PausePoint::AfterCommit).await;
+                        // Test-only (#345 review): a panic after the commit.
+                        let panic_now = {
+                            let mut l = lanes.lock();
+                            let armed = std::mem::take(&mut l.panic_after_commit);
+                            l.test_panicked |= armed;
+                            armed
+                        };
+                        if panic_now {
+                            panic!("test-only panic after a commit, before its settle");
+                        }
+                    }
                     // Which failures hold the write rather than consume it.
                     // An embedder outage says nothing about the input, so the
                     // write is held (#295). A lookup timeout is the replay's
@@ -770,6 +923,12 @@ impl WritePipeline {
                     // hold the lane.
                     let hold_cause = match &raw_outcome {
                         Ok(_) => {
+                            // No `lookup_streak` reset here: `run` reset it
+                            // inside the commit (`WorkerCommit`, #346). Here is
+                            // already past the index mirroring, so a timeout
+                            // another lane met in between would have counted
+                            // toward the old run (Lean:
+                            // `Drain.streak_okArm_counts_across_commit`).
                             observed.lock().sample(started.elapsed().as_secs_f64());
                             None
                         }
@@ -803,8 +962,10 @@ impl WritePipeline {
                         } else {
                             model_safe_failure(e)
                         };
-                        ctx.graph.write().consume_write_intent(
-                            job.receipt.to_string(),
+                        let receipt = job.receipt.to_string();
+                        let mut g = ctx.graph.write();
+                        g.consume_write_intent(
+                            receipt.clone(),
                             WriteIntentOutcome {
                                 tag: "failed".into(),
                                 summary: super::receipts::durable_summary(
@@ -814,6 +975,9 @@ impl WritePipeline {
                                 consumed_at: (clock)(),
                             },
                         );
+                        // Consumed, not yet settled, in the consume's own
+                        // lock hold (`WorkerCommit`, #345).
+                        g.mark_consumed_unsettled(&receipt);
                     }
                     // Two strings from here on: the class for the model, the
                     // error for the operator.
@@ -877,6 +1041,14 @@ impl WritePipeline {
                     continue;
                 }
 
+                // Test-only (#346): hold a committed write here, between its
+                // commit and its settle block, while another worker runs. See
+                // `test_pause` for what that costs and how it is guarded.
+                #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+                if outcome.is_ok() {
+                    test_pause(&lanes, super::admission::PausePoint::BeforeSettle).await;
+                }
+
                 // No `.await` from here to the end of the iteration: an
                 // `abort()` cannot land between a completed graph write and the
                 // settle that reports it, so "aborted" always means "not
@@ -888,9 +1060,10 @@ impl WritePipeline {
                     if let Some(n) = l.running_per_lane.get_mut(&agent) {
                         *n = n.saturating_sub(1);
                     }
-                    if outcome.is_ok() {
-                        l.lookup_streak = 0;
-                    }
+                    // No `lookup_streak` reset here: it is reset at the commit
+                    // (`WorkerCommit`, inside `run`). A second reset here would forget
+                    // timeouts that came after the commit (Lean:
+                    // `Drain.streak_both_forgets_run`).
                     if retried {
                         // The held write that set the backoff has settled; the
                         // writes behind it have had no attempt yet.
@@ -937,7 +1110,15 @@ impl WritePipeline {
                     }
                 };
                 settle_one(&receipts, &job.receipt, answer, (clock)());
+                // Waiters on the receipt wake first; the graph bookkeeping
+                // below is not part of the answer they wait for.
                 settled.notify_waiters();
+                // Settled: a close will not set it aside, so the graph
+                // forgets it as consumed-and-unsettled and as dead-lettered
+                // (#345). After `settle_one`, on its own graph lock hold: a
+                // panic before here leaves both records, and the close
+                // answers a dead-lettered one `close_unflushed`.
+                ctx.graph.write().settled_write(&job.receipt.to_string());
             }
         })
     }

@@ -42,6 +42,10 @@
 //!   the whole batch counts as ONE in `dead_lettered` however many writes it
 //!   held (Lean: `Flush.constraint_dead_lettered` and its `exPoison`
 //!   example). Splitting it to find the offending mutation is not attempted.
+//!   The write intents the batch put are dropped with it, so the loop notes
+//!   their receipt ids in the graph (`Graph::note_dead_lettered_intents`),
+//!   and a close answers those receipts `close_unflushed`, never
+//!   `intent_durable` (#345; Lean: `Drain.closeD_never_vouches_dropped`).
 //! * **A permanent error about the store degrades (#301).** A flush the store
 //!   refuses with [`StoreError::Permanent`] (an error no replay can fix that
 //!   is about the store, not the batch, such as an undefined table; the codes
@@ -867,7 +871,11 @@ impl FlushLoop {
                 // outage, and the count goes up by one, not by the number of
                 // writes (module docs, `Flush.constraint_dead_lettered`).
                 let batch_len = self.pending.len();
-                self.drop_pending();
+                // #345: the write intents this batch put never reached the
+                // store either; a close must not answer them
+                // `intent_durable`. Noted under the same graph lock hold as
+                // the pin, before `pending` is cleared.
+                self.dead_letter_pending();
                 self.retry_after = None;
                 self.shared.dead_lettered.fetch_add(1, Ordering::AcqRel);
                 self.refresh_depth();
@@ -1178,13 +1186,26 @@ impl FlushLoop {
         self.clear_pending();
     }
 
-    /// `pending` is dropped without reaching the store (a dead letter, a
-    /// degraded session, a lost lease): keep what it touched marked as not
+    /// `pending` is dropped without reaching the store (a degraded session, a
+    /// lost lease; a dead letter goes through [`Self::dead_letter_pending`],
+    /// which does this too): keep what it touched marked as not
     /// durable in the graph (#60), then clear it. A later successful stamp
     /// must not count these writes as committed.
     fn drop_pending(&mut self) {
         if !self.pending.mutations.is_empty() {
             self.graph.write().pin_unflushed(&self.pending.mutations);
+        }
+        self.clear_pending();
+    }
+
+    /// `pending` is dead-lettered: [`Self::drop_pending`], and in the same
+    /// graph write lock hold the write intents it put are noted as never
+    /// durable (`Graph::note_dead_lettered_intents`, #345).
+    fn dead_letter_pending(&mut self) {
+        if !self.pending.mutations.is_empty() {
+            let mut graph = self.graph.write();
+            graph.note_dead_lettered_intents(&self.pending.mutations);
+            graph.pin_unflushed(&self.pending.mutations);
         }
         self.clear_pending();
     }

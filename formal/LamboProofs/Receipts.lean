@@ -26,7 +26,10 @@ IntentRecorded` on a retried close, which bypasses `Entry::settle` by design
 (`drain.rs`); replay; the restart map; the in-serve hold (#295): `hold_one`
 answering a held write `pending_replay`, the held writes in `Lanes::held`, and
 admission's `DropReason::HeldLane` refusal. `Drain.lean` models the hold
-(`hold_then_serve_order`, `sessionW_orderInv`, and the caps in `Caps`).
+(`hold_then_serve_order`, `sessionW_orderInv`, and the caps in `Caps`), the
+lookup-timeout streak (`Lanes::lookup_streak`, reset at a commit since #346:
+`Drain.streakNew_eq_runSince`), and when a close answers `CloseUnflushed`
+(#345: `Drain.closeD`). The answers' `describe` text is not modelled.
 
 The admission counts `lane` and `total` below are read as outstanding plus
 held writes, as admission counts them (`lane_outstanding + lane_held`,

@@ -556,6 +556,33 @@ open Lambo
 #print axioms Lambo.Drain.FateW.holds_answer
 #print axioms Lambo.Drain.not_owed_of_consumed
 #print axioms Lambo.Drain.shutdown_exactly_oneW
+-- Dead-lettered batches at close (#345)
+#print axioms Lambo.Drain.keysLanded_disjoint
+#print axioms Lambo.Drain.sessLog_puts_nodup
+#print axioms Lambo.Drain.dropped_iff_not_committed
+#print axioms Lambo.Drain.closeD_agrees
+#print axioms Lambo.Drain.closeW_vouches_dead_letteredW
+#print axioms Lambo.Drain.closeW_vouches_dead_lettered
+#print axioms Lambo.Drain.shutdown_no_silent_lossD
+#print axioms Lambo.Drain.closeD_never_vouches_dropped
+#print axioms Lambo.Drain.closeD_vouches_only_committed
+#print axioms Lambo.Drain.closeD_durable_iff
+#print axioms Lambo.Drain.closeD_retryD
+#print axioms Lambo.Drain.closeD_keptDropped
+#print axioms Lambo.Drain.keptAtConsume_vouches_after_panic
+#print axioms Lambo.Drain.runP_inv
+#print axioms Lambo.Drain.settlePrune_never_vouches_dropped
+#print axioms Lambo.Drain.settlePrune_exact
+#print axioms Lambo.Drain.settlePrune_unsettled_bounded
+#print axioms Lambo.Drain.settlePrune_settled_forgotten
+-- Where the lookup-timeout streak resets (#346)
+#print axioms Lambo.Drain.streakNew_eq_runSince
+#print axioms Lambo.Drain.heldNew_iff
+#print axioms Lambo.Drain.streakNew_after_commit
+#print axioms Lambo.Drain.timeout_after_commit_settlesW
+#print axioms Lambo.Drain.streak_old_counts_across_commit
+#print axioms Lambo.Drain.streak_okArm_counts_across_commit
+#print axioms Lambo.Drain.streak_both_forgets_run
 -- Store flush path
 #print axioms Flush.flushWithRetry_backoff
 #print axioms Flush.ladder_exhausted

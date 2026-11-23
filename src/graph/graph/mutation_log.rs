@@ -184,6 +184,11 @@ impl Graph {
     /// already durable — the double-apply.
     ///
     /// Epoch not bumped, for [`Graph::record_write_intent`]'s reason.
+    ///
+    /// A consume does **not** forget a dead-lettered receipt (#345
+    /// re-review): a lane worker can panic after its consume and before its
+    /// settle, leaving the write unsettled for the close to set aside. The
+    /// worker's settle forgets it (`Graph::settled_write`).
     pub fn consume_write_intent(&mut self, receipt: String, outcome: WriteIntentOutcome) {
         self.mutation_log.push(Mutation::ConsumeWriteIntent {
             session_id: self.session_id.clone(),

@@ -882,7 +882,9 @@ impl Memory {
                 "close: step 9/{CLOSE_STEPS} final_flush skipped (empty tail)"
             );
             // Nothing left to write: every set-aside intent was taken by an
-            // earlier flush, so it is durable (#117).
+            // earlier flush, which committed it or dead-lettered it.
+            // `settle_deferred` answers the committed ones `intent_durable`
+            // (#117) and the dead-lettered ones `close_unflushed` (#345).
             self.pipeline
                 .settle_deferred(crate::writeq::CloseFlush::Durable);
             // Graceful close: hand off the lease now rather than waiting out the
@@ -908,7 +910,8 @@ impl Memory {
                 // no cancellation can land in this window.
                 tail.durable();
                 // Only now are the set-aside receipts true to call
-                // `intent_durable` (#117).
+                // `intent_durable` (#117), all but those whose put an
+                // earlier flush dead-lettered (#345, `settle_deferred`).
                 self.pipeline
                     .settle_deferred(crate::writeq::CloseFlush::Durable);
                 tracing::info!(

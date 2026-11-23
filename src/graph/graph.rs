@@ -149,6 +149,17 @@ pub struct Graph {
     /// Whether the holder has logged its first whole-graph fallback for an
     /// overflowing unflushed set (#60 review L-2). RAM-only.
     unflushed_overflow_logged: unflushed::LoggedOnce,
+    /// The receipt ids of the write intents whose `PutWriteIntent` was in a
+    /// batch the flush dead-lettered and whose write has not settled (#345;
+    /// see `unflushed.rs`). A close answers such a receipt `close_unflushed`,
+    /// never `intent_durable`. The lane worker's settle removes its receipt
+    /// ([`Graph::settled_write`]). RAM-only, like the log.
+    dead_lettered_intents: HashSet<String>,
+    /// The receipt ids of the writes a lane worker has consumed and not yet
+    /// settled (#345 re-review; see `unflushed.rs`): one per worker between
+    /// its commit and its settle, and one per worker that panicked in
+    /// between. RAM-only.
+    consumed_unsettled: HashSet<String>,
     /// The most recent plan-relevant concept writes with their epochs (#116; see
     /// `txn.rs`). RAM-only.
     node_writes: txn::NodeWrites,
@@ -184,6 +195,8 @@ impl Graph {
             unflushed: HashMap::new(),
             unflushed_contract: None,
             unflushed_overflow_logged: unflushed::LoggedOnce::default(),
+            dead_lettered_intents: HashSet::new(),
+            consumed_unsettled: HashSet::new(),
             node_writes: txn::NodeWrites::default(),
             undo: None,
         }

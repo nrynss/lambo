@@ -190,6 +190,38 @@ in their doc comments, and describe behaviour the current Rust no longer has.
   appends; `serveR_applied_pending`: the current serve applies only stored,
   unconsumed rows; `crash_never_reappliesW`: no write in a durable prefix of
   the current worker's log is applied again by the current serve.
+* Dead-lettered batches at close (#345; `closeD` over a flush history,
+  `Landed`): before the fix the close vouched for a put a dead letter dropped
+  (`closeW_vouches_dead_lettered`, `closeW_vouches_dead_letteredW`); at a
+  close whose final flush completed, the current close answers a set-aside
+  write `intent_durable` exactly when its put is committed
+  (`closeD_durable_iff`; a close whose flush did not complete answers every
+  set-aside write `close_unflushed`, committed put or not), never for a
+  dropped one
+  (`closeD_never_vouches_dropped`, `closeD_vouches_only_committed`), with the
+  accounting `shutdown_no_silent_lossD`, and a retried close upgrades only a
+  committed one (`closeD_retryD`). With no dead letter it is `closeW`
+  (`closeD_agrees`), so the `closeW` theorems describe the current close of
+  every session no flush dead-lettered.
+* Worker panics and the dead-lettered set (#345 re-review; `stepK`,
+  `stepP`): a lane worker that panics after its commit leaves its write
+  unsettled for the close to set aside, which `stepW` does not model.
+  Forgetting a dead-lettered receipt at the consume then vouches for a
+  dropped put (`keptAtConsume_vouches_after_panic`); the current Rust
+  forgets it at the settle, which never does (`settlePrune_never_vouches_dropped`,
+  `settlePrune_exact`, `settlePrune_unsettled_bounded`,
+  `settlePrune_settled_forgotten`).
+* Where the lookup streak resets (#346; `streakOld`, `streakNew`,
+  `runSince`): before the fix a timeout between a commit and that write's
+  settle was counted toward the old run (`streak_old_counts_across_commit`),
+  and with the reset in the worker's `Ok` arm, one between the commit and
+  that arm (`streak_old_counts_across_commit`'s twin,
+  `streak_okArm_counts_across_commit`); the current worker resets inside the
+  commit's critical section, so the streak is the documented
+  count (`streakNew_eq_runSince`, `heldNew_iff`) and a timeout after an
+  applied write settles `failed` (`streakNew_after_commit`,
+  `timeout_after_commit_settlesW`); both resets would forget a run
+  (`streak_both_forgets_run`).
 
 What the model shows about the Rust (theorems in the last section):
 `transient_skip_reorders` and `outage_then_replay_reorders` (a transient
@@ -4173,7 +4205,10 @@ Rust: `quiesce`, `abort_workers`, `settle_deferred` (`src/writeq/drain.rs`);
 and `Memory::close_fenced` (`src/memory/shutdown.rs`), which call
 `settle_deferred` with `CloseFlush::Durable` only once the final flush has
 completed (or found an empty tail), and with `Incomplete` when it fails, when
-the session is degraded, or when the lease was lost.
+the session is degraded, or when the lease was lost. Since #345
+`settle_deferred` also answers `close_unflushed` for a write whose put a
+background flush dead-lettered, whatever it is passed (`closeD`, at the end
+of this file).
 
 What the close does to an admitted write, by its state when `close()` starts:
 
@@ -4228,22 +4263,17 @@ more traces than the Rust, never fewer, so every theorem over all `runW`
 traces holds of the Rust's. A retry that started before the seal and finishes
 during the drain is one of the Rust's traces too.
 
-**Known gaps found after this section was written (stated, not fixed
-here).**
-
-* **#345, dead-lettered batches.** The model has no dead-lettered batches:
-  `CloseFlush.durable` stands for "the final flush completed", and
-  `shutdown_no_silent_lossW` reads `intent_durable` as owed in this process's
-  log (`OwedW`). In the Rust a background flush that dead-lettered a batch
-  before the close dropped the puts in it, and a close whose tail is then
-  empty still passes `CloseFlush::Durable` (the empty-tail branch of
-  `Memory::close`), so a set-aside write can answer `intent_durable` with no
-  intent in the store.
-* **#346, where the lookup streak resets.** `heldErrW` takes the streak as an
-  input and says nothing of how it is counted. In the Rust `lookup_streak`
-  resets in the worker's settle block, after the commit, not at the commit,
-  so a lookup timeout on another lane in between still counts toward the
-  run.
+**`closeW` has no dead-lettered batches; `closeD` does (#345).** In this
+section `CloseFlush.durable` stands for "the final flush completed" and
+`OwedW` reads owed in this process's whole log. A background flush that
+dead-lettered a batch dropped the puts in it, and before #345 the Rust still
+answered such a set-aside write `intent_durable`
+(`closeW_vouches_dead_lettered`). The current Rust is `closeD`, in the
+section "Dead-lettered batches at close (#345)": it is `closeW` exactly when
+no put was dead-lettered (`closeD_agrees`), so the theorems here describe
+the current close of every such session, and `shutdown_no_silent_lossD`
+restates the accounting for the others. How the lookup streak is counted is
+in the section "Where the lookup-timeout streak resets (#346)".
 
 **Writes refused at admission: a gap between the model and the Rust.** The
 model starts from `WS.init (admitStore all)` and logs `admitLog all`, so
@@ -4296,9 +4326,10 @@ It appends nothing to the log. It also sets aside a job of `all` that
 admission refused, whose receipt the model leaves `pending` where the Rust
 answers `dropped` (the gap in the section header); the theorems speak only of
 admitted writes. `.durable` stands for "the final flush completed" and nothing
-more: the model has no dead-lettered batches, while in the Rust an earlier
-dead-letter can have dropped a set-aside write's put though the close still
-passes `CloseFlush::Durable` (#345, in the section header). The trace `st`
+more: `closeW` reads no flush history, so it is the Rust's close only when no
+background flush dead-lettered a set-aside write's put. Before #345 the Rust
+was `closeW` always (`closeW_vouches_dead_lettered`); since, it is `closeD`,
+which agrees with `closeW` when nothing was dead-lettered. The trace `st`
 may also run a held write after the seal, which the Rust cannot (an
 over-approximation; see the section header). -/
 def closeW (flush : CloseFlush) (now : Int) (st : WS) : RStore :=
@@ -4316,10 +4347,11 @@ by the next serve once that log is durable. It is about this process's whole
 log, not a durable prefix of it: a write's row is owed by the next serve only
 if a flush took its put. `admitLog all` puts every job of `all`, so for a job
 admission refused (which in the Rust gets no intent) `OwedW` can hold in the
-model and not in the Rust; the theorems use it only for admitted writes. The
-log has no dead-lettered batches either: in the Rust a background flush that
-dead-lettered a batch dropped the puts in it, so a write `OwedW` calls owed
-may have no intent in the store (#345). -/
+model and not in the Rust; the theorems use it only for admitted writes. It
+reads the log, not what reached the store: a write whose put a dead letter
+dropped is still `OwedW` here, and has no intent in the store. Which puts
+reached the store is the flush history of the section "Dead-lettered batches
+at close (#345)" (`committedPuts`), where the close vouches only for those. -/
 def OwedW (all : List Job) (st : WS) (j : Job) : Prop :=
   ⟨j, none⟩ ∈ pendingOf (fixedLoad (intentsOf (admitLog all ++ st.log).flatten))
 
@@ -5099,9 +5131,9 @@ or finds it past it (the third, and each later one until a write applies and
 resets it) holds the write as an outage does; a retried held write's lookup timeout does
 not count and settles. This is the abstraction `stepW`'s header describes
 ("handed to the model as `unavailable`"), now as a function. The streak is an
-input: how the Rust counts it is not modelled, and the Rust resets it in the
-worker's settle block after a commit, not at the commit, so a timeout on
-another lane in between still counts (#346). -/
+input here; how the worker counts it, reset at each commit (#346), is the
+section "Where the lookup-timeout streak resets (#346)" (`streakNew`,
+`heldNew_iff`). -/
 def heldErrW (retried : Bool) (streak : Nat) : Err → Err
   | .lookupTimeout =>
     if retried = false ∧ lookupTimeoutLimit ≤ streak + 1 then .unavailable else .lookupTimeout
@@ -5974,5 +6006,1037 @@ example :
   decide
 
 end Examples
+
+/-! ## Dead-lettered batches at close (#345)
+
+`closeW` takes how the final flush ended (`CloseFlush`) and nothing else, and
+answers every set-aside write `intent_durable` when it is `.durable`: in the
+Rust, `Memory::close` passes `CloseFlush::Durable` when the final flush
+completes and when the tail is empty ("every set-aside intent was taken by an
+earlier flush, so it is durable"). Neither says the set-aside write's put
+reached the store. A background flush that the store refuses with a
+constraint violation, or a value it cannot hold, dead-letters its batch: the
+whole of `pending`, dropped while the session goes on (`Flush.lean`,
+`constraint_dead_lettered`, `value_rejected_dead_letters`). That batch can
+hold the `PutWriteIntent` of a write that is still unsettled (a held,
+`pending_replay` one, or one still queued), and then nothing durable backs
+its `intent_durable`.
+
+This section adds the flush history the close ran after, and states the
+close's answer against it.
+
+* **The history** (`Landed`, one per batch of the session's log,
+  `sessLog all st`, in log order): `committed` or `deadLettered`. It is the
+  history as a close whose final flush completed (or found an empty tail)
+  sees it: every batch of the log has left the process, through a background
+  flush, the stop's push-back and the final flush, or a dead letter
+  (`hist.length = (sessLog all st).length`). A flush carries whole batches
+  and a dead letter drops all of `pending`, so how the batches were grouped
+  into flushes does not change which puts reached the store; the model keeps
+  only each batch's fate. A degraded session's drops and a fenced session's
+  drops are not in it: the close answers both `close_unflushed` whatever the
+  history (`CloseFlush::Incomplete`, `Memory::close`, `close_fenced`).
+* **"Durable" means committed** (`committedPuts`): the write's put is in a
+  batch the store committed, not merely one a flush drained.
+* **The current rule is wrong** (`closeW_vouches_dead_lettered`, a concrete
+  case, and `closeW_vouches_dead_letteredW`, every reachable session): a
+  set-aside write whose put a dead letter dropped answers `intent_durable` at
+  a close whose flush completed, and its put is not committed.
+* **The fixed rule** (`closeD`, `settleDeferredD`; Rust: the flush records
+  the receipt ids of the puts in every batch it dead-letters,
+  `Graph::note_dead_lettered_intents`, and `settle_deferred` answers such a
+  receipt `close_unflushed` even under `CloseFlush::Durable`): a set-aside
+  write answers `intent_durable` only when the flush ended `.durable` and its
+  put is not among the dead-lettered ones (`flushFor`). At a close whose
+  final flush completed it is exact, not conservative: `closeD_durable_iff`
+  (a set-aside write answers `intent_durable` exactly when its put is
+  committed). A close whose flush did not complete answers every set-aside
+  write `close_unflushed`, a committed put included, as before #345. The
+  other theorems: `closeD_vouches_only_committed`,
+  `closeD_never_vouches_dropped` (whatever the flush outcome), and
+  `shutdown_no_silent_lossD`, the accounting of `shutdown_no_silent_lossW`
+  with the dead-lettered writes moved to `close_unflushed`. A retried close
+  keeps the rule (`closeD_retryD`): it upgrades `close_unflushed` only for a
+  write whose put was not dead-lettered. Where no batch was dead-lettered
+  the fixed close is the old one (`closeD_agrees`).
+
+Exactness rests on the receipt ids of the puts being distinct
+(`(all.map (·.key)).Nodup`; the Rust's ids are unique per process and the put
+is an upsert on the id), and on the worker's batches carrying no put
+(`runW_noPut`). -/
+
+/-- How one batch of the session's log left the process before the close:
+committed by a flush (a background one or the close's final one), or
+dropped as a dead letter. -/
+inductive Landed where
+  | committed
+  | deadLettered
+  deriving DecidableEq, Repr
+
+/-- The receipt ids whose `PutWriteIntent` is in batch `b`. -/
+def putKeys (b : Batch) : List Key :=
+  b.filterMap (fun m => match m with
+    | .put j => some j.key
+    | _ => none)
+
+/-- The receipt ids whose put is in a batch of `log` that `hist` (one fate per
+batch, in log order) says landed `f`. -/
+def keysLanded (log : List Batch) (hist : List Landed) (f : Landed) : List Key :=
+  ((log.zip hist).filter (fun p => decide (p.2 = f))).flatMap (fun p => putKeys p.1)
+
+/-- The puts a dead letter dropped: what the Rust's flush records
+(`Graph::note_dead_lettered_intents`). -/
+def droppedPuts (log : List Batch) (hist : List Landed) : List Key :=
+  keysLanded log hist .deadLettered
+
+/-- The puts the store committed. -/
+def committedPuts (log : List Batch) (hist : List Landed) : List Key :=
+  keysLanded log hist .committed
+
+/-- The session's whole log: admission's puts, then the workers' batches. -/
+def sessLog (all : List Job) (st : WS) : List Batch := admitLog all ++ st.log
+
+/-- The flush outcome the fixed close settles receipt `k` by: a write whose
+put a dead letter dropped is settled as after an incomplete flush. -/
+def flushFor (flush : CloseFlush) (dropped : List Key) (k : Key) : CloseFlush :=
+  if k ∈ dropped then .incomplete else flush
+
+/-- `settle_deferred` after #345: each set-aside receipt by `flushFor`. -/
+def settleDeferredD (flush : CloseFlush) (dropped : List Key) (now : Int) (ids : List Key)
+    (s : RStore) : RStore :=
+  ids.foldl (fun s r => update s r (deferEntry (flushFor flush dropped r) now)) s
+
+/-- `close()` after #345: `closeW` with the dead-lettered puts. -/
+def closeD (flush : CloseFlush) (dropped : List Key) (now : Int) (st : WS) : RStore :=
+  settleDeferredD flush dropped now (deferredW st) st.store
+
+/-! ### The history's puts -/
+
+theorem keysLanded_cons (b : Batch) (log : List Batch) (f : Landed) (hist : List Landed)
+    (g : Landed) :
+    keysLanded (b :: log) (f :: hist) g =
+      (if f = g then putKeys b else []) ++ keysLanded log hist g := by
+  unfold keysLanded
+  by_cases h : f = g <;> simp [h]
+
+theorem mem_putKeys {b : Batch} {j : Job} (h : Mut.put j ∈ b) : j.key ∈ putKeys b :=
+  List.mem_filterMap.mpr ⟨_, h, rfl⟩
+
+theorem keysLanded_sub : ∀ (log : List Batch) (hist : List Landed) (g : Landed) (k : Key),
+    k ∈ keysLanded log hist g → k ∈ log.flatMap putKeys
+  | [], _, _, _, h => by simp [keysLanded] at h
+  | _ :: _, [], _, _, h => by simp [keysLanded] at h
+  | b :: log, f :: hist, g, k, h => by
+    rw [keysLanded_cons] at h
+    rw [List.flatMap_cons]
+    rcases List.mem_append.mp h with h | h
+    · split at h
+      · exact List.mem_append_left _ h
+      · simp at h
+    · exact List.mem_append_right _ (keysLanded_sub log hist g k h)
+
+/-- With distinct put ids, no put is both committed and dead-lettered. -/
+theorem keysLanded_disjoint : ∀ (log : List Batch) (hist : List Landed),
+    (log.flatMap putKeys).Nodup → ∀ k, k ∈ committedPuts log hist → k ∉ droppedPuts log hist
+  | [], _, _, _, h, _ => by simp [committedPuts, keysLanded] at h
+  | _ :: _, [], _, _, h, _ => by simp [committedPuts, keysLanded] at h
+  | b :: log, f :: hist, hnd, k, hc, hd => by
+    unfold committedPuts at hc
+    unfold droppedPuts at hd
+    rw [List.flatMap_cons] at hnd
+    obtain ⟨_, hrest, hdisj⟩ := List.nodup_append.mp hnd
+    rw [keysLanded_cons] at hc hd
+    rcases List.mem_append.mp hc with hc | hc <;> rcases List.mem_append.mp hd with hd | hd
+    · split at hc
+      · split at hd
+        · rename_i h1 h2; rw [h1] at h2; cases h2
+        · simp at hd
+      · simp at hc
+    · split at hc
+      · exact hdisj _ hc _ (keysLanded_sub log hist _ k hd) rfl
+      · simp at hc
+    · split at hd
+      · exact hdisj _ hd _ (keysLanded_sub log hist _ k hc) rfl
+      · simp at hd
+    · exact keysLanded_disjoint log hist hrest k hc hd
+
+theorem landed_of_mem : ∀ (log : List Batch) (hist : List Landed), hist.length = log.length →
+    ∀ b ∈ log, ∃ f, (b, f) ∈ log.zip hist
+  | [], _, _, _, hb => by simp at hb
+  | _ :: _, [], h, _, _ => by simp at h
+  | c :: log, f :: hist, h, b, hb => by
+    rcases List.mem_cons.mp hb with rfl | hb
+    · exact ⟨f, by simp⟩
+    · obtain ⟨g, hg⟩ := landed_of_mem log hist (by simpa using h) b hb
+      exact ⟨g, by simp [hg]⟩
+
+theorem mem_keysLanded {log : List Batch} {hist : List Landed} {b : Batch} {f : Landed} {j : Job}
+    (hb : (b, f) ∈ log.zip hist) (hj : Mut.put j ∈ b) : j.key ∈ keysLanded log hist f :=
+  List.mem_flatMap.mpr ⟨(b, f), List.mem_filter.mpr ⟨hb, by simp⟩, mem_putKeys hj⟩
+
+theorem putKeys_admitLog : ∀ (all : List Job), (admitLog all).flatMap putKeys = all.map (·.key)
+  | [] => rfl
+  | j :: js => by
+    have h : admitLog (j :: js) = [Mut.put j] :: admitLog js := rfl
+    rw [h, List.flatMap_cons, putKeys_admitLog js]
+    rfl
+
+theorem putKeys_noPut (log : List Batch) (h : NoPut log.flatten) : log.flatMap putKeys = [] := by
+  apply List.eq_nil_iff_forall_not_mem.mpr
+  intro k hk
+  obtain ⟨b, hb, hk⟩ := List.mem_flatMap.mp hk
+  obtain ⟨m, hm, he⟩ := List.mem_filterMap.mp hk
+  cases m with
+  | put j => exact h _ (List.mem_flatten.mpr ⟨b, hb, hm⟩) j rfl
+  | write _ => simp at he
+  | consume _ _ => simp at he
+
+/-- The current worker's batches carry no put. -/
+theorem runW_noPut (c : Caps) (sz : Job → Nat) (now : Int) (all : List Job) (evs : List Ev) :
+    NoPut (runW c sz now (WS.init (admitStore all)) evs).log.flatten := by
+  intro m hm k he
+  obtain ⟨b, hb, hmb⟩ := List.mem_flatten.mp hm
+  obtain ⟨j', rr, rfl⟩ := runW_log_refines c sz now evs (WS.init (admitStore all))
+    (by intro b hb; simp [WS.init] at hb) b hb
+  rcases workerStep_keys hmb with h | ⟨t, h⟩ <;> rw [h] at he <;> cases he
+
+/-- Every put of the session's log has its own receipt id. -/
+theorem sessLog_puts_nodup {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hkeys : (all.map (·.key)).Nodup) : ((sessLog all st).flatMap putKeys).Nodup := by
+  subst hst
+  rw [sessLog, List.flatMap_append, putKeys_admitLog,
+    putKeys_noPut _ (runW_noPut c sz now all evs), List.append_nil]
+  exact hkeys
+
+/-- Once every batch has a fate, an admitted job's put is committed or
+dead-lettered. -/
+theorem put_landed {all : List Job} {st : WS} {hist : List Landed}
+    (hcov : hist.length = (sessLog all st).length) {j : Job} (hj : j ∈ all) :
+    j.key ∈ committedPuts (sessLog all st) hist ∨ j.key ∈ droppedPuts (sessLog all st) hist := by
+  have hb : [Mut.put j] ∈ sessLog all st :=
+    List.mem_append_left _ (List.mem_map.mpr ⟨j, hj, rfl⟩)
+  obtain ⟨f, hf⟩ := landed_of_mem _ hist hcov _ hb
+  cases f with
+  | committed => exact Or.inl (mem_keysLanded hf List.mem_cons_self)
+  | deadLettered => exact Or.inr (mem_keysLanded hf List.mem_cons_self)
+
+/-- With every batch landed and distinct put ids, a put is dead-lettered
+exactly when it is not committed. -/
+theorem dropped_iff_not_committed {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hkeys : (all.map (·.key)).Nodup) {hist : List Landed}
+    (hcov : hist.length = (sessLog all st).length) {j : Job} (hj : j ∈ all) :
+    j.key ∈ droppedPuts (sessLog all st) hist ↔ j.key ∉ committedPuts (sessLog all st) hist := by
+  constructor
+  · intro hd hc
+    exact keysLanded_disjoint _ hist (sessLog_puts_nodup hst hkeys) _ hc hd
+  · intro hc
+    rcases put_landed hcov hj with h | h
+    · exact absurd h hc
+    · exact h
+
+/-! ### The fixed close's receipts -/
+
+theorem lookup_settleDeferredD (flush : CloseFlush) (dropped : List Key) (now : Int) :
+    ∀ (ids : List Key) (s : RStore) (q : Key),
+      lookup (settleDeferredD flush dropped now ids s) q =
+        if q ∈ ids then (lookup s q).map (deferEntry (flushFor flush dropped q) now)
+        else lookup s q := by
+  intro ids
+  induction ids with
+  | nil => intro s q; simp [settleDeferredD]
+  | cons r ids ih =>
+    intro s q
+    show lookup (settleDeferredD flush dropped now ids
+      (update s r (deferEntry (flushFor flush dropped r) now))) q = _
+    rw [ih, lookup_update]
+    by_cases hr : q = r
+    · subst hr
+      by_cases hq : q ∈ ids
+      · cases h : lookup s q with
+        | none => simp
+        | some e => simp [hq, deferEntry_idem]
+      · simp [hq]
+    · by_cases hq : q ∈ ids
+      · simp [hq, hr]
+      · simp [hq, hr]
+
+/-- At each receipt the fixed close settles by its own `flushFor`. -/
+theorem lookup_settleDeferredD_eq (flush : CloseFlush) (dropped : List Key) (now : Int)
+    (ids : List Key) (s : RStore) (q : Key) :
+    lookup (settleDeferredD flush dropped now ids s) q =
+      lookup (settleDeferred (flushFor flush dropped q) now ids s) q := by
+  rw [lookup_settleDeferredD, lookup_settleDeferred]
+
+theorem ansOf_closeD (flush : CloseFlush) (dropped : List Key) (now : Int) (st : WS) (k : Key) :
+    ansOf (closeD flush dropped now st) k = ansOf (closeW (flushFor flush dropped k) now st) k := by
+  unfold ansOf closeD closeW
+  rw [lookup_settleDeferredD_eq]
+
+/-- **With no dead letter, the fixed close is the old one.** -/
+theorem closeD_agrees (flush : CloseFlush) (now : Int) (st : WS) (k : Key) :
+    ansOf (closeD flush [] now st) k = ansOf (closeW flush now st) k := by
+  rw [ansOf_closeD]
+  simp [flushFor]
+
+theorem setAside_unsettled {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) :
+    ∃ a, ansOf st.store j.key = some a ∧ a.isSettled = false := by
+  subst hst
+  have hI := sessionW_inv c sz now all evs hnd hall
+  simp only [List.mem_append] at hj
+  rcases hj with (hj | hj) | hj
+  · exact (hI.live j (List.mem_append_left _ hj)).1
+  · exact ⟨_, (hI.held j hj).1, rfl⟩
+  · exact (hI.live j (List.mem_append_right _ hj)).1
+
+theorem setAside_mem_all {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) : j ∈ all := by
+  subst hst
+  have hO := runW_ord c sz now evs _ (ordW_init (admitStore all))
+  apply hall j
+  apply (keysW_of _ hO hnd).adm j
+  simp only [DW, List.mem_append] at hj ⊢
+  rcases hj with (hj | hj) | hj
+  · exact Or.inl (Or.inl (Or.inr hj))
+  · exact Or.inl (Or.inr hj)
+  · exact Or.inr hj
+
+/-- A set-aside write's answer under the fixed close. -/
+theorem closeD_setAside {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (dropped : List Key) (now' : Int)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) :
+    ansOf (closeD flush dropped now' st) j.key =
+      some (closeAnswer (flushFor flush dropped j.key)) := by
+  obtain ⟨a, h1, h2⟩ := setAside_unsettled hst hnd hall hj
+  rw [ansOf_closeD]
+  exact (ansOf_closeW_unsettled h1 h2).2
+
+/-! ### The current rule is wrong -/
+
+/-- **#345, in general: the current close vouches for a dead-lettered put.**
+In every reachable session, a set-aside write (running, held or queued when
+the close began) whose put the history dead-lettered answers
+`intent_durable` at a close whose flush completed, though its put is not
+committed. -/
+theorem closeW_vouches_dead_letteredW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (hkeys : (all.map (·.key)).Nodup) (hist : List Landed) (now' : Int)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue)
+    (hd : j.key ∈ droppedPuts (sessLog all st) hist) :
+    ansOf (closeW .durable now' st) j.key = some .intentRecorded ∧
+      j.key ∉ committedPuts (sessLog all st) hist := by
+  obtain ⟨a, h1, h2⟩ := setAside_unsettled hst hnd hall hj
+  exact ⟨(ansOf_closeW_unsettled h1 h2).2,
+    fun hc => keysLanded_disjoint _ hist (sessLog_puts_nodup hst hkeys) _ hc hd⟩
+
+/-! ### The fixed rule -/
+
+/-- **Shutdown accounting under the fixed close (#345).** As
+`shutdown_no_silent_lossW`, except that a set-aside write answers
+`intent_durable` only when the flush completed and its put was not
+dead-lettered, and `close_unflushed` when the flush was incomplete or its put
+was dead-lettered. -/
+theorem shutdown_no_silent_lossD {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (dropped : List Key) (now' : Int) (j : Job) (hj : j ∈ st.admitted) :
+    ((j, Answer.applied) ∈ st.settled ∧
+      ansOf (closeD flush dropped now' st) j.key = some .applied ∧
+      [Mut.write j.key, .consume j.key .applied] ∈ st.log) ∨
+    ((j, Answer.failed) ∈ st.settled ∧ ansOf (closeD flush dropped now' st) j.key = some .failed ∧
+      [Mut.consume j.key .failed] ∈ st.log) ∨
+    ((j, Answer.failed) ∈ st.settled ∧ st.fenced = true ∧
+      ansOf (closeD flush dropped now' st) j.key = some .failed ∧ OwedW all st j) ∨
+    (j ∈ st.running ++ st.held ++ st.queue ∧ flush = .durable ∧ j.key ∉ dropped ∧
+      ansOf (closeD flush dropped now' st) j.key = some .intentRecorded ∧ OwedW all st j) ∨
+    (j ∈ st.running ++ st.held ++ st.queue ∧ (flush = .incomplete ∨ j.key ∈ dropped) ∧
+      ansOf (closeD flush dropped now' st) j.key = some .closeUnflushed) := by
+  rw [ansOf_closeD]
+  rcases shutdown_no_silent_lossW hst hnd hall (flushFor flush dropped j.key) now' j hj with
+    h | h | h | ⟨h1, h2, h3, h4⟩ | ⟨h1, h2, h3⟩
+  · exact Or.inl h
+  · exact Or.inr (Or.inl h)
+  · exact Or.inr (Or.inr (Or.inl h))
+  · unfold flushFor at h2
+    split at h2
+    · cases h2
+    · rename_i hn
+      exact Or.inr (Or.inr (Or.inr (Or.inl ⟨h1, h2, hn, h3, h4⟩)))
+  · unfold flushFor at h2
+    split at h2
+    · rename_i hm
+      exact Or.inr (Or.inr (Or.inr (Or.inr ⟨h1, Or.inr hm, h3⟩)))
+    · exact Or.inr (Or.inr (Or.inr (Or.inr ⟨h1, Or.inl h2, h3⟩)))
+
+/-- **The fixed close never vouches for a dropped put.** An admitted write
+whose put a dead letter dropped never answers `intent_durable`, whatever the
+flush outcome. -/
+theorem closeD_never_vouches_dropped {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (hist : List Landed) (now' : Int) (j : Job) (hj : j ∈ st.admitted)
+    (hd : j.key ∈ droppedPuts (sessLog all st) hist) :
+    ansOf (closeD flush (droppedPuts (sessLog all st) hist) now' st) j.key ≠
+      some .intentRecorded := by
+  intro hv
+  rcases shutdown_no_silent_lossD hst hnd hall flush (droppedPuts (sessLog all st) hist) now' j hj
+    with ⟨_, h, _⟩ | ⟨_, h, _⟩ | ⟨_, _, h, _⟩ | ⟨_, _, hn, _, _⟩ | ⟨_, _, h⟩
+  · rw [hv] at h; cases h
+  · rw [hv] at h; cases h
+  · rw [hv] at h; cases h
+  · exact hn hd
+  · rw [hv] at h; cases h
+
+/-- **The fixed close vouches only for committed puts.** Once every batch of
+the log has landed (a completed or empty final flush), an admitted write
+that answers `intent_durable` has its put in a committed batch. -/
+theorem closeD_vouches_only_committed {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (hist : List Landed) (now' : Int) (j : Job) (hj : j ∈ st.admitted)
+    (hcov : hist.length = (sessLog all st).length)
+    (hv : ansOf (closeD flush (droppedPuts (sessLog all st) hist) now' st) j.key =
+      some .intentRecorded) :
+    j.key ∈ committedPuts (sessLog all st) hist := by
+  rcases put_landed hcov (hall j hj) with h | h
+  · exact h
+  · exact absurd hv (closeD_never_vouches_dropped hst hnd hall flush hist now' j hj h)
+
+/-- **The fixed rule is exact.** At a close whose flush completed (every
+batch landed), a set-aside write answers `intent_durable` exactly when its
+put is committed, and `close_unflushed` otherwise. -/
+theorem closeD_durable_iff {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (hkeys : (all.map (·.key)).Nodup) (hist : List Landed) (now' : Int)
+    (hcov : hist.length = (sessLog all st).length)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) :
+    (ansOf (closeD .durable (droppedPuts (sessLog all st) hist) now' st) j.key =
+        some .intentRecorded ↔ j.key ∈ committedPuts (sessLog all st) hist) ∧
+      (j.key ∉ committedPuts (sessLog all st) hist →
+        ansOf (closeD .durable (droppedPuts (sessLog all st) hist) now' st) j.key =
+          some .closeUnflushed) := by
+  have hiff := dropped_iff_not_committed hst hkeys hcov (setAside_mem_all hst hnd hall hj)
+  rw [closeD_setAside hst hnd hall .durable _ now' hj]
+  unfold flushFor
+  by_cases hd : j.key ∈ droppedPuts (sessLog all st) hist
+  · rw [ite_eq_left hd]
+    have hc := hiff.mp hd
+    exact ⟨⟨fun h => by simp [closeAnswer] at h, fun h => absurd h hc⟩, fun _ => rfl⟩
+  · rw [ite_eq_right hd]
+    have hc : j.key ∈ committedPuts (sessLog all st) hist := by
+      exact Classical.byContradiction (fun hn => hd (hiff.mpr hn))
+    exact ⟨⟨fun _ => hc, fun _ => rfl⟩, fun hn => absurd hc hn⟩
+
+/-- **A retried close keeps the rule.** A set-aside write answers
+`close_unflushed` after an incomplete flush; a retried close whose flush
+completes upgrades it to `intent_durable` only if its put was not
+dead-lettered, and leaves it `close_unflushed` otherwise (the Rust's
+upgrade in `settle_deferred` is skipped for a dead-lettered receipt). -/
+theorem closeD_retryD {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (dropped : List Key) {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue)
+    (now1 now2 : Int) :
+    ansOf (closeD .incomplete dropped now1 st) j.key = some .closeUnflushed ∧
+      ansOf (settleDeferredD .durable dropped now2 (deferredW st)
+          (closeD .incomplete dropped now1 st)) j.key =
+        some (if j.key ∈ dropped then .closeUnflushed else .intentRecorded) := by
+  have hinc : ∀ k, flushFor .incomplete dropped k = .incomplete := by
+    intro k; unfold flushFor; split <;> rfl
+  obtain ⟨a, h1, h2⟩ := setAside_unsettled hst hnd hall hj
+  have hm := (ansOf_closeW_unsettled (flush := .incomplete) (now := now1) h1 h2).1
+  have hc1 : ansOf (closeD .incomplete dropped now1 st) j.key = some .closeUnflushed := by
+    rw [ansOf_closeD, hinc]; exact (ansOf_closeW_unsettled h1 h2).2
+  refine ⟨hc1, ?_⟩
+  have hl : lookup (closeD .incomplete dropped now1 st) j.key =
+      lookup (closeW .incomplete now1 st) j.key := by
+    unfold closeD closeW; rw [lookup_settleDeferredD_eq, hinc]
+  unfold ansOf
+  rw [lookup_settleDeferredD, ite_eq_left hm, hl]
+  unfold flushFor
+  by_cases hd : j.key ∈ dropped
+  · rw [ite_eq_left hd, ite_eq_left hd]
+    unfold ansOf at hc1
+    rw [hl] at hc1
+    cases hx : lookup (closeW .incomplete now1 st) j.key with
+    | none => rw [hx] at hc1; cases hc1
+    | some x =>
+      rw [hx] at hc1
+      have hxa : x.answer = .closeUnflushed := by simpa using hc1
+      have hs : x.answer.isSettled = true := by rw [hxa]; rfl
+      simp only [Option.map_some, deferEntry_incomplete,
+        Lambo.Receipts.settle_settled x _ now2 hs, hxa]
+  · rw [ite_eq_right hd, ite_eq_right hd]
+    have hr := (closeW_retry_upgradesW hst hnd hall j hj now1 now2).2
+    unfold ansOf at hr
+    rw [lookup_settleDeferred, ite_eq_left hm] at hr
+    exact hr
+
+/-! ### What the Rust keeps of the dead-lettered puts
+
+`keptDropped` is the set a first version of the #345 review fix kept
+(`1b4d89e4`): `Graph::consume_write_intent` forgot a receipt once its
+write's consume was appended, so the set held the dropped puts whose writes
+the log had not consumed. In this model a set-aside write's intent is never
+consumed (`InvW`), so forgetting the consumed ones changes no answer
+(`closeD_keptDropped`). **That premise is the model's, not the Rust's:** a
+lane worker that panics after its commit and before its settle leaves a
+consumed write unsettled, and the close sets it aside. `stepW` has no
+panic, so `closeD_keptDropped` does not see it; the section "Worker panics
+and the dead-lettered set" models it, shows the consume-time pruning
+vouching for a dropped put there (`keptAtConsume_vouches_after_panic`), and
+proves the current Rust's rule, pruning at the settle
+(`settlePrune_never_vouches_dropped`). -/
+
+/-- Whether the log consumes receipt `k`. -/
+def consumedIn (log : List Batch) (k : Key) : Bool :=
+  log.flatten.any (fun m => match m with
+    | .consume k' _ => decide (k' = k)
+    | _ => false)
+
+/-- The dead-lettered puts the Rust still holds at close
+(`Graph::dead_lettered_intents`): those whose write the log has not
+consumed. -/
+def keptDropped (log : List Batch) (dropped : List Key) : List Key :=
+  dropped.filter (fun k => !consumedIn log k)
+
+theorem consumedIn_false {log : List Batch} {k : Key} (h : Untouched k log) :
+    consumedIn log k = false := by
+  unfold consumedIn
+  rw [List.any_eq_false]
+  intro m hm
+  cases m with
+  | put _ => simp
+  | write _ => simp
+  | consume k' t =>
+    simp only [decide_eq_true_eq]
+    intro hk
+    subst hk
+    exact h t hm
+
+theorem setAside_untouched {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) : Untouched j.key st.log := by
+  subst hst
+  have hI := sessionW_inv c sz now all evs hnd hall
+  simp only [List.mem_append] at hj
+  rcases hj with (hj | hj) | hj
+  · exact (hI.live j (List.mem_append_left _ hj)).2
+  · exact (hI.held j hj).2
+  · exact (hI.live j (List.mem_append_right _ hj)).2
+
+/-- **Forgetting consumed receipts changes no set-aside write's answer**, in
+this model: the close over the kept set answers every set-aside write as the
+close over all the dead-lettered puts does. It rests on `InvW` (a set-aside
+write's intent is unconsumed), which a lane worker that panics after its
+commit breaks in the Rust; `stepW` has no panic. With one, consume-time
+pruning vouches for a dropped put (`keptAtConsume_vouches_after_panic`); the
+current Rust prunes at the settle (`settlePrune_never_vouches_dropped`). -/
+theorem closeD_keptDropped {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (dropped : List Key) (now' : Int)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) :
+    ansOf (closeD flush (keptDropped st.log dropped) now' st) j.key =
+      ansOf (closeD flush dropped now' st) j.key := by
+  rw [closeD_setAside hst hnd hall flush _ now' hj, closeD_setAside hst hnd hall flush _ now' hj]
+  have hc := consumedIn_false (setAside_untouched hst hnd hall hj)
+  have hm : j.key ∈ keptDropped st.log dropped ↔ j.key ∈ dropped := by
+    unfold keptDropped
+    simp [hc]
+  unfold flushFor
+  by_cases hd : j.key ∈ dropped
+  · rw [ite_eq_left (hm.mpr hd), ite_eq_left hd]
+  · rw [ite_eq_right (fun h => hd (hm.mp h)), ite_eq_right hd]
+
+/-- **#345, the concrete case: the current close vouches for a dead-lettered
+put.** `j1` meets an embedder outage and is held (`pending_replay`); the
+background flush that drained its put dead-letters the batch, so every batch
+of the log has landed and the close's tail is empty. The current close
+(`closeW .durable`, the empty-tail branch's `CloseFlush::Durable`) answers it
+`intent_durable`, though its put is not committed; the fixed close answers it
+`close_unflushed`. Rust test
+`a_close_with_an_empty_tail_does_not_vouch_for_a_dead_lettered_intent`. -/
+theorem closeW_vouches_dead_lettered :
+    let st := runW capsT one 0 (WS.init (admitStore [j1]))
+      [.submit j1, .start 0, .finish 0 (.err .unavailable)]
+    let log := sessLog [j1] st
+    let hist := [Landed.deadLettered]
+    hist.length = log.length ∧ ansOf st.store j1.key = some .pendingReplay ∧
+      ansOf (closeW .durable 1 st) j1.key = some .intentRecorded ∧
+      j1.key ∉ committedPuts log hist ∧
+      ansOf (closeD .durable (droppedPuts log hist) 1 st) j1.key = some .closeUnflushed := by
+  decide
+
+/-- The retried close on the second Rust test's scenario: `j1`'s put is
+dead-lettered, then `j2` is held behind it and its put rides the tail. The
+first close's final flush fails (`close_unflushed` for both); the retry's
+lands the tail, so `j2` is upgraded to `intent_durable` and `j1` stays
+`close_unflushed`, where the current close upgraded both. Rust test
+`a_retried_close_upgrades_only_the_intents_it_can_vouch_for`. -/
+example :
+    let st := runW capsT one 0 (WS.init (admitStore [j1, j2]))
+      [.submit j1, .start 0, .finish 0 (.err .unavailable), .submit j2, .start 0]
+    let log := sessLog [j1, j2] st
+    let hist := [Landed.deadLettered, Landed.committed]
+    let d := droppedPuts log hist
+    st.held = [j1, j2] ∧ hist.length = log.length ∧
+      [j1.key, j2.key].map (ansOf (closeD .incomplete d 1 st)) =
+        [some .closeUnflushed, some .closeUnflushed] ∧
+      [j1.key, j2.key].map
+        (ansOf (settleDeferredD .durable d 2 (deferredW st) (closeD .incomplete d 1 st))) =
+        [some .closeUnflushed, some .intentRecorded] ∧
+      [j1.key, j2.key].map
+        (ansOf (settleDeferred .durable 2 (deferredW st) (closeW .incomplete 1 st))) =
+        [some .intentRecorded, some .intentRecorded] := by
+  decide
+
+/-! ## Worker panics and the dead-lettered set (#345 review)
+
+`stepW` has no panic. In the Rust a lane worker can panic after its commit
+(the graph write and the intent's consume, under one graph lock hold) and
+before `settle_one`: in the index mirroring, the receipt summary or the
+ledger append. Its receipt stays unsettled (`Lanes::worker_alive`), and the
+close sets it aside like a running write. This focused model follows one
+session's receipts through the steps that touch the dead-lettered set
+(`Graph::dead_lettered_intents`):
+
+* `consume k`: the write's consume is appended (its commit, or a failure's
+  consume), under the graph lock;
+* `settle k`: the worker's settle block, after `settle_one`;
+* `deadLetter ks`: a background flush dead-letters a batch whose puts are
+  `ks`. A put precedes its consume in log order and the dropped batch is the
+  flush's only pending one, so a consume of `k` appended before this step is
+  in that batch or still in the log, which is what the Rust's note-time skip
+  looks at.
+
+A panic is a `consume k` with no `settle k` after it. At close, a receipt not
+settled is set aside, and a close whose final flush completed answers it
+`intent_durable` exactly when it is not in the set.
+
+* `stepK` (the rule at `1b4d89e4`): a consume forgets the receipt, and the
+  note skips a put already consumed. `keptAtConsume_vouches_after_panic`
+  (`decide`): a write whose put was dead-lettered, then consumed, then whose
+  worker panicked, is set aside and out of the set, so the close vouches for
+  it; the same when the consume rode the dropped batch.
+* `stepP` (the current Rust): a worker's consume also records the receipt as
+  consumed and not yet settled (`Graph::consumed_unsettled`); the settle
+  block forgets it from both sets; the note skips a put only when its write
+  is consumed and no longer in that record, that is, settled. The Rust
+  checks "consumed" as "its consume is in the dropped batch or still in the
+  mutation log" (`note_dead_lettered_intents`), not over the whole history
+  as `consumed` does here. The two agree on every put the note sees: a put
+  precedes its consume in log order, and the dropped batch is the flush
+  loop's only pending one, so a consume that already left the log in an
+  earlier batch had its put in that batch or before it, never in the batch
+  being dropped.
+  `settlePrune_never_vouches_dropped`: over every trace, a dropped put whose
+  write is not settled is in the set, so no close vouches for it, panics
+  included. `settlePrune_exact`: for a write not settled, it is in the set
+  exactly when its put was dropped, so the close's exactness
+  (`closeD_durable_iff`) carries over. `settlePrune_settled_forgotten`: a
+  settled write whose consume came before its settle, as the worker's always
+  does, leaves the set at its settle and is not noted again, so the set
+  holds only writes not yet settled, or never consumed (refused after a lost
+  lease, whose close answers `close_unflushed` anyway).
+  `settlePrune_unsettled_bounded`: the record of consumed, unsettled writes
+  holds only such writes: at most one per worker between its commit and its
+  settle, plus one per panicked worker. -/
+
+/-- A step that touches the dead-lettered set. -/
+inductive DEv where
+  | consume (k : Key)
+  | settle (k : Key)
+  | deadLetter (ks : List Key)
+  deriving DecidableEq, Repr
+
+/-- The bookkeeping: the set (`dl`), the consumed-and-unsettled record
+(`cu`), and, for the statements, which writes were consumed and settled and
+which puts were dropped. -/
+structure DS where
+  dl : List Key
+  cu : List Key
+  consumed : List Key
+  settled : List Key
+  dropped : List Key
+  deriving DecidableEq, Repr
+
+def DS.init : DS := ⟨[], [], [], [], []⟩
+
+/-- The rule at `1b4d89e4`: prune at the consume, skip a consumed put at the
+note. -/
+def stepK (s : DS) : DEv → DS
+  | .consume k => { s with consumed := k :: s.consumed, dl := s.dl.filter (· ≠ k) }
+  | .settle k => { s with settled := k :: s.settled }
+  | .deadLetter ks =>
+    { s with dropped := ks ++ s.dropped, dl := ks.filter (fun k => k ∉ s.consumed) ++ s.dl }
+
+/-- The current rule: prune at the settle; skip at the note only a put whose
+write is consumed and settled (consumed, and out of `cu`). -/
+def stepP (s : DS) : DEv → DS
+  | .consume k => { s with consumed := k :: s.consumed, cu := k :: s.cu }
+  | .settle k =>
+    { s with settled := k :: s.settled, cu := s.cu.filter (· ≠ k), dl := s.dl.filter (· ≠ k) }
+  | .deadLetter ks =>
+    { s with dropped := ks ++ s.dropped,
+             dl := ks.filter (fun k => k ∉ s.consumed ∨ k ∈ s.cu) ++ s.dl }
+
+/-- What a close whose final flush completed answers a set-aside receipt
+`k` (one not settled), given the set. -/
+def vouches (s : DS) (k : Key) : Bool := decide (k ∉ s.settled) && decide (k ∉ s.dl)
+
+private def kP : Key := (0, 1000, 1)
+
+/-- **#345 review: pruning at the consume vouches for a dropped put after a
+worker panic.** The write's put is dead-lettered while it is queued; it
+commits (its consume is appended, which forgets it); its worker panics
+before the settle. At close it is set aside and out of the set, so the close
+answers `intent_durable`, though its put was dropped. Second case: the put
+and the consume ride the dropped batch together, and the note skips it. The
+current rule keeps both in the set. Rust test
+`a_worker_that_panics_after_its_commit_does_not_get_intent_durable`. -/
+theorem keptAtConsume_vouches_after_panic :
+    let t1 := [DEv.deadLetter [kP], .consume kP]
+    let t2 := [DEv.consume kP, .deadLetter [kP]]
+    (t1.foldl stepK DS.init).dropped = [kP] ∧ vouches (t1.foldl stepK DS.init) kP = true ∧
+      (t2.foldl stepK DS.init).dropped = [kP] ∧ vouches (t2.foldl stepK DS.init) kP = true ∧
+      vouches (t1.foldl stepP DS.init) kP = false ∧ vouches (t2.foldl stepP DS.init) kP = false := by
+  decide
+
+/-- The current rule's invariant. -/
+structure PInv (s : DS) : Prop where
+  /-- A dropped put whose write is not settled is in the set. -/
+  sound : ∀ k ∈ s.dropped, k ∉ s.settled → k ∈ s.dl
+  /-- The set holds only dropped puts. -/
+  sub : ∀ k ∈ s.dl, k ∈ s.dropped
+  /-- A consumed write not yet settled is in the record. -/
+  cu_of : ∀ k ∈ s.consumed, k ∉ s.settled → k ∈ s.cu
+  /-- The record holds only consumed, unsettled writes. -/
+  cu_sub : ∀ k ∈ s.cu, k ∈ s.consumed ∧ k ∉ s.settled
+
+theorem pinv_init : PInv DS.init := by
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> intro k hk <;> simp [DS.init] at hk
+
+/-- The step a worker can take: it never consumes a write it already
+settled (a write is consumed at most once, before its settle). -/
+def DEv.ok (s : DS) : DEv → Prop
+  | .consume k => k ∉ s.settled
+  | _ => True
+
+theorem stepP_inv (s : DS) (e : DEv) (hI : PInv s) (he : e.ok s) : PInv (stepP s e) := by
+  cases e with
+  | consume k =>
+    simp only [DEv.ok] at he
+    refine ⟨hI.sound, hI.sub, ?_, ?_⟩
+    · intro x hx hs
+      simp only [stepP, List.mem_cons] at hx hs ⊢
+      rcases hx with rfl | hx
+      · exact Or.inl rfl
+      · exact Or.inr (hI.cu_of x hx hs)
+    · intro x hx
+      simp only [stepP, List.mem_cons] at hx ⊢
+      rcases hx with rfl | hx
+      · exact ⟨Or.inl rfl, he⟩
+      · exact ⟨Or.inr (hI.cu_sub x hx).1, (hI.cu_sub x hx).2⟩
+  | settle k =>
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · intro x hx hs
+      simp only [stepP, List.mem_cons, not_or] at hx hs ⊢
+      exact List.mem_filter.mpr ⟨hI.sound x hx hs.2, by simp [hs.1]⟩
+    · intro x hx
+      simp only [stepP] at hx ⊢
+      exact hI.sub x (List.mem_filter.mp hx).1
+    · intro x hx hs
+      simp only [stepP, List.mem_cons, not_or] at hx hs ⊢
+      exact List.mem_filter.mpr ⟨hI.cu_of x hx hs.2, by simp [hs.1]⟩
+    · intro x hx
+      simp only [stepP, List.mem_cons, not_or] at hx ⊢
+      have h1 := List.mem_filter.mp hx
+      have h2 := hI.cu_sub x h1.1
+      refine ⟨h2.1, ?_, h2.2⟩
+      intro hk; subst hk; simp at h1
+  | deadLetter ks =>
+    refine ⟨?_, ?_, hI.cu_of, hI.cu_sub⟩
+    · intro x hx hs
+      simp only [stepP, List.mem_append] at hx hs ⊢
+      rcases hx with hx | hx
+      · refine Or.inl (List.mem_filter.mpr ⟨hx, ?_⟩)
+        by_cases hc : x ∈ s.consumed
+        · simp [hI.cu_of x hc hs]
+        · simp [hc]
+      · exact Or.inr (hI.sound x hx hs)
+    · intro x hx
+      simp only [stepP, List.mem_append] at hx ⊢
+      rcases hx with hx | hx
+      · exact Or.inl (List.mem_filter.mp hx).1
+      · exact Or.inr (hI.sub x hx)
+
+/-- Every step of a worker trace keeps the invariant. -/
+def DOk : DS → List DEv → Prop
+  | _, [] => True
+  | s, e :: es => e.ok s ∧ DOk (stepP s e) es
+
+theorem runP_inv : ∀ (evs : List DEv) (s : DS), PInv s → DOk s evs → PInv (evs.foldl stepP s)
+  | [], _, hI, _ => hI
+  | e :: es, s, hI, ⟨he, hr⟩ => runP_inv es (stepP s e) (stepP_inv s e hI he) hr
+
+/-- **The current rule never vouches for a dropped put, panics included.**
+Over every worker trace, a write whose put was dead-lettered and that is not
+settled (set aside by the close, a panicked worker's included) is in the
+set, so the close answers it `close_unflushed`. -/
+theorem settlePrune_never_vouches_dropped (evs : List DEv) (h : DOk DS.init evs) (k : Key)
+    (hd : k ∈ (evs.foldl stepP DS.init).dropped) :
+    vouches (evs.foldl stepP DS.init) k = false := by
+  have hI := runP_inv evs DS.init pinv_init h
+  unfold vouches
+  by_cases hs : k ∈ (evs.foldl stepP DS.init).settled
+  · simp [hs]
+  · simp [hI.sound k hd hs]
+
+/-- **The current rule is exact for the writes a close sets aside.** For a
+write not settled, it is in the set exactly when its put was dropped. -/
+theorem settlePrune_exact (evs : List DEv) (h : DOk DS.init evs) (k : Key)
+    (hs : k ∉ (evs.foldl stepP DS.init).settled) :
+    k ∈ (evs.foldl stepP DS.init).dl ↔ k ∈ (evs.foldl stepP DS.init).dropped := by
+  have hI := runP_inv evs DS.init pinv_init h
+  exact ⟨hI.sub k, fun hd => hI.sound k hd hs⟩
+
+/-- **The record of consumed, unsettled writes is bounded by them**: every
+entry is a write consumed and not settled (in the Rust, one per worker
+between its commit and its settle, plus one per panicked worker). -/
+theorem settlePrune_unsettled_bounded (evs : List DEv) (h : DOk DS.init evs) (k : Key)
+    (hk : k ∈ (evs.foldl stepP DS.init).cu) :
+    k ∈ (evs.foldl stepP DS.init).consumed ∧ k ∉ (evs.foldl stepP DS.init).settled :=
+  (runP_inv evs DS.init pinv_init h).cu_sub k hk
+
+/-- After a settle, a consumed write is out of the set and out of the
+record, and a later dead letter of its put does not note it. -/
+theorem settlePrune_settled_forgotten (s : DS) (k : Key) (hc : k ∈ s.consumed)
+    (ks : List Key) :
+    k ∉ (stepP s (.settle k)).dl ∧ k ∉ (stepP s (.settle k)).cu ∧
+      k ∉ (stepP (stepP s (.settle k)) (.deadLetter ks)).dl := by
+  have h1 : k ∉ (stepP s (.settle k)).dl := by simp [stepP]
+  have h2 : k ∉ (stepP s (.settle k)).cu := by simp [stepP]
+  refine ⟨h1, h2, ?_⟩
+  intro hm
+  simp only [stepP, List.mem_append] at hm
+  rcases hm with hm | hm
+  · have hk := (List.mem_filter.mp hm).2
+    simp at hk
+    exact hk hc
+  · simp at hm
+
+/-! ## Where the lookup-timeout streak resets (#346)
+
+`heldErrW` takes `lookup_streak` as an input. The rule it serves (the docs,
+`spawn_worker`'s comment): a first-attempt lookup timeout is held once it is
+at least the `REPLAY_LOOKUP_TIMEOUT_LIMIT`-th of a run of them **with nothing
+applied between**; any other settles `failed`. This section counts the
+streak.
+
+The events are the steps that read or write `lookup_streak`, across every
+lane, in the order they happen:
+
+* `timeout`: a first-attempt lookup timeout (`spawn_worker`, the
+  `is_lookup_timeout` arm) takes the lanes lock and adds one, and the write
+  is held when the new value reaches the limit (`heldErrW false streak`,
+  `streak` the value before). A held write's retry that times out does not
+  touch the streak and is no event here.
+* `commit`: a write's commit, inside `WriteCtx::run`, under the graph write
+  lock: its mutations and the consume of its intent (the hybrid
+  `CommitHook`, or the canonical and action paths' inline blocks). Since the
+  fix the reset happens here too, the lanes lock taken under the graph write
+  lock (the order admission nests them in), so the commit and the reset are
+  one event: the commit becomes visible only when the graph lock is
+  released, after the reset, and a timeout's lanes-lock hold falls either
+  before the reset (then before the commit, as the graph lock publishes it)
+  or after both.
+* `okArm`: the worker's `Ok` arm, after `WriteCtx::run` has returned: later
+  than the commit by the index mirroring (`mirror_concepts`, which waits for
+  the graph read and index write locks), the daemon wake and the receipt
+  summary. No `.await` lies between, but another worker can take the lanes
+  lock in that stretch on a multi-threaded runtime (and, in the Rust test, at
+  the test-only `pause_after_commit`).
+* `settleOk`: that write's settle block, later still in the same iteration
+  (in the Rust test, after the test-only `pause_before_settle`).
+
+"Applied" in the rule is the commit.
+
+* `runSince`: the documented count, the timeouts since the last commit.
+* `streakOld`, the Rust before #346, which reset the streak in the settle
+  block: `streak_old_counts_across_commit`, a timeout that follows a commit
+  but comes before that write's settle is held as the third of a run (two
+  timeouts came before the commit), where the rule says it is a first timeout
+  and settles `failed`.
+* `streakOkArm`, #346's first fix, which reset in the `Ok` arm:
+  `streak_okArm_counts_across_commit`, the same fault in the narrower stretch
+  between the commit and the `Ok` arm (found in review).
+* `streakBoth`, resets at the commit and the settle: wrong the other way
+  (`streak_both_forgets_run`), the settle's reset forgets timeouts that came
+  after the commit. So the fix keeps no later reset.
+* `streakNew`, the fix (reset at the commit, in its critical section, only):
+  `streakNew_eq_runSince` over every trace; `heldNew_iff`: a first-attempt
+  timeout is held exactly when `limit ≤ runSince + 1`;
+  `streakNew_after_commit`, `timeout_after_commit_settlesW`: a first-attempt
+  timeout with no timeout since the last commit counts as a first timeout,
+  and in the worker model settles `failed` and consumes its intent. -/
+
+/-- What moves `lookup_streak`, or could, in the order it happens. -/
+inductive SEv where
+  | commit
+  | okArm
+  | settleOk
+  | timeout
+  deriving DecidableEq, Repr
+
+/-- The streak before #346: reset in the settle block. -/
+def streakOld (s : Nat) : SEv → Nat
+  | .commit => s
+  | .okArm => s
+  | .settleOk => 0
+  | .timeout => s + 1
+
+/-- #346's first fix: reset in the worker's `Ok` arm, after `WriteCtx::run`
+returned. -/
+def streakOkArm (s : Nat) : SEv → Nat
+  | .commit => s
+  | .okArm => 0
+  | .settleOk => s
+  | .timeout => s + 1
+
+/-- The streak after the fix: reset at the commit, in its critical section. -/
+def streakNew (s : Nat) : SEv → Nat
+  | .commit => 0
+  | .okArm => s
+  | .settleOk => s
+  | .timeout => s + 1
+
+/-- Resets at the commit and the settle, which the fix does not keep. -/
+def streakBoth (s : Nat) : SEv → Nat
+  | .commit => 0
+  | .okArm => s
+  | .settleOk => 0
+  | .timeout => s + 1
+
+/-- The documented count: the lookup timeouts since the last write applied. -/
+def runSince (evs : List SEv) : Nat :=
+  ((evs.reverse.takeWhile (fun e => e != .commit)).filter (fun e => e == .timeout)).length
+
+theorem runSince_snoc (evs : List SEv) (e : SEv) :
+    runSince (evs ++ [e]) = streakNew (runSince evs) e := by
+  unfold runSince
+  rw [List.reverse_append]
+  cases e <;> simp [streakNew]
+
+theorem streakNew_eq_runSince_rev : ∀ (r : List SEv),
+    r.reverse.foldl streakNew 0 = runSince r.reverse
+  | [] => rfl
+  | e :: r => by
+    rw [List.reverse_cons, List.foldl_append, runSince_snoc, ← streakNew_eq_runSince_rev r]
+    rfl
+
+/-- **The fixed streak is the documented count**, over every trace. -/
+theorem streakNew_eq_runSince (evs : List SEv) : evs.foldl streakNew 0 = runSince evs := by
+  have h := streakNew_eq_runSince_rev evs.reverse
+  rwa [List.reverse_reverse] at h
+
+/-- **The fixed worker holds a first-attempt lookup timeout exactly when the
+documented run reaches the limit.** -/
+theorem heldNew_iff (evs : List SEv) :
+    holdsS (heldErrW false (evs.foldl streakNew 0) .lookupTimeout) = true ↔
+      lookupTimeoutLimit ≤ runSince evs + 1 := by
+  rw [heldErrW_holds, streakNew_eq_runSince]
+  simp
+
+theorem foldl_streakNew_zero : ∀ (mid : List SEv), (∀ e ∈ mid, e ≠ .timeout) →
+    mid.foldl streakNew 0 = 0
+  | [], _ => rfl
+  | e :: mid, h => by
+    have he : streakNew 0 e = 0 := by
+      cases e with
+      | commit => rfl
+      | okArm => rfl
+      | settleOk => rfl
+      | timeout => exact absurd rfl (h _ List.mem_cons_self)
+    rw [List.foldl_cons, he]
+    exact foldl_streakNew_zero mid (fun x hx => h x (List.mem_cons_of_mem _ hx))
+
+/-- **A timeout after an applied write counts as a first timeout** under the
+fixed streak, whatever came before the commit and whatever settles after it,
+as long as no other timeout came since. -/
+theorem streakNew_after_commit (pre mid : List SEv) (hmid : ∀ e ∈ mid, e ≠ .timeout) :
+    (pre ++ SEv.commit :: mid).foldl streakNew 0 = 0 := by
+  rw [List.foldl_append, List.foldl_cons]
+  exact foldl_streakNew_zero mid hmid
+
+/-- **In the worker model, that timeout settles `failed`**: the running write
+of agent `a` whose first attempt times out after a commit (no timeout since)
+is settled `failed` with its intent consumed, by `lookupTimeout_settlesW` at
+the streak the fixed worker counts. Rust tests
+`a_lookup_timeout_between_a_commit_and_its_settle_settles_failed`,
+`a_lookup_timeout_between_a_commit_and_its_ok_arm_settles_failed`. -/
+theorem timeout_after_commit_settlesW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (a : Nat) (j : Job) (t : List Job) (hrun : ofAgent a st.running = j :: t)
+    (pre mid : List SEv) (hmid : ∀ e ∈ mid, e ≠ .timeout) :
+    let st' := stepW c sz now st
+      (.finish a (.err (heldErrW false ((pre ++ SEv.commit :: mid).foldl streakNew 0) .lookupTimeout)))
+    ansOf st'.store j.key = some .failed ∧ (j, Answer.failed) ∈ st'.settled ∧
+      st'.log = st.log ++ [[Mut.consume j.key .failed]] :=
+  lookupTimeout_settlesW hst hnd hall a j t hrun false _
+    (Or.inr (by rw [streakNew_after_commit pre mid hmid]; decide))
+
+/-- **#346: the streak before the fix counts a timeout that follows a
+commit.** Two lookup timeouts, then another lane's write commits; before
+that write's settle block resets the streak, a third first-attempt timeout
+takes the lanes lock. The old streak reads 2 and holds it as the third of a
+run; nothing was timed out since the commit (`runSince` is 0), so the rule
+says it is a first timeout, and the fixed streak settles it `failed`. Rust
+test `a_lookup_timeout_between_a_commit_and_its_settle_settles_failed`. -/
+theorem streak_old_counts_across_commit :
+    let pre := [SEv.timeout, .timeout, .commit]
+    holdsS (heldErrW false (pre.foldl streakOld 0) .lookupTimeout) = true ∧
+      runSince pre = 0 ∧
+      holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = false := by
+  decide
+
+/-- **#346's first fix still counted a timeout that follows a commit.** It
+reset the streak in the worker's `Ok` arm, which runs after `WriteCtx::run`
+returns: after the index mirroring, which waits for the graph read and index
+write locks. Two lookup timeouts, then another lane's write commits; before
+its `Ok` arm runs, a third first-attempt timeout takes the lanes lock. The
+`Ok`-arm streak reads 2 and holds it; `runSince` is 0, and the fixed streak,
+reset inside the commit, settles it `failed`. Rust test
+`a_lookup_timeout_between_a_commit_and_its_ok_arm_settles_failed`. -/
+theorem streak_okArm_counts_across_commit :
+    let pre := [SEv.timeout, .timeout, .commit]
+    holdsS (heldErrW false (pre.foldl streakOkArm 0) .lookupTimeout) = true ∧
+      runSince pre = 0 ∧
+      holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = false := by
+  decide
+
+/-- **Keeping the settle's reset as well is wrong the other way.** A write
+commits, two timeouts follow, then its settle runs: with both resets the
+streak reads 0 and the third timeout settles `failed`, though it is the third
+with nothing applied between (`runSince` is 2) and the rule holds it, as the
+fixed streak does. -/
+theorem streak_both_forgets_run :
+    let pre := [SEv.commit, .timeout, .timeout, .settleOk]
+    holdsS (heldErrW false (pre.foldl streakBoth 0) .lookupTimeout) = false ∧
+      runSince pre = 2 ∧
+      holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = true := by
+  decide
 
 end Lambo.Drain
