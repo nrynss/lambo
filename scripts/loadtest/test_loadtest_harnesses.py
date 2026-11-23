@@ -155,8 +155,8 @@ class Reasons(unittest.TestCase):
         # #117: the close's final flush did not complete, so the write may not
         # have been saved. Settled (no polling to the budget), not applied.
         body = {"receipt": {"state": "close_unflushed",
-                            "detail": "close did not finish its final flush — this write "
-                                      "was not applied before the session closed"}}
+                            "detail": "close could not confirm this write was saved — its receipt "
+                                      "did not settle before the session closed"}}
         self.assertEqual(mc.receipt_outcome(body, False),
                          {"state": "close_unflushed", "reason": "close_unflushed"})
         out = [{"state": "applied", "reason": None}] * 3 + \

@@ -183,6 +183,10 @@ impl GraphStore for Recording {
         self.note("session_readable");
         self.inner.session_readable(session).await
     }
+    async fn store_health(&self) -> Result<Vec<crate::store::SessionHealth>, StoreError> {
+        self.note("store_health");
+        self.inner.store_health().await
+    }
     async fn refresh_lease(
         &self,
         session: &SessionId,

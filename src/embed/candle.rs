@@ -16,8 +16,8 @@
 //!
 //! **Weights (hf-hub).** The default artifact is the operator-published f16
 //! safetensors repo `nrynss/bge-m3-f16-safetensors` (a bitwise-verified cast of
-//! the canonical `BAAI/bge-m3` revision, 391/391 tensors f16-equal — see
-//! `dev-diary/lambo-for-mooshik/K-candle-embedder.md`). Weights are fetched on
+//! the canonical `BAAI/bge-m3` revision, 391/391 tensors f16-equal, measured
+//! for the K2 candle embedder). Weights are fetched on
 //! first use via hf-hub and cached under the hub cache; `offline = true` (or an
 //! explicit `weights_dir`) NEVER touches the network — resolution is
 //! cache-only ([`cache_get`]) and fails loudly naming the missing artifact
@@ -1305,10 +1305,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// Fetch `filename` via hf-hub (cache hit, or network download on first use).
+/// Fetch `filename` via hf-hub into the `HF_HOME` cache [`cache_get`] reads.
 fn hub_get(repo: &str, revision: &str, filename: &str) -> Result<PathBuf, EmbedError> {
-    use hf_hub::api::sync::Api;
-    let api = Api::new().map_err(|e| EmbedError::Unavailable(format!("hf-hub init: {e}")))?;
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build();
+    let api = api.map_err(|e| EmbedError::Unavailable(format!("hf-hub init: {e}")))?;
     let repo_api = api.repo(hf_hub::Repo::with_revision(
         repo.to_string(),
         hf_hub::RepoType::Model,
@@ -1639,6 +1639,24 @@ fn still_awaited(items: impl Iterator<Item = Pending>) -> Vec<Pending> {
 /// a failure of the device or model, not of any caller's text.
 const CANARY_TEXT: &str = "lambo";
 
+/// Test-only aliases of the coalescer's private constants and its chunking,
+/// for `crate::formal_constants_tests` (#291):
+/// `formal/LamboProofs/BatchQueue/Pure.lean` hard-codes the constants in `Cfg.rust`
+/// and `canary`, and the `2 *` ratio in `lcAux`.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    /// `length_chunks`, the chunking `lcAux` models.
+    pub(crate) fn length_chunks(lens: &[usize]) -> Vec<Vec<usize>> {
+        super::length_chunks(lens)
+    }
+
+    pub(crate) const MAX_BATCH: usize = super::MAX_BATCH;
+    pub(crate) const FORWARD_WIDTH: usize = super::FORWARD_WIDTH;
+    pub(crate) const CHUNK_SLACK_BYTES: usize = super::CHUNK_SLACK_BYTES;
+    pub(crate) const MAX_SINGLE_STREAK: usize = super::MAX_SINGLE_STREAK;
+    pub(crate) const CANARY_TEXT: &str = super::CANARY_TEXT;
+}
+
 /// Debounce is a constant today; kept as a fn so the loop reads against the
 /// shared state it actually uses.
 fn shared_debounce() -> Duration {
@@ -1890,6 +1908,9 @@ pub(crate) mod test_artifact {
         CandleEmbedder::deferred_in(BGE_M3_DIM, opts(dir), Some(cache_dir.to_path_buf()))
     }
 }
+
+#[cfg(test)]
+mod proptests;
 
 #[cfg(test)]
 mod tests {
@@ -2666,7 +2687,7 @@ mod tests {
     /// and applies K1's own 0.99 median gate.
     ///
     /// Ignored by default: needs real weights AND a llama-server on :8080
-    /// started with the DOGFOOD-SETUP capacity flags. Run with:
+    /// started with the batch flags in `docs/operations/dogfood-rig.md`. Run with:
     /// `cargo test --features embed-candle-metal,embed-bge -- --ignored metal_parity`
     #[ignore]
     #[tokio::test]

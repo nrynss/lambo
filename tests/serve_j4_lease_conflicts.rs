@@ -1,5 +1,5 @@
-//! J4: lease conflicts leave an artifact (dev-diary/lambo-for-mooshik/
-//! J-multi-client.md §J4).
+//! J4: lease conflicts leave an artifact, on both the refused
+//! side and the holding side.
 //!
 //! Before J4, a serve that LOSES the lease exits before it can open a ledger,
 //! so the most common multi-agent failure — one serve refused by another's

@@ -8,7 +8,9 @@
 //! * Stage 1 reads the concept's `gc_survived` and
 //!   [`dependent_interactions`](crate::canon::dependent_interactions), the
 //!   single-node form of the batched count the cycle uses, with the cycle's
-//!   age floor; Solo reads its [`SoloBreakdown`].
+//!   age floor; Solo reads its [`SoloBreakdown`], whose dependents term
+//!   is [`solo_dependent_interactions`](crate::canon::solo_dependent_interactions)
+//!   (each dependence credited to the turn that wrote it, #300).
 //! * Stage 2 is [`GraphStore::interaction_span_with_window`] with the cycle's
 //!   age floor and coverage cap, compared by [`stage2_evidence_passes`]'s bars.
 //! * Stage 3 is Stage 2 again plus [`GraphStore::blast_radius`] with the
@@ -30,10 +32,13 @@ use serde::Serialize;
 use crate::canon::policy::{
     solo_breakdown, SoloBreakdown, CANDIDATE_BAR, CANONICAL_BAR, VENERABLE_BAR,
 };
-use crate::canon::stage1::{dependent_interactions, MIN_DEPENDENT_INTERACTIONS, MIN_GC_SURVIVED};
+use crate::canon::stage1::{
+    dependent_interactions, solo_dependent_interactions, solo_dependent_interactions_with,
+    MIN_DEPENDENT_INTERACTIONS, MIN_GC_SURVIVED,
+};
 use crate::canon::stage2::{MIN_COVERAGE, MIN_DISTINCT};
 use crate::canon::stage3::{in_repromotion_cooldown, MIN_BLAST_RADIUS};
-use crate::canon::{EvalParams, PromotionPolicy};
+use crate::canon::{EvalParams, PromotionPolicy, Writers};
 use crate::graph::Graph;
 use crate::store::GraphStore;
 use crate::types::InteractionSpan;
@@ -176,12 +181,12 @@ pub struct AdmissionInputs {
     concept: Concept,
     dependent_interactions: usize,
     /// Solo's score terms; computed only when the inputs were read under
-    /// Solo (#36 PR 3 review L2).
+    /// Solo (#36 PR 3).
     solo: Option<SoloBreakdown>,
     /// `(canonical count, budget)` when the next hop is Canonical: Stage 3
     /// evaluates nothing while the budget is full.
     budget: Option<(usize, usize)>,
-    /// #20 review M2: the evaluator's hold probes for a Venerable concept
+    /// #20: the evaluator's hold probes for a Venerable concept
     /// when supersession is on (empty otherwise).
     hold: crate::canon::supersession::Probes,
 }
@@ -194,12 +199,36 @@ pub fn admission_inputs(
     params: &EvalParams,
     now: DateTime<Utc>,
 ) -> Option<AdmissionInputs> {
+    admission_inputs_with(graph, node, params, now, &Writers::unresolved())
+}
+
+/// [`admission_inputs`] with writers already resolved for `graph`, for a
+/// caller explaining many nodes of one graph (the dry run's survey), so the
+/// writer timeline is resolved once rather than once per node (#300).
+/// Unresolved writers are resolved per node, as [`admission_inputs`] does.
+pub(crate) fn admission_inputs_with(
+    graph: &Graph,
+    node: NodeId,
+    params: &EvalParams,
+    now: DateTime<Utc>,
+    writers: &Writers,
+) -> Option<AdmissionInputs> {
     let Some(Node::Concept(c)) = graph.node(node) else {
         return None;
     };
     let deps = dependent_interactions(graph, node, params.min_age, now);
     let solo = match params.promotion_policy {
-        PromotionPolicy::Solo => Some(solo_breakdown(graph, c, deps)),
+        // Solo's dependents term credits each dependence to the turn that
+        // wrote it (#300), so it can differ from Stage 1's count.
+        PromotionPolicy::Solo => {
+            let solo_deps = match writers.for_graph(graph) {
+                Some(timeline) => {
+                    solo_dependent_interactions_with(graph, node, params.min_age, now, timeline)
+                }
+                None => solo_dependent_interactions(graph, node, params.min_age, now),
+            };
+            Some(solo_breakdown(graph, c, solo_deps))
+        }
         PromotionPolicy::Swarm => None,
     };
     let budget = (c.canonization_status == CanonizationStatus::Venerable).then(|| {
@@ -214,7 +243,7 @@ pub fn admission_inputs(
         dependent_interactions: deps,
         solo,
         budget,
-        hold: crate::canon::supersession::gather_hold_for(graph, node, params, now),
+        hold: crate::canon::supersession::gather_hold_for(graph, node, params, now, writers),
     })
 }
 
@@ -231,7 +260,7 @@ impl AdmissionInputs {
 }
 
 /// The store measurements Stages 2 and 3 compare, taken once so callers that
-/// need them twice (the portal's `gate_progress` and `admission`, review L2)
+/// need them twice (the portal's `gate_progress` and `admission`)
 /// share one round trip each.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Measurements {
@@ -240,7 +269,7 @@ pub struct Measurements {
     pub span: Option<Result<InteractionSpan, String>>,
     /// Stage 3's aged dependent count. `None` when not measured.
     pub blast: Option<u64>,
-    /// #20 review M2: the contradicting concept that holds this Venerable at
+    /// #20: the contradicting concept that holds this Venerable at
     /// Venerable (supersession on, its newer evidence would supersede it at
     /// once, under the pair rule); `None` when nothing holds it or it was not
     /// measured ([`Self::take_hold`]).
@@ -294,7 +323,7 @@ impl Measurements {
         })
     }
 
-    /// Run the evaluator's hold probe for `inputs` (#20 review M2): the same
+    /// Run the evaluator's hold probe for `inputs` (#20): the same
     /// probes, the same store reads and the same pair rule as a cycle.
     /// Nothing to do unless supersession is on and the concept is Venerable;
     /// a store without `dependent_evidence` holds nothing, as in a cycle.
@@ -447,9 +476,9 @@ pub fn explain_measured(
                     0.0,
                     Comparison::AtMost,
                 ));
-                // Review L9: with the budget full the cycle evaluates no
+                // With the budget full the cycle evaluates no
                 // Stage 3 window at all, so the hop cannot happen.
-                // #20 review M2: the evaluator's hold, as a failing check.
+                // #20: the evaluator's hold, as a failing check.
                 if m.held_by.is_some() {
                     checks.push(AdmissionCheck::new("held", 3, 1.0, 0.0, Comparison::AtMost));
                 }
@@ -574,7 +603,7 @@ pub(crate) fn render_last_demotion(graph: &Graph, node: NodeId) -> Option<String
         crate::types::DemotionReason::Superseded { by } => {
             let id = crate::recall::format::short_id(by);
             match graph.node(by) {
-                // Review L6: the same 80-character excerpt recall quotes.
+                // The same 80-character excerpt recall quotes.
                 Some(crate::types::Node::Concept(c)) => format!(
                     "superseded by \"{}\" (id {id})",
                     crate::recall::format::excerpt(&c.content)

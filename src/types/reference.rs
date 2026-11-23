@@ -139,7 +139,7 @@ pub enum ReferenceRefusalKind {
     /// caller's mistake; the MCP and CLI surfaces build them per concept).
     UnknownConcept,
     /// An `against` reference names a concept the same call also cites in
-    /// `depends_on` for the same citing concept (#19(b) review M2): one
+    /// `depends_on` for the same citing concept (#19(b)): one
     /// write cannot both rest on a concept and contradict it. Separate
     /// writes may still record both edges.
     DependsOnAndAgainst,
@@ -212,7 +212,7 @@ impl fmt::Display for ReferenceRefusal {
         };
         let r = &self.reference;
         // What the caller does with a reference of this field, for the fix
-        // each refusal suggests (#19(b) review L6).
+        // each refusal suggests (#19(b)).
         let verb = if self.field.is_against()
             || matches!(
                 self.field,
@@ -360,7 +360,7 @@ pub struct PinnedReference {
 }
 
 /// A derive's citations and contradictions as accepted at the ack
-/// (`crate::graph::cite::validate`).
+/// (`crate::graph::cite::validate_scoped`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedCitations {
@@ -457,7 +457,7 @@ mod tests {
             assert!(msg.ends_with("; nothing was written"), "{msg}");
             assert!(msg.contains("\"lease stays\""), "{msg}");
         }
-        // #19(b) review L6: no `against` refusal tells the caller to cite.
+        // #19(b): no `against` refusal tells the caller to cite.
         for kind in [
             ReferenceRefusalKind::Missing,
             ReferenceRefusalKind::Ambiguous {

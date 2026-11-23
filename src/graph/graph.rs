@@ -13,10 +13,14 @@
 //! * no duplicate `(source, target, edge_type)` — the natural-key index is the
 //!   authority; a duplicate write reinforces instead of inserting;
 //! * weights ≥ 0 and finite — NaN/±Inf clamp to 0.0, negatives are rejected;
-//! * no cycles in `Causal`/`Dependency`/`Hierarchical` — write-time rejection of
-//!   `Causal`/`Dependency` cycles is `record_action`'s BFS (T2.4);
-//!   [`Graph::assert_invariants`] detects cycles in all three as a safety net
-//!   (`Hierarchical` is a DAG constraint by definition, see adve-review T2.1 M1);
+//! * no cycles in `Causal ∪ Dependency`, and, separately, none in
+//!   `Hierarchical` — write-time rejection is `closing_edge`'s BFS over
+//!   `Causal`/`Dependency` (`record_action`, `depends_on` citations) and
+//!   `reject_closing_edge` over `Hierarchical` (`parent_of`);
+//!   [`Graph::assert_invariants`] checks the same two conditions as a safety
+//!   net. A cycle that mixes the kinds (a child citing its own parent) is
+//!   allowed: neither write gate refuses it and nothing needs it refused
+//!   (#325);
 //!
 //! Load path: [`Graph::from_snapshot`] seeds state without touching the mutation
 //! log (a loaded session's history is already durable) and runs
@@ -145,6 +149,17 @@ pub struct Graph {
     /// Whether the holder has logged its first whole-graph fallback for an
     /// overflowing unflushed set (#60 review L-2). RAM-only.
     unflushed_overflow_logged: unflushed::LoggedOnce,
+    /// The receipt ids of the write intents whose `PutWriteIntent` was in a
+    /// batch the flush dead-lettered and whose write has not settled (#345;
+    /// see `unflushed.rs`). A close answers such a receipt `close_unflushed`,
+    /// never `intent_durable`. The lane worker's settle removes its receipt
+    /// ([`Graph::settled_write`]). RAM-only, like the log.
+    dead_lettered_intents: HashSet<String>,
+    /// The receipt ids of the writes a lane worker has consumed and not yet
+    /// settled (#345 re-review; see `unflushed.rs`): one per worker between
+    /// its commit and its settle, and one per worker that panicked in
+    /// between. RAM-only.
+    consumed_unsettled: HashSet<String>,
     /// The most recent plan-relevant concept writes with their epochs (#116; see
     /// `txn.rs`). RAM-only.
     node_writes: txn::NodeWrites,
@@ -180,6 +195,8 @@ impl Graph {
             unflushed: HashMap::new(),
             unflushed_contract: None,
             unflushed_overflow_logged: unflushed::LoggedOnce::default(),
+            dead_lettered_intents: HashSet::new(),
+            consumed_unsettled: HashSet::new(),
             node_writes: txn::NodeWrites::default(),
             undo: None,
         }
@@ -437,9 +454,10 @@ impl Graph {
     /// re-weight. Callers that want a different weight must delete the edge first
     /// (adve-review T2.1 S1).
     ///
-    /// `Causal`/`Dependency` cycle rejection is `record_action`'s BFS (T2.4) —
-    /// this primitive stores what it is given; `assert_invariants` detects cycles
-    /// in `Causal`/`Dependency`/`Hierarchical` as a safety net.
+    /// Cycle rejection is the write paths' (`closing_edge` for
+    /// `Causal`/`Dependency`, `reject_closing_edge` for `Hierarchical`) — this
+    /// primitive stores what it is given; `assert_invariants` detects a cycle
+    /// in `Causal ∪ Dependency` or in `Hierarchical` as a safety net.
     pub fn upsert_edge(&mut self, edge: Edge) -> Result<(), LamboError> {
         let final_edge = self.record_edge(edge)?;
         self.append_mutation(Mutation::UpsertEdge { edge: final_edge });
@@ -847,24 +865,34 @@ impl Graph {
         }
     }
 
-    /// DFS over `Causal`/`Dependency`/`Hierarchical` out-edges; returns a node on a
-    /// back edge. `Hierarchical` is included because it is a DAG constraint by
-    /// definition (A parent of B parent of A is nonsense) — spec §5.7 names only
-    /// `Causal`/`Dependency`, so write-time rejection stays per spec (T2.4); the
-    /// safety net here is broader than the write-time contract.
+    /// DFS over the out-edges of the `kinds` edge types; returns a node on a
+    /// back edge. `assert_invariants` runs it twice, over
+    /// [`CAUSAL_DEPENDENCY`] and over [`HIERARCHICAL`]: the two acyclicity
+    /// conditions the write gates enforce (`closing_edge` and
+    /// `reject_closing_edge`). Spec §5.7: "No cycles in `Causal` or
+    /// `Dependency`"; `Hierarchical` is separately a DAG. Before #325 it
+    /// walked the union of the three, which is stricter than the write gates:
+    /// a child citing its own parent (`P -Hierarchical-> C`,
+    /// `C -Dependency-> P`) passed both gates and then failed every load.
+    /// Modelled in `formal/LamboProofs/Cite.lean` (`LoadOk`,
+    /// `written_loadOk`).
     ///
-    /// Iterative (adve-review GRAPH-3): an explicit stack replaces recursion, so
-    /// a deep chain (~10k+ nodes, plausible for a long record_action-heavy
-    /// session) cannot overflow the ~2 MiB worker-thread stack that
-    /// `load_session` materializes on. The recursive version SIGABRT'd on load
-    /// and left the session permanently unloadable. Same three-color semantics
-    /// (1 = on the current DFS path, 2 = fully explored); the dead `path` vec is
-    /// gone with the recursion.
-    fn dfs_cycle(&self, start: NodeId, color: &mut HashMap<NodeId, u8>) -> Option<NodeId> {
+    /// Iterative: an explicit stack replaces recursion, so a deep chain
+    /// (~10k+ nodes, plausible for a long record_action-heavy session) cannot
+    /// overflow the ~2 MiB worker-thread stack that `load_session`
+    /// materializes on. The recursive version SIGABRT'd on load and left the
+    /// session permanently unloadable. Three-color semantics (1 = on the
+    /// current DFS path, 2 = fully explored).
+    fn dfs_cycle(
+        &self,
+        start: NodeId,
+        color: &mut HashMap<NodeId, u8>,
+        kinds: &[EdgeType],
+    ) -> Option<NodeId> {
         // Stack frames: (node, unexplored out-neighbors, next index to visit).
         let mut stack: Vec<(NodeId, Vec<NodeId>, usize)> = Vec::new();
         color.insert(start, 1); // gray
-        stack.push((start, self.cycle_neighbors(start), 0));
+        stack.push((start, self.cycle_neighbors(start, kinds), 0));
         while let Some(top) = stack.last() {
             let node = top.0;
             let next = top.2;
@@ -880,26 +908,27 @@ impl Graph {
                 2 => continue,
                 _ => {
                     color.insert(tgt, 1);
-                    stack.push((tgt, self.cycle_neighbors(tgt), 0));
+                    stack.push((tgt, self.cycle_neighbors(tgt, kinds), 0));
                 }
             }
         }
         None
     }
 
-    /// `Causal` + `Dependency` + `Hierarchical` out-neighbors of `node`, in that
-    /// type-priority order — the same iteration the recursive DFS used.
-    fn cycle_neighbors(&self, node: NodeId) -> Vec<NodeId> {
-        let causal = self.out_neighbors_typed(node, EdgeType::Causal);
-        let dependency = self.out_neighbors_typed(node, EdgeType::Dependency);
-        let hierarchical = self.out_neighbors_typed(node, EdgeType::Hierarchical);
-        causal
-            .into_iter()
-            .chain(dependency)
-            .chain(hierarchical)
+    /// `node`'s out-neighbors over the `kinds` edge types, in that order.
+    fn cycle_neighbors(&self, node: NodeId, kinds: &[EdgeType]) -> Vec<NodeId> {
+        kinds
+            .iter()
+            .flat_map(|ty| self.out_neighbors_typed(node, *ty))
             .collect()
     }
 }
+
+/// The edge types of the first acyclicity condition: `closing_edge`'s walk.
+const CAUSAL_DEPENDENCY: &[EdgeType] = &[EdgeType::Causal, EdgeType::Dependency];
+
+/// The edge type of the second: `reject_closing_edge`'s walk.
+const HIERARCHICAL: &[EdgeType] = &[EdgeType::Hierarchical];
 
 /// Weights must be ≥ 0 and finite (spec §5.7): NaN/±Inf clamp to 0.0, negatives
 /// are rejected as invariant violations.

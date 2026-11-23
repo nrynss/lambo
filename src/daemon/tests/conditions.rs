@@ -94,7 +94,7 @@ async fn loop_emits_planted_drift_from_session_drift_fixture() {
     // Warm-up: single-agent fixture → no conflict; drift is the only event
     // kind (drift detection is clock-free, the chain is 6 hops). The planted
     // node sorts first by id; the fixture's isolated pair follows with the
-    // no-path warning spec §9 requires (ALGO-5) — they are GC's step-3 food,
+    // no-path warning spec §9 requires — they are GC's step-3 food,
     // and warning once before GC's interval collects them is correct.
     let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
@@ -213,7 +213,7 @@ async fn dropped_receiver_does_not_break_the_loop() {
 
 #[tokio::test(start_paused = true)]
 async fn stale_fires_for_idle_session_after_window_elapses() {
-    // T4.6 finding-1 regression: detection must run on EVERY tick, not
+    // Regression: detection must run on EVERY tick, not
     // only on epoch change. A session with NO mutations ages a concept
     // past the stale window; pure time passing must fire
     // `DaemonEvent::Stale` (spec §9 background-daemon semantics, §6.1
@@ -297,14 +297,14 @@ async fn stale_fires_for_idle_session_after_window_elapses() {
 
 #[tokio::test(start_paused = true)]
 async fn loop_emits_high_risk_for_fresh_write_to_canonical_node() {
-    // Final-review finding 1a: the entered-gated HighRisk emit path (the
+    // The entered-gated HighRisk emit path (the
     // `high_risk_hits` loop in `run_loop`) + `events::high_risk_event`
     // mapper had no loop-level test. A Canonical node with a fresh
     // in-window write is a high-risk modification (spec §9 "high-risk
     // modification" hot-list condition; events.rs v0.1 rule): exactly one
     // `DaemonEvent::HighRisk` on transition, a HighRiskModification
     // hot-list entry with a renderable reason, and NO re-emit while the
-    // condition persists (emit-on-transition, finding 3).
+    // condition persists (emit-on-transition).
     use crate::daemon::hotlist::{Condition, HotListPayload};
 
     let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -393,7 +393,7 @@ async fn loop_emits_high_risk_for_fresh_write_to_canonical_node() {
 /// Parse the seconds out of a `stale_event` detail
 /// ("... untouched for <N>s").
 ///
-/// Gated with its only caller (NEW-1): CI's feature matrix runs
+/// Gated with its only caller: CI's feature matrix runs
 /// `--no-default-features --features store-sqlite|store-cockroach` under
 /// `RUSTFLAGS="-D warnings"`, where an ungated helper whose sole use sits
 /// behind `fixtures` is a hard dead-code error, not a warning.
@@ -411,12 +411,12 @@ fn stale_seconds(detail: &str) -> u64 {
 #[cfg(feature = "fixtures")]
 #[tokio::test(start_paused = true)]
 async fn loop_emits_one_session_stale_from_rest_api_fixture_after_writes_age_out() {
-    // Final-review finding 1a: staleness had only a synthetic-clock loop
+    // Staleness had only a synthetic-clock loop
     // test. This one is fixture-driven: rebase session-rest-api so its
     // newest write lands 2h before `anchor` — past the 1h STALE_WINDOW
     // and far outside the 30s conflict/high-risk windows. The session as a
     // whole is stale, so the warm-up cycle must emit exactly ONE Stale
-    // (CONC-2: per session, not per concept — this asserted 22 before) and
+    // (per session, not per concept — this asserted 22 before) and
     // nothing else: no Conflict (all writes are 2h old, outside
     // conflict_recency_window), no Drift (the session has no root goal —
     // drift.rs: no goal nodes → no hits), no HighRisk (no fresh in-window
@@ -485,14 +485,14 @@ async fn loop_emits_one_session_stale_from_rest_api_fixture_after_writes_age_out
 }
 
 // ------------------------------------------------------------------
-// XP-4 / CONC-2 / CONC-3 — the event seam
+// The event seam
 // ------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
 async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
-    // XP-4: P6's documented seam (`events::emit_canonized`) needs the
+    // The canonizer's documented seam (`events::emit_canonized`) needs the
     // broadcast Sender. Before `Daemon::event_sender()` no public path to it
-    // existed anywhere in the crate, so P6 could not reach the channel
+    // existed anywhere in the crate, so the canonizer could not reach the channel
     // without owning the daemon's private field. This test is the seam: a
     // caller that is *not* the daemon loop emits, and a `Daemon::events()`
     // subscriber receives.
@@ -506,7 +506,7 @@ async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
     );
     let mut rx = daemon.events();
 
-    // The "P6 evaluator": holds only the sender, never the daemon.
+    // The "canonization evaluator": holds only the sender, never the daemon.
     let sender = daemon.event_sender();
     let event = CanonizationEvent {
         id: NodeId(Uuid::from_u64_pair(9, 1)),
@@ -530,8 +530,8 @@ async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
         DaemonEvent::Canonized { event: e } => assert_eq!(e, event),
         other => panic!("expected Canonized, got {other:?}"),
     }
-    // NEW-3: the seam is an `events::EventSender`, not a raw broadcast
-    // Sender — P6's send advanced the channel's SHARED publication counter,
+    // The seam is an `events::EventSender`, not a raw broadcast
+    // Sender — the evaluator's send advanced the channel's SHARED publication counter,
     // which is what the loop's re-arm measures ring eviction against. A
     // clone taken later reads the same count.
     assert_eq!(sender.emitted_total(), 1);
@@ -543,10 +543,10 @@ async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
 
 #[tokio::test(start_paused = true)]
 async fn external_publisher_flood_cannot_permanently_evict_a_held_conflict() {
-    // NEW-3: `event_sender()` used to hand out a raw `broadcast::Sender`
+    // `event_sender()` used to hand out a raw `broadcast::Sender`
     // clone. Its sends advanced the ring but not the loop's emission count,
-    // so re-arm (CONC-2) could not see that the held Conflict's event had
-    // been pushed out — leaving CONC-2 only partially closed. Probe on the
+    // so re-arm could not see that the held Conflict's event had
+    // been pushed out — leaving that event loss only partially fixed. Probe on the
     // pre-fix code: 300 external `Canonized` sends + a continuously-held
     // Conflict + 601 daemon cycles delivered **0** Conflict events.
     //
@@ -574,7 +574,7 @@ async fn external_publisher_flood_cannot_permanently_evict_a_held_conflict() {
     // `rx` — draining would defeat the point.
     wait_until(|| daemon.hot_list().read().contains(c1_id)).await;
 
-    // The "P6 evaluator" floods the channel it shares with the daemon.
+    // The "canonization evaluator" floods the channel it shares with the daemon.
     let sender = daemon.event_sender();
     for n in 0..10u64 {
         events::emit_canonized(
@@ -625,11 +625,11 @@ async fn external_publisher_flood_cannot_permanently_evict_a_held_conflict() {
 
 #[tokio::test(start_paused = true)]
 async fn late_subscriber_misses_the_warm_up_condition_set() {
-    // CONC-3: pins the documented P8 ordering obligation. The warm-up cycle
+    // Pins the documented caller ordering obligation. The warm-up cycle
     // publishes the whole restored condition set — including the demo's
     // planted Conflict — and `broadcast` delivers only what is sent after a
     // receiver exists. Emission is on transition, so nothing re-publishes
-    // for a late subscriber's benefit. P8 must subscribe BEFORE spawn; see
+    // for a late subscriber's benefit. The caller must subscribe BEFORE spawn; see
     // `Daemon::events`.
     let (graph, c1_id, _, _) = conflicted_graph();
     let daemon = Daemon::new(
@@ -656,7 +656,7 @@ async fn late_subscriber_misses_the_warm_up_condition_set() {
 
 #[tokio::test(start_paused = true)]
 async fn held_condition_is_re_emitted_once_the_ring_wraps_past_it() {
-    // CONC-2: emit-on-transition alone loses an event permanently — the
+    // Emit-on-transition alone loses an event permanently — the
     // transition is recorded whether or not any consumer got it, so an
     // event evicted from the ring while its condition still holds is never
     // re-published. The demo's Conflict is exactly such an event.
@@ -729,7 +729,7 @@ async fn held_condition_is_re_emitted_once_the_ring_wraps_past_it() {
 
 #[tokio::test(start_paused = true)]
 async fn entering_conditions_publish_highest_severity_first() {
-    // CONC-2: a burst must put the most actionable event first for a
+    // A burst must put the most actionable event first for a
     // consumer draining in order — Conflict, HighRisk, Drift, Stale
     // (`Condition::severity`). Pre-fix the order was Conflict, Drift,
     // Stale, HighRisk: the hazard came last.
@@ -737,7 +737,7 @@ async fn entering_conditions_publish_highest_severity_first() {
     // The graph plants a Conflict and a HighRisk that enter together: a
     // Canonical, high-blast-radius node written by a second agent. The two
     // interactions carry distinct timestamps so the edge attributes cleanly
-    // to agent-b (ALGO-3) and only `contested` is contested.
+    // to agent-b and only `contested` is contested.
     let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
     let t1 = t0 + chrono::Duration::seconds(5);
     let now = t0 + chrono::Duration::seconds(10);
@@ -941,7 +941,7 @@ async fn the_contradiction_budget_keeps_the_newest_declared() {
     handle.abort();
 }
 
-/// #19(c) review L3: contradictions share conflict's tier and are inserted
+/// #19(c): contradictions share conflict's tier and are inserted
 /// before conflicts each cycle, so on a full hot list the persistent
 /// contradictions are evicted before the transient conflict.
 #[tokio::test(start_paused = true)]
@@ -988,4 +988,70 @@ async fn a_full_hot_list_keeps_the_conflict_over_contradictions() {
         .any(|e| e.condition() == Condition::Contradiction));
     drop(hot);
     handle.abort();
+}
+
+/// #298: a cycle cuts the hot list to what it detects before it enforces the
+/// bound, so an entry the cycle no longer detects never pushes a fresh hit off
+/// a full list. The issue's bound-2 scenario, with the session's stale hit as
+/// the fresh lower-tier hit (the issue's drift on n3): the list holds an old
+/// conflict on a node this cycle no longer detects, and the cycle detects the
+/// conflict on `c1` and the stale session. Mirrors the Lean theorems
+/// `Hotlist.cycleFixed_keeps_fresh_hit` and `Hotlist.cycleFixed_keys_eq_hits`
+/// (before the fix, `Hotlist.cycle_evicts_fresh_hit`).
+#[test]
+fn a_lapsed_entry_never_evicts_a_fresh_hit() {
+    use crate::daemon::hotlist::{HotListEntry, HotListPayload};
+
+    let (graph, c1_id, _, _) = conflicted_graph();
+    let g = graph.read();
+    // The last write landed 5s ago: stale under a 1s window, while the
+    // conflict on `c1` is still inside its 30s window.
+    let params = CycleParams {
+        hot_list_max: 2,
+        stale_window: Duration::from_secs(1),
+        ..Default::default()
+    };
+    let mut h = HotList::with_max(params.hot_list_max);
+    // The previous cycle's conflict on a node this cycle no longer detects.
+    let gone = NodeId(Uuid::from_u64_pair(9, 9));
+    let payload = HotListPayload::Conflict {
+        agents: vec![AgentId::from("agent-a"), AgentId::from("agent-b")],
+        writer: AgentId::from("agent-b"),
+        seconds_ago: 20,
+    };
+    let _ = h.insert(HotListEntry::new(
+        gone,
+        Condition::Conflict,
+        payload,
+        |_, _| None,
+    ));
+
+    let (conflicts, drift, stale, high_risk, fresh) =
+        detect_into_hot_list(&mut h, &g, &params, Utc::now());
+
+    assert_eq!(
+        conflicts.iter().map(|c| c.node).collect::<Vec<_>>(),
+        vec![c1_id]
+    );
+    assert!(drift.is_empty() && high_risk.is_empty());
+    assert_eq!(stale.len(), 1, "the session is stale");
+    let anchor = stale[0].node;
+    // Events are driven by the detected set, which the fix leaves alone.
+    let expected: HashSet<(Condition, NodeId)> = [
+        (Condition::Conflict, c1_id),
+        (Condition::StaleSession, anchor),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(fresh, expected);
+    // The list is the cycle's fresh hits, both of which fit the bound.
+    let held: Vec<(Condition, NodeId)> = h.iter().map(|e| (e.condition(), e.node())).collect();
+    assert_eq!(
+        held,
+        vec![
+            (Condition::Conflict, c1_id),
+            (Condition::StaleSession, anchor)
+        ],
+        "the lapsed conflict must not evict the fresh stale hit"
+    );
 }

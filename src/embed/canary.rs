@@ -278,7 +278,9 @@ impl Fingerprint {
 /// How the attach's check went.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanaryVerdict {
-    /// `canary = "off"`, or a re-embed attach.
+    /// `canary = "off"`, or an attach given no canary options (a full
+    /// `lambo re-embed` attaches so and checks the pin itself with
+    /// [`compare_pin`]; `--missing-only` runs the configured canary).
     Off,
     /// No fingerprint (or one of another canary version): this attach pinned it.
     Pinned,
@@ -289,7 +291,9 @@ pub enum CanaryVerdict {
     /// At least one phrase is below [`CANARY_MIN_COSINE`].
     Drifted { min_cosine: f64, worst: usize },
     /// The canaries could not be embedded (the embedder is down or slow).
-    /// Not a measured drift, so never a refusal; the next attach checks again.
+    /// Not a measured drift, so never a refusal of a writer attach; the next
+    /// attach checks again. A full `lambo re-embed`, which would replace the
+    /// pin, refuses on it unless `--repin-canary` is given (#296).
     Unverified(String),
 }
 
@@ -512,6 +516,37 @@ pub async fn pin(
         &fingerprint_of(contract, &vectors),
     )
     .await
+}
+
+/// What the store's pin for `contract` says about `embedder`, read without
+/// writing anything (#296). `None` when there is no usable pin: no row, or a
+/// row of another canary version or with malformed vectors, which [`check`]
+/// would pin again. Otherwise [`CanaryVerdict::Verified`],
+/// [`CanaryVerdict::Drifted`], or [`CanaryVerdict::Unverified`] when the
+/// canaries could not be embedded. A full `lambo re-embed` reads it before it
+/// writes, because the [`pin`] that follows its rewrite replaces this one.
+pub async fn compare_pin(
+    store: &dyn GraphStore,
+    embedder: &dyn Embedder,
+    contract: &EmbeddingContract,
+) -> Result<Option<CanaryVerdict>, LamboError> {
+    let raw = store
+        .read_store_meta(&fingerprint_key(contract))
+        .await
+        .map_err(LamboError::Store)?;
+    let Some(pinned) = raw
+        .and_then(|raw| serde_json::from_str::<Fingerprint>(&raw).ok())
+        .filter(|f| f.version == CANARY_VERSION)
+        .and_then(|f| f.decoded())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        match embed_all(embedder, &CANARY_PHRASES, contract.dim).await {
+            Ok(live) => verdict_against(&pinned, &live),
+            Err(e) => CanaryVerdict::Unverified(e),
+        },
+    ))
 }
 
 /// Read and parse the labelled pairs file.

@@ -84,9 +84,14 @@ async fn memory_on(store: Arc<dyn GraphStore>, session: &str) -> Memory {
 struct FlakyStore {
     inner: Arc<dyn GraphStore>,
     fail_remaining: AtomicUsize,
-    /// Every batch it was handed, whole: the T81-3 assertions need the
+    /// Flushes still to refuse with a constraint violation, before any
+    /// `fail_remaining` count: the flush loop dead-letters each (#345).
+    dead_letter_remaining: AtomicUsize,
+    /// Every batch it was handed, whole: the ordering assertions need the
     /// mutation **sequence**, not just the lengths.
     batches: PlMutex<Vec<MutationBatch>>,
+    /// `write_flush_stats` panics instead of returning (#301).
+    stats_panics: bool,
 }
 
 impl FlakyStore {
@@ -94,8 +99,29 @@ impl FlakyStore {
         Self {
             inner,
             fail_remaining: AtomicUsize::new(fail_next),
+            dead_letter_remaining: AtomicUsize::new(0),
             batches: PlMutex::new(Vec::new()),
+            stats_panics: false,
         }
+    }
+
+    /// Refuse the first `n` flushes with a constraint violation, which the
+    /// flush loop dead-letters: the whole batch is dropped and the session
+    /// goes on (#345).
+    fn with_dead_letters(self, n: usize) -> Self {
+        self.dead_letter_remaining.store(n, Ordering::SeqCst);
+        self
+    }
+
+    /// Fail the next `n` flushes with a backend error, from now on.
+    fn fail_next(&self, n: usize) {
+        self.fail_remaining.store(n, Ordering::SeqCst);
+    }
+
+    /// Make every `write_flush_stats` call panic (#301).
+    fn with_panicking_stats(mut self) -> Self {
+        self.stats_panics = true;
+        self
     }
 
     fn batches(&self) -> Vec<MutationBatch> {
@@ -117,6 +143,15 @@ impl GraphStore for FlakyStore {
     }
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         self.batches.lock().push(batch.clone());
+        let dead_letter = self
+            .dead_letter_remaining
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n > 0).then(|| n - 1)
+            })
+            .is_ok();
+        if dead_letter {
+            return Err(StoreError::Constraint("23505".into()));
+        }
         let should_fail = self
             .fail_remaining
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -202,20 +237,32 @@ impl GraphStore for FlakyStore {
     ) -> Result<(), StoreError> {
         self.inner.record_canonization(event, token).await
     }
+
+    async fn write_flush_stats(
+        &self,
+        _session: &SessionId,
+        _stats: &crate::store::SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        if self.stats_panics {
+            panic!("simulated write_flush_stats panic (FlakyStore)");
+        }
+        Ok(())
+    }
 }
 
-/// How a store charges for a flush (L82-1).
+/// How a store charges for a flush.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CostModel {
-    /// What both SQL adapters did before L82-1: one statement, and so one
-    /// network round-trip, per mutation in the batch.
+    /// What both SQL adapters did before they planned batches into
+    /// statements: one statement, and so one network round-trip, per mutation
+    /// in the batch.
     PerMutation,
     /// What they do now: one statement per planned [`FlushStep`].
     PerPlannedStatement,
 }
 
 /// A store that charges network latency for a flush, so a test can ask
-/// whether a tail drains inside `close()`'s window (L82-1).
+/// whether a tail drains inside `close()`'s window.
 ///
 /// The `+ 2` on every count is `BEGIN` and `COMMIT`, which both adapters pay
 /// once per flush regardless of the batch.
@@ -357,8 +404,8 @@ impl GraphStore for RoundTripStore {
     }
 }
 
-/// Four `record_action` calls at the 64-target fan-out cap — the live L82-1
-/// repro's burst — left un-flushed in the log.
+/// Four `record_action` calls at the 64-target fan-out cap — the live repro's
+/// burst — left un-flushed in the log.
 async fn at_cap_burst(mem: &Memory) {
     for call in 0..4 {
         let produces: Vec<String> = (0..32).map(|n| format!("artifact {call}-{n}")).collect();
@@ -381,7 +428,7 @@ async fn at_cap_burst(mem: &Memory) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ParkPoint {
     /// `retract`'s durable-radius query — the await inside a **write**,
-    /// which is where the T81-1 race lives.
+    /// which is where the writers-gate race lives.
     BlastRadius,
     /// `recall`'s vector leg — the await inside a **read**, to show that
     /// `close()` does not wait for readers.

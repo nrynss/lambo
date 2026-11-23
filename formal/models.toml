@@ -1,0 +1,788 @@
+# Which Rust each Lean model in formal/LamboProofs/ describes, and a
+# fingerprint of that Rust as it was when the model was last read against it.
+# scripts/formal/check-model-drift.py reads this file: a model whose Rust no
+# longer matches its `read_digest` is flagged on every run until the model is
+# re-read and bumped (#291). See formal/README.md, "Keeping the models in step
+# with the Rust".
+#
+# One [[model]] per .lean file under formal/LamboProofs/ (subdirectories
+# included) other than the top-level Audit.lean, Drain/History.lean and
+# Drain/Examples.lean (the drain model's history layer and concrete cases,
+# which read no Rust of their own) and the shared lemma libraries under Lib/:
+#
+#   lean          the model file, from the repository root.
+#   read_against  optional: the commit the model was last read against.
+#                 Information for people, and a hint for the report (when it
+#                 is a commit in the clone and the refs there fingerprint to
+#                 read_digest, a drift report names only the refs that
+#                 changed since it, with a `git diff`); only its format is
+#                 checked. --bump does not change it: update it by hand.
+#   read_digest   `v<N>:sha256:` (N the digest scheme) over the entry's refs,
+#                 sorted, and each ref's code with comments and #[cfg(test)]
+#                 code blanked and whitespace collapsed outside string and
+#                 char literals. Never edit it by hand: after re-reading the
+#                 model against the Rust (and updating the model if the
+#                 change matters to it), run
+#                   python3 -I scripts/formal/check-model-drift.py --bump Canon
+#                 which rewrites this one line. That is the only way to clear
+#                 a drift warning: editing the Lean file alone does not. The
+#                 ref list is part of the digest, so adding, dropping or
+#                 narrowing a ref is drift until bumped too.
+#   rust          the Rust it models. A bare path is the whole file;
+#                 `path#name` is every item called `name` in it (fn, struct,
+#                 enum, trait, type, const, static, mod, union, macro_rules!,
+#                 and the impl blocks of a type of that name, `impl dyn name`
+#                 included); `path#Type::name` is `fn name` inside `impl Type`
+#                 or `trait Type`. Whole files are listed where the
+#                 model is of that module; items where it reads one part of a
+#                 large shared file (src/types/mod.rs, src/main.rs, ...). An
+#                 item ref does not cover the `use` imports or the helpers it
+#                 calls: list those too when the model depends on them.
+#
+# Paths a header names only as context (a test, the issue #273 proposed split,
+# a line the model does not read) are left out; each entry's comment says
+# which.
+
+[[model]]
+lean = "formal/LamboProofs/Score.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:1fd79ee811931b960c965e67999530f3f1d0f94767a3e4ad7735780ac35e7fca"
+rust = [
+  "src/daemon/score.rs",
+  "src/config.rs#ScoringWeights",
+  "src/config.rs#ScoringWeights::sanitized",
+  "src/config.rs#sane_weight",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Order.lean"
+read_against = "f167e6f0"
+read_digest = "v2:sha256:efd8204329063add6af1e83d2a9da13b3dffb078a43ef351855da664fa0a48da"
+rust = [
+  "src/types/mod.rs#tie_break_by_key",
+  "src/daemon/score.rs#rescore",
+  "src/recall/candidates.rs#rank",
+  "src/graph/index.rs#search_ranked",
+  "src/recall/assemble.rs#rank_members",
+  "src/recall/assemble.rs#rank_cmp",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Expand.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:53706543e133599abd431b403123e3fb4eb2eaf641c54593e9c61ca515e8461f"
+rust = [
+  "src/recall/expand.rs",
+]
+
+[[model]]
+lean = "formal/LamboProofs/TopK.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:ea34f715fa6c2fe5582c13d6733c9c4b824c39a8bf7b2e0141a081cab6102ebb"
+rust = [
+  "src/recall/assemble.rs#emitted",
+  "src/recall/redundancy.rs",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Fit.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:822a7a60eb735490f21d2fec9e617c79b04706304827622781da61e51cd6b213"
+rust = [
+  "src/recall/format/fit.rs",
+  "src/recall/format.rs#default_token_count",
+  "src/recall/format.rs#render_block",
+]
+
+# Of src/canon/stage1.rs, only Swarm's Stage 1: its thresholds and candidate
+# filter. Canon takes the stage-1 dependent-interaction count as an input; the
+# count helpers (dependent_interaction_counts, dependent_origin, counts_with,
+# age_cutoff, Credit) are listed because a change to how the count is computed
+# is a reason to re-read stage1_mono's monotonicity assumption (the count only
+# grows). Solo's writer-credited count is Policy/Support.lean's.
+[[model]]
+lean = "formal/LamboProofs/Canon.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:7a629e028efcf28f7d1a2bac8b590f2f68b60a9e117d29d7f859c65558b17083"
+rust = [
+  "src/graph/graph/transitions.rs#legal_canonization_transition",
+  "src/graph/graph/transitions.rs#apply_canonization_transition",
+  "src/canon/eval.rs#apply",
+  "src/canon/eval.rs#Evaluator::gather",
+  "src/canon/eval.rs#canonical_count",
+  "src/canon/stage1.rs#MIN_GC_SURVIVED",
+  "src/canon/stage1.rs#MIN_DEPENDENT_INTERACTIONS",
+  "src/canon/stage1.rs#stage1_evidence_passes",
+  "src/canon/stage1.rs#stage1_candidates",
+  "src/canon/stage1.rs#dependent_interaction_counts",
+  "src/canon/stage1.rs#dependent_origin",
+  "src/canon/stage1.rs#counts_with",
+  "src/canon/stage1.rs#age_cutoff",
+  "src/canon/stage1.rs#Credit",
+  "src/canon/stage2.rs",
+  "src/canon/stage3.rs",
+  "src/canon/policy.rs#status_rank",
+  "src/types/mod.rs#CanonizationStatus",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Gc.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:ea5e3c51dc41ef5281b9d5d8a2d6cb3ac78c1218e930b1ae651b0bdc56a7fd30"
+rust = [
+  "src/daemon/gc.rs",
+  "src/graph/graph/transitions.rs#bump_gc_survived",
+  "src/types/mod.rs#counts_toward_gc_connectivity",
+  "src/types/mod.rs#exempt_from_gc_score_cut",
+  "src/types/mod.rs#EdgeType",
+]
+
+# The write gates (closing_edge for Causal/Dependency, reject_closing_edge and
+# its parent_of pre-pass for Hierarchical), the alias redirect's walk and the
+# load check's two cycle passes (#325).
+[[model]]
+lean = "formal/LamboProofs/Cite.lean"
+read_against = "a0413ec5"
+read_digest = "v2:sha256:b0a729d55ebe2e1a1a690a19b2ef3b992defe348fa0a2be09361f927eb735822"
+rust = [
+  "src/canon/alias.rs#plan",
+  "src/canon/alias.rs#reaches",
+  "src/graph/action.rs#closing_edge",
+  "src/graph/action.rs#plan",
+  "src/graph/cite.rs",
+  "src/graph/derive/cycles.rs#reject_closing_edge",
+  "src/graph/derive/cycles.rs#reject_parent_of_cycles",
+  "src/graph/graph.rs#CAUSAL_DEPENDENCY",
+  "src/graph/graph.rs#HIERARCHICAL",
+  "src/graph/graph.rs#Graph::cycle_neighbors",
+  "src/graph/graph.rs#Graph::dfs_cycle",
+  "src/graph/graph.rs#Graph::hierarchical_path",
+  "src/graph/graph/invariants.rs#Graph::assert_invariants",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Names.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:d2a1bf8deebb40549214ed4a3a71138cde98c1299d4b7ba5b1cde244b148ebd4"
+rust = [
+  "src/graph/graph/names.rs",
+  "src/surface/resolve.rs#resolve_reference_scoped",
+]
+
+# The SQL adapters' lease upserts are listed because the header models the
+# MemoryStore upsert as stating "the same rule" as theirs.
+[[model]]
+lean = "formal/LamboProofs/Lease.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:3d4d638fe4e0d5cb4a40ea44e0b727c4008e2ce7401f4fb6d30d40ce6de33b47"
+rust = [
+  "src/store/lease.rs",
+  "src/store/memory.rs#acquire_lease",
+  "src/store/memory.rs#release_lease",
+  "src/store/sqlite/leases.rs",
+  "src/store/pg/leases.rs",
+  "src/memory/leases.rs#spawn_lease_heartbeat",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Receipts.lean"
+read_against = "4cab4380"
+read_digest = "v2:sha256:a89baec0f9450267a45aec7d6b4a8ae12c03ea43e8ea9c135b8a5bd53dacc3fa"
+rust = [
+  "src/writeq/receipts.rs",
+  "src/writeq/admission.rs",
+  "src/writeq/execution.rs",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Reserve.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:be44ba22df4c300ce598c2bc8df1050418d672b99a5a2210f83351ec71009709"
+rust = [
+  "src/graph/reserve.rs",
+  "src/graph/graph/root_goal.rs#set_reservation",
+]
+
+# The contract, the stamp and the resolve-time checks.
+[[model]]
+lean = "formal/LamboProofs/Contract/Stamp.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:9758578be14b614ce145096b55605be45c4425f06f0807f78ed69029d3ef26d0"
+rust = [
+  "src/types/mod.rs#EmbeddingContract",
+  "src/graph/graph/embeddings.rs#Graph::stamp_embedding",
+  "src/resolve.rs#session_embedding_compatibility",
+  "src/resolve.rs#check_vector_compatibility",
+]
+
+# The override, re-embed (before and after #296), the quarantine at load, the
+# checked read and the canary. Left out: the ordinary write's lines in
+# src/graph/hybrid.rs, cited by line range only; record_action_against is the
+# entry point the section names.
+[[model]]
+lean = "formal/LamboProofs/Contract/Reembed.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:d5e79eae0743cfea88713f9421204d3f042305583e1cdca976583a4958cd6d10"
+rust = [
+  "src/graph/graph/embeddings.rs",
+  "src/memory/builder.rs#build_attach",
+  "src/memory/builder.rs#canary_gate",
+  "src/cli/re_embed.rs",
+  "src/graph/action.rs#record_action_against",
+  "src/store/load.rs#quarantine_legacy_vectors",
+  "src/graph/vector_source.rs#graph_vector_candidates",
+  "src/store/sqlite/vector_candidates.rs#checked_vector_candidates",
+  "src/main.rs#allow_embedding_mismatch",
+]
+
+# The store applying a re-embed's batch (#322).
+[[model]]
+lean = "formal/LamboProofs/Contract/Store.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:2dd745cab9a41cb84578390630cefbbfdb97375c0a27cf0c5d8efd5b30f38391"
+rust = [
+  "src/store/memory.rs#MemoryStore::flush",
+  "src/store/batch.rs#plan_flush",
+  "src/store/sqlite/write_rows.rs",
+  "src/store/pg/write_rows.rs",
+  "src/graph/graph/embeddings.rs#Graph::reembed",
+]
+
+# Phase 1's legs, max fusion and the exact-name step.
+[[model]]
+lean = "formal/LamboProofs/Fusion/Max.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:bfa4b18773b18289feea42f5b77f3f4137b307c11d755d5b4ad10375a5d9702b"
+rust = [
+  "src/recall/candidates.rs#candidates_with_keyword_leg_as",
+  "src/recall/candidates.rs#merge_max",
+  "src/recall/candidates.rs#LegScores",
+  "src/recall/candidates.rs#rank",
+]
+
+# Reciprocal rank fusion (#173) and the name step under it.
+[[model]]
+lean = "formal/LamboProofs/Fusion/Rrf.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:7b5e449408bc745be81310ddc89b6e79641a62f1305666f4ff61b0ee7c579415"
+rust = [
+  "src/recall/candidates.rs#rank",
+  "src/recall/candidates.rs#LegScores",
+  "src/recall/candidates.rs#recent_concepts",
+  "src/recall/candidates.rs#candidates_with_keyword_leg_as",
+  "src/recall/fusion.rs",
+]
+
+# Left out: search_ranked (src/graph/index.rs), modelled as its ranked list,
+# and the tests the header names.
+[[model]]
+lean = "formal/LamboProofs/Confidence.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:3ae1dbc3eac9a735d59c35439ab24bdc6faebad71aa0b0238d88297c516c3d71"
+rust = [
+  "src/recall/confidence.rs",
+  "src/recall/candidates.rs#KeywordLeg",
+  "src/recall/candidates.rs#candidates_with_keyword_leg_as",
+  "src/daemon/mod.rs#Route",
+  "src/daemon/mod.rs#recall_routed",
+  "src/embed/calibration.rs#null_median_cosine",
+  "src/types/mod.rs#TopLegs",
+  "src/types/mod.rs#ProvisionalConfidence",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Canonical.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:6525163291921f6474da7132300be28c5b87bd30ae8114a43657b74357e1892c"
+rust = [
+  "src/graph/canonical.rs",
+  "src/graph/graph/names.rs#name_key",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Dispatch.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:a3a0476933daa64e0d12840f3e91ebb97720ff6e159947a44b2e22759c4b513e"
+rust = [
+  "src/recall/dispatch.rs",
+  "src/daemon/mod.rs#recall_routed",
+  "src/recall/format.rs#dependents_of",
+  "src/types/mod.rs#EdgeType",
+  "src/types/mod.rs#dependence",
+  "src/types/mod.rs#dependent_end",
+  "src/recall/candidates.rs#gather_from",
+]
+
+# The #198 trigger and the replacement candidates.
+[[model]]
+lean = "formal/LamboProofs/Supersession/Suspected.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:0c943166764a740149cc051c54acce66d3e426d8fe65ddb3d95d4a010e777fcc"
+rust = [
+  "src/graph/suspected.rs",
+  "src/graph/suspected/slot.rs",
+  "src/graph/suspected/replacement.rs",
+  "src/types/mod.rs#ConceptType",
+]
+
+# The #20 canon pass and the evidence it reads.
+[[model]]
+lean = "formal/LamboProofs/Supersession/Pass.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:21e051f76abe483cb3cf493f5931ab3f7ea9457a98fc06eb93ffcf6ae3f466ef"
+rust = [
+  "src/canon/supersession.rs",
+  "src/store/evidence.rs",
+  "src/canon/eval.rs#apply",
+]
+
+# How recall reads both.
+[[model]]
+lean = "formal/LamboProofs/Supersession/Recall.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:d6e5df9269195f68760fa9d7473c9ef814eb06b6538791064c3e5cad3e018bc1"
+rust = [
+  "src/recall/redundancy.rs#never_redundant",
+  "src/recall/redundancy.rs#Redundancy::signal",
+  "src/recall/assemble.rs#in_suspected_pair",
+  "src/recall/assemble.rs#possibly_superseded_by",
+  "src/recall/assemble.rs#superseded_by",
+  "src/recall/suspected.rs",
+]
+
+# The greedy session counter.
+[[model]]
+lean = "formal/LamboProofs/Policy/Sessions.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:e51e059decb35d4842e42857724914dacf91aa81c6e9bb1523083bdda8969c50"
+rust = [
+  "src/canon/event_time.rs#separated_session_count",
+  "src/canon/policy.rs#SESSION_SEPARATION",
+]
+
+# The Solo terms: supporting times, recurrence sessions and the dependent
+# counts, Swarm's (`dependentOrigins`) and Solo's writer-credited one (#300),
+# per node and batched, through `dependent_origin` and `Credit`. Left out:
+# `age_cutoff`, since the model takes every edge and interaction as old
+# enough.
+[[model]]
+lean = "formal/LamboProofs/Policy/Support.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:ee76d319cfb0349bfe58c08bb8ed5b6401cdc0d1e128ea1eeadcc078a4f603ab"
+rust = [
+  "src/canon/policy.rs#supporting_interaction_times",
+  "src/canon/policy.rs#recurrence_sessions",
+  "src/types/mod.rs#about_time",
+  "src/types/mod.rs#dependence",
+  "src/types/mod.rs#dependent_end",
+  "src/daemon/conflict.rs#WriterTimeline",
+  "src/canon/stage1.rs#solo_dependent_interactions",
+  "src/canon/stage1.rs#solo_dependent_interactions_with",
+  "src/canon/stage1.rs#solo_dependent_interaction_counts",
+  "src/canon/stage1.rs#solo_dependent_interaction_counts_with",
+  "src/canon/stage1.rs#dependent_interactions",
+  "src/canon/stage1.rs#interactions_with",
+  "src/canon/stage1.rs#counts_with",
+  "src/canon/stage1.rs#dependent_origin",
+  "src/canon/stage1.rs#Credit",
+  "src/types/mod.rs#EdgeType",
+]
+
+# The score, bands, admission and `PromotionPolicy`, and how the evaluator
+# consults the policy.
+[[model]]
+lean = "formal/LamboProofs/Policy/Score.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:0610c61fcd10bf222057643da6bebadf652c051218b21fba653339122cf18dc1"
+rust = [
+  "src/canon/policy.rs",
+  "src/types/mod.rs#ConceptType",
+  "src/types/mod.rs#eviction_resistance",
+  "src/canon/eval.rs#Evaluator::gather",
+  "src/canon/eval.rs#apply",
+]
+
+# Conflict detection, and the hot list's re-validation of it. Left out: the
+# cases in src/daemon/contradiction/tests.rs.
+[[model]]
+lean = "formal/LamboProofs/Conflict/Detect.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:4c4ad5b8b2ffbfc52711ccd673fcba3b7e6daeee5f9384c8d0902653c2c61148"
+rust = [
+  "src/daemon/conflict.rs",
+  "src/daemon/hotlist.rs#HotList::revalidate",
+  "src/graph/graph.rs#record_edge",
+  "src/types/mod.rs#EdgeType",
+]
+
+# Contradiction dating, over conflict.rs's write-time attribution.
+[[model]]
+lean = "formal/LamboProofs/Conflict/Contradiction.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:68ca46f26bcd606fe2fab8ddca9e5debf3457f39ed45ff9c13b8bd94d4d55c9f"
+rust = [
+  "src/daemon/contradiction.rs",
+  "src/daemon/conflict.rs#WriterTimeline",
+  "src/daemon/conflict.rs#attribute_at",
+  "src/daemon/conflict.rs#edge_writers",
+  "src/graph/graph.rs#record_edge",
+]
+
+# The hot list itself.
+[[model]]
+lean = "formal/LamboProofs/Hotlist/List.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:dab4b297f2e5197c26bc3e613125fc0994ca6b7c4654fefb83b19f742697b699"
+rust = [
+  "src/daemon/hotlist.rs",
+  "src/types/mod.rs#HotListPayload",
+]
+
+# How recall consumes the hot list.
+[[model]]
+lean = "formal/LamboProofs/Hotlist/Recall.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:0a11bbecf7d39eebcc8212abce86b5c43e170bc9ae334fabfe9f1ca7728032fd"
+rust = [
+  "src/recall/assemble.rs#forces",
+  "src/recall/assemble.rs#contradiction_companions",
+  "src/recall/assemble.rs#emitted",
+  "src/recall/assemble.rs#assemble_with_graph_relevance",
+  "src/recall/assemble.rs#same_session_concept",
+  "src/daemon/contradiction.rs#forces_inclusion",
+  "src/recall/format.rs#hot_warning",
+  "src/recall/format.rs#contradiction_warning",
+]
+
+# The daemon's cycle over the hot list, before and since #298.
+[[model]]
+lean = "formal/LamboProofs/Hotlist/Cycle.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:32a8a469d975714590c6ce02eb28f2399fdc41f06d4ad6625b7b5b5335c16968"
+rust = [
+  "src/daemon/mod.rs#detect_into_hot_list",
+  "src/daemon/mod.rs#condition_set",
+  "src/daemon/hotlist.rs#HotList::sync_cycle",
+  "src/daemon/hotlist.rs#HotList::retain_conditions",
+]
+
+# The drain model is split by subsystem; each file is listed against the Rust
+# it reads. Drain/History.lean (the worker before #295, the replay before
+# #294) and Drain/Examples.lean (concrete cases evaluated by `decide` over the
+# other files' definitions) model no Rust of their own and have no entry.
+#
+# Base: the worker step's batch shape (the consume under the commit's lock
+# hold, and which failures consume the intent), receipt ids (epoch, sequence)
+# and the intent rows they key, the replay's block reasons, the receipt store's settle, `settle_deferred`'s set-aside, the
+# `Drop` path (`abort_all_sync`, from `Memory`'s `Drop`), the intent log, the
+# adapters' load order, the error classes, the replay's step, its constants
+# and the restart map's seed (`spawn_replay`).
+[[model]]
+lean = "formal/LamboProofs/Drain/Base.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:b70366842a99765cb17cba130badf374743a647e42343d9d4201b6cc38b6aa8f"
+rust = [
+  "src/writeq/execution.rs#WriteCtx::run",
+  "src/writeq/execution.rs#ConsumeStamp",
+  "src/writeq/execution.rs#WritePipeline::spawn_worker",
+  "src/writeq/receipts.rs#settle_one",
+  "src/writeq/receipts.rs#ReceiptId",
+  "src/writeq/receipts.rs#next_receipt",
+  "src/writeq/counters.rs#ReplayBlockReason",
+  "src/types/mod.rs#WriteIntent",
+  "src/types/mod.rs#WriteIntentOutcome",
+  "src/writeq/drain.rs#CloseFlush",
+  "src/writeq/drain.rs#WritePipeline::abort_workers",
+  "src/writeq/drain.rs#WritePipeline::settle_deferred",
+  "src/writeq/drain.rs#WritePipeline::abort_all_sync",
+  "src/memory/shutdown.rs#Memory::drop",
+  "src/writeq/replay.rs#WritePipeline::spawn_replay",
+  "src/writeq/replay.rs#EMBEDDER_SICK_THRESHOLD",
+  "src/writeq/replay.rs#REPLAY_LOOKUP_TIMEOUT_LIMIT",
+  "src/graph/graph/mutation_log.rs#record_write_intent",
+  "src/graph/graph/mutation_log.rs#consume_write_intent",
+  "src/store/sqlite/session_load.rs",
+  "src/store/pg/session_load.rs",
+  "src/types/mod.rs#is_cycle_refusal",
+  "src/types/mod.rs#is_input_refusal",
+  "src/types/mod.rs#is_lookup_timeout",
+]
+
+# Replay: the replay loop, its deferral, retry pass, quarantine of another
+# receipt format, block reason and load order (#294, #295), and the in-session hold's first model (`workH`), which reads the
+# lane worker.
+[[model]]
+lean = "formal/LamboProofs/Drain/Replay.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:42252cfe0ef797b12112c5eab8ca5d32f6071d3c025cf145ed798beed8a34a17"
+rust = [
+  "src/writeq/replay.rs",
+  "src/writeq/receipts.rs#ReceiptId",
+  "src/writeq/counters.rs#ReplayBlockReason",
+  "src/writeq/execution.rs#WritePipeline::spawn_worker",
+  "src/store/sqlite/session_load.rs",
+  "src/store/pg/session_load.rs",
+  "src/types/mod.rs#is_cycle_refusal",
+  "src/types/mod.rs#is_input_refusal",
+]
+
+# Worker: the current lane worker (held writes, admission and its cap check,
+# `WritePipeline::admit`; retries, the fence) and the serve's block reason
+# (`serveR`). The caps' values are parameters, so their constants are not
+# refs.
+[[model]]
+lean = "formal/LamboProofs/Drain/Worker.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:99241c6a9832cbb4aee05018de7fb053e9b75479791ae3b387f54fb09a9da537"
+rust = [
+  "src/writeq/execution.rs",
+  "src/writeq/admission.rs#Lanes",
+  "src/writeq/admission.rs#WritePipeline::admit",
+  "src/writeq/receipts.rs#settle_one",
+  "src/writeq/receipts.rs#hold_one",
+  "src/writeq/replay.rs#WritePipeline::spawn_replay",
+]
+
+# Close: the close over the current worker, the dead-lettered set (#345, with
+# worker panics after `WriteCtx::run`'s commit) and where the lookup streak resets (#346, at the commit).
+[[model]]
+lean = "formal/LamboProofs/Drain/Close.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:a8df4dcc27d39030be6903e2033fd92667b932cc4b2ee018a3b7885417db3c99"
+rust = [
+  "src/writeq/drain.rs",
+  "src/memory/shutdown.rs#Memory::close",
+  "src/memory/shutdown.rs#Memory::close_fenced",
+  "src/graph/graph/mutation_log.rs#consume_write_intent",
+  "src/graph/graph/unflushed.rs#Graph::note_dead_lettered_intents",
+  "src/graph/graph/unflushed.rs#Graph::intent_dead_lettered",
+  "src/graph/graph/unflushed.rs#Graph::mark_consumed_unsettled",
+  "src/graph/graph/unflushed.rs#Graph::settled_write",
+  "src/store/flush.rs#FlushLoop::drain_and_flush",
+  "src/writeq/execution.rs#WriteCtx::run",
+  "src/writeq/execution.rs#WorkerCommit",
+  "src/writeq/execution.rs#WritePipeline::spawn_worker",
+  "src/writeq/admission.rs#Lanes",
+  "src/writeq/receipts.rs#settle_one",
+]
+
+# The retry ladder, its backoff and the store's flush contract.
+[[model]]
+lean = "formal/LamboProofs/Flush/Retry.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:0fed522f548f71deb9e49c8e89e975bbab94ccba91853be48f98fc3c24c0b983"
+rust = [
+  "src/store/flush.rs#flush_with_retry",
+  "src/store/flush.rs#next_backoff",
+  "src/store/flush.rs#BACKOFF_BASE",
+  "src/store/flush.rs#BACKOFF_CAP",
+  "src/store/flush.rs#RETAINED_BACKOFF",
+  "src/types/mod.rs#is_retryable",
+  "src/store/mod.rs#GraphStore::flush",
+]
+
+# The flush loop before #293, after it, and with #301's two store calls.
+[[model]]
+lean = "formal/LamboProofs/Flush/Loop.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:00274796661038c5756a96f37d926b1c18b36180cb45902d24a285e037402c83"
+rust = [
+  "src/store/flush.rs",
+]
+
+# The adapters' error classes (#301 item 3) and the loop over them.
+[[model]]
+lean = "formal/LamboProofs/Flush/Errors.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:0e8af54ae9c23ffe367acee1c3ba4812a5a1044a26de742f892c41cf7c3c1e36"
+rust = [
+  "src/store/error.rs",
+  "src/store/flush.rs#FlushLoop::drain_and_flush",
+]
+
+# The worker's pieces, each without the state machine.
+[[model]]
+lean = "formal/LamboProofs/BatchQueue/Pure.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:0320437c81f8831a1b0956ddc4ef1ee39d8b389bc80e4ce01fdb0b8d81829547"
+rust = [
+  "src/embed/candle.rs#take_prioritized",
+  "src/embed/candle.rs#length_chunks",
+  "src/embed/candle.rs#forward_isolated",
+  "src/embed/candle.rs#serve_take",
+]
+
+# Left out: the files issue #273 proposes splitting candle.rs into.
+[[model]]
+lean = "formal/LamboProofs/BatchQueue/Worker.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:c218f50a35ab430e950c694da788fcd4e723b4509aa56b24518fb7f047f7b8e6"
+rust = [
+  "src/embed/candle.rs",
+]
+
+# The coalescer tests' scenarios.
+[[model]]
+lean = "formal/LamboProofs/BatchQueue/Runs.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:c218f50a35ab430e950c694da788fcd4e723b4509aa56b24518fb7f047f7b8e6"
+rust = [
+  "src/embed/candle.rs",
+]
+
+# Left out: src/store/flush.rs's stale-write latch, a match arm inside the
+# flush loop that Flush/Loop.lean already covers; the files issue #273 proposes.
+[[model]]
+lean = "formal/LamboProofs/Registry/Step.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:1fc1718a5e80d88a3bf3879dba40b9046494aa39ba2811b34bb4a5f1dda01ef0"
+rust = [
+  "src/mcp/serve/registry.rs",
+  "src/mcp/serve/registry/on_demand.rs",
+  "src/mcp/serve/registry/erase.rs",
+  "src/memory/leases.rs",
+]
+
+# The registry's stateless functions.
+[[model]]
+lean = "formal/LamboProofs/Registry/Pure.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:5305ed80731e9416ceb9977c4bc20fe6c285502d860884ccb9c4872308d5c752"
+rust = [
+  "src/mcp/serve/registry/on_demand.rs",
+  "src/mcp/serve/registry/views.rs",
+  "src/mcp/serve/registry.rs#answer_for",
+  "src/mcp/serve/registry.rs#LeaseLossPolicy::for_scope",
+  "src/mcp/serve/registry.rs#PINNED_RETRY",
+  "src/mcp/serve/registry.rs#pinned_retry",
+  "src/mcp/serve/registry.rs#SessionRegistry::lookup",
+  "src/main.rs#too_many_stdio_sessions",
+  "src/mcp/serve/http_guards.rs#credential_share",
+]
+
+# Concrete runs of the step relation.
+[[model]]
+lean = "formal/LamboProofs/Registry/Runs.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:5ac6dd397d812ef24decce3c9f78a34de10c4e1c2d6e0a545fcc3ab941877763"
+rust = [
+  "src/mcp/serve/registry.rs",
+  "src/mcp/serve/registry/on_demand.rs",
+  "src/mcp/serve/registry/erase.rs",
+]
+
+# What each command builds, and from which lambo.toml. Left out: the
+# integration tests the header names.
+[[model]]
+lean = "formal/LamboProofs/Resolve/Construction.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:4cab7ef63edef981f280e32b4d76cff432cd7e66ad52c8272dca330d2a58bd70"
+rust = [
+  "src/main.rs#Commands::needs_embedder",
+  "src/main.rs#Commands::allow_embedding_mismatch",
+  "src/main.rs#Commands::name",
+  "src/main.rs#resolve_for_command",
+  "src/resolve.rs",
+  "src/store/mod.rs#build_store_with_options",
+  "src/store/mod.rs#GraphStore::vector_dimensions",
+  "src/store/pg/mod.rs#vector_dimensions",
+  "src/store/pg/cockroach.rs",
+  "src/store/pg/postgres.rs",
+  "src/store/sqlite/mod.rs#vector_dimensions",
+  "src/store/recall_tier.rs#wrap_with_recall_tier",
+  "src/embed/mod.rs#build_embedder",
+  "src/embed/mod.rs#EmbedderKind::has_adapter",
+  "src/embed/mod.rs#EmbedderKind::is_compiled",
+  "src/embed/mod.rs#EmbedderKind::is_ready",
+  "src/config.rs#load_resolved",
+]
+
+# Serve preflight and main's routing.
+[[model]]
+lean = "formal/LamboProofs/Resolve/Serve.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:a86d7fed84becd381c0256a1edb9dbb7ea12feba4aab241238682cab4a8fc74d"
+rust = [
+  "src/main.rs",
+  "src/mcp/serve/pinned.rs#pin_sessions",
+  "src/mcp/serve/layers.rs#plan_layers",
+  "src/mcp/serve/http_guards.rs#resolve_auth_token",
+  "src/mcp/serve/http_guards.rs#authorize_bind",
+  "src/mcp/serve/heartbeat.rs#authorize_ledger",
+  "src/mcp/serve/http_guards.rs#SecretToken",
+  "src/surface/bearer.rs#check_configured_token",
+  "src/config/credential.rs#check_credential_set",
+]
+
+# The --auth-token parsers and what their refusals print (#315).
+[[model]]
+lean = "formal/LamboProofs/Resolve/Auth.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:91e201d38ab5871a2bca33ffa7003eddf6470e2aae88d4d9e98dc6da49647e87"
+rust = [
+  "src/main.rs",
+  "src/mcp/serve/http_guards.rs#SecretToken",
+  "src/surface/bearer.rs#check_configured_token",
+]
+
+# The per-command clap rules.
+[[model]]
+lean = "formal/LamboProofs/Resolve/Args.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:883580ef0bce148a72a8d8c60d9d27049114f1cd6ee4c603373785bccf644233"
+rust = [
+  "src/main.rs",
+]
+
+# The tier's stateless functions.
+[[model]]
+lean = "formal/LamboProofs/Tiered/Pure.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:2ac85267486e5fe1d768d27694a59b8f1343271aa90321fb2178bb1492aab161"
+rust = [
+  "src/store/tiered/project.rs",
+  "src/store/tiered/mod.rs#next_version",
+  "src/store/tiered/mod.rs#knn_fetch",
+  "src/store/tiered/mod.rs#check_marker",
+  "src/store/tiered/mod.rs#breaker_admits",
+  "src/store/tiered/mod.rs#breaker_success",
+  "src/store/tiered/mod.rs#breaker_failure",
+  "src/store/tiered/mod.rs#note_lease",
+  "src/store/tiered/mod.rs#note_refresh",
+]
+
+# Left out: the files issue #273 proposes splitting tiered/mod.rs into.
+[[model]]
+lean = "formal/LamboProofs/Tiered/Machine.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:63d4e1e9ba459331ca7728fa71964bc488e479219fe15a74033a1f12c4d993c0"
+rust = [
+  "src/store/tiered/mod.rs",
+  "src/store/tiered/project.rs",
+  "src/store/tiered/index.rs",
+  "src/store/tiered/fake.rs",
+  "src/store/vector_source.rs#rank_by_cosine",
+]
+
+# Runs of the state machine, from the tier's tests.
+[[model]]
+lean = "formal/LamboProofs/Tiered/Runs.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:772ce3bcd26eb0af5aa9cac3f6d4671fb9d7fbba20a693b08b45e74b4422d58c"
+rust = [
+  "src/store/tiered/mod.rs",
+  "src/store/tiered/project.rs",
+  "src/store/tiered/tests.rs",
+]
+
+# Left out: the route that appends the outcome to the served sessions
+# (`api_sessions` in routes.rs) and the adapters' `store_health`, whose
+# omission of erased sessions the model takes as given.
+[[model]]
+lean = "formal/LamboProofs/Discovery.lean"
+read_digest = "v2:sha256:28a827a1f23edbed52a7b23361c4b8a9c95d485db8223ceafa7997209135d6c2"
+rust = [
+  "src/cli/serve_web/discovery.rs#Last",
+  "src/cli/serve_web/discovery.rs#Discovery::new",
+  "src/cli/serve_web/discovery.rs#Discovery::sessions",
+]

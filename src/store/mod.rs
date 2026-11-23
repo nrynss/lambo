@@ -1,8 +1,8 @@
-//! GraphStore trait, Level B factory, and optional adapters (P1 / P3).
+//! GraphStore trait, Level B factory, and optional adapters.
 //!
 //! Packaging: Cargo features gate adapters (`store-memory`, `store-cockroach`,
 //! `store-postgres`, `store-sqlite`); `lambo.toml` / env select among compiled
-//! kinds. See `dev-diary/notes/level-b-pluggability.md`.
+//! kinds. See `docs/reference/config.mdx` ("Features").
 
 #[cfg(feature = "store-memory")]
 mod memory;
@@ -10,9 +10,9 @@ mod memory;
 #[cfg(feature = "store-memory")]
 pub use memory::MemoryStore;
 
-// B0: the Postgres-wire-protocol store family (`pg`), of which the T3.2
-// CockroachDB durable adapter (spec §3.2/§3.3, §4) is the first dialect and
-// B2's PostgreSQL adapter is the second (templated width, hnsw from init).
+// The Postgres-wire-protocol store family (`pg`), of which the CockroachDB
+// durable adapter (spec §3.2/§3.3, §4) is the first dialect and the PostgreSQL
+// adapter is the second (templated width, hnsw from init).
 // Features: store-cockroach, store-postgres.
 #[cfg(any(feature = "store-cockroach", feature = "store-postgres"))]
 pub mod pg;
@@ -22,7 +22,7 @@ pub mod pg;
 pub use pg::cockroach;
 #[cfg(feature = "store-postgres")]
 pub use pg::postgres;
-// T3.3 — SQLite offline / test tier (spec §3.2–§3.3, §4). VECTOR_SEARCH since F1/F2.
+// SQLite offline / test tier (spec §3.2–§3.3, §4). Advertises VECTOR_SEARCH.
 #[cfg(feature = "store-sqlite")]
 mod sqlite;
 
@@ -31,7 +31,7 @@ pub use sqlite::SqliteStore;
 #[cfg(feature = "store-sqlite")]
 pub(crate) use sqlite::{SplitImportOutcome, SplitReceipt};
 
-// STORE-4 — shared backend-error classification (sqlx-backed adapters only;
+// Shared backend-error classification (sqlx-backed adapters only;
 // `store-cockroach` / `store-postgres` / `store-sqlite` pull `sqlx`).
 #[cfg(any(
     feature = "store-cockroach",
@@ -47,7 +47,7 @@ mod error;
 ))]
 pub(crate) use error::map_write_err;
 
-// STORE-1/CON-8 — shared vector codec for the sqlx-backed adapters (Cockroach
+// Shared vector codec for the sqlx-backed adapters (Cockroach
 // VECTOR text literal; SQLite stores the same text as a BLOB).
 #[cfg(any(
     feature = "store-cockroach",
@@ -60,20 +60,20 @@ pub(crate) mod vector;
 // SQLite scan and the pg-family queries implement, plus the shared exact scorer.
 // Ungated: #8's graph-backed source implements it in Memory-only builds too.
 pub(crate) mod vector_source;
-// #148: the provision re-key plan for unstemmed identifier tokens.
+// #148, #301: the provision re-key plan for keys an older rule wrote.
 pub mod rekey;
 
 // DSN spelling -> DSN identity. Store-agnostic and always compiled: both the
-// session endpoint (J2) and `StoreConfig::overlay_env` (E2E-F2) need the rule,
-// and neither is feature-gated.
+// session endpoint and `StoreConfig::overlay_env` need the rule, and neither is
+// feature-gated.
 pub(crate) mod dsn;
 pub use dsn::store_dsn_identity;
 
-// L82-1 — statement planning for the SQL adapters' `flush()`. Store-agnostic
+// Statement planning for the SQL adapters' `flush()`. Store-agnostic
 // (it only reads `Mutation`), so it compiles and is tested under every feature
 // row, including the `--no-default-features` minimal ones.
 pub mod batch;
-// T3.5 — `load_session()` / startup materialization (see `load.rs`).
+// `load_session()` / startup materialization (see `load.rs`).
 pub mod load;
 pub(crate) mod span;
 // #20 supersession evidence: one reading of the dependence rows for every
@@ -81,9 +81,9 @@ pub(crate) mod span;
 pub mod evidence;
 pub use evidence::{DependentEvidence, DependentEvidenceRow};
 pub use span::{validate_coverage_window, DEFAULT_COVERAGE_WINDOW, MIN_COVERAGE_WINDOW};
-// T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
+// Write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
 pub mod flush;
-// T8.6 — single-writer lease (spec §2.2, store-enforced). Holder identity,
+// Single-writer lease (spec §2.2, store-enforced). Holder identity,
 // TTL/heartbeat constants, acquire/refresh/release outcomes.
 pub mod lease;
 // #23 — session erasure: report, tombstone and the shared lease gate.
@@ -121,7 +121,7 @@ use crate::types::{
 pub const MAX_VECTOR_CANDIDATE_LIMIT: usize = 2048;
 
 /// Observable flush stats published by the lease-holding writer and readable
-/// by a reader in another process (T85-3).
+/// by a reader in another process.
 ///
 /// This is the durable/remote snapshot of the writer's in-memory
 /// [`crate::store::flush::FlushStats`] (lag / depth / dead-lettered), which is
@@ -233,8 +233,9 @@ pub fn validate_vector_candidate_limit(limit: usize) -> Result<(), StoreError> {
 ///
 /// Derived from the migration text an adapter already `include_str!`s rather
 /// than from a hand-kept list, so [`GraphStore::preflight_schema`] cannot drift
-/// behind a future schema addition — which is the whole failure mode F5 is: a
-/// table added to the DDL and no path that notices it is absent. Matches the
+/// behind a future schema addition — which is the whole failure mode this
+/// guards against: a table added to the DDL and no path that notices it is
+/// absent. Matches the
 /// project's one DDL idiom, `CREATE TABLE IF NOT EXISTS <name> (`; a statement
 /// written any other way is deliberately not matched, because a preflight that
 /// guesses is worse than one whose coverage is stated.
@@ -255,8 +256,9 @@ pub fn tables_in_ddl(ddl: &str) -> Vec<&str> {
 /// Every `(table, column)` pair the embedded DDL requires, in DDL order.
 ///
 /// Like [`tables_in_ddl`], derived from the migration text an adapter already
-/// `include_str!`s, so the *column* preflight (J3-R2R-3 — the half of F5 the
-/// table check cannot see) cannot drift behind a future schema change either.
+/// `include_str!`s, so the *column* preflight (the half of that failure mode
+/// the table check cannot see) cannot drift behind a future schema change
+/// either.
 /// Preflight that guesses is worse than one whose coverage is stated, so the
 /// parser matches the project's two DDL idioms only:
 ///
@@ -329,8 +331,8 @@ pub fn columns_in_ddl(ddl: &str) -> Vec<(&str, &str)> {
     out
 }
 
-/// The column-shaped sibling of [`unprovisioned_store_err`] (J3-R2R-3): a store
-/// whose **table** is present but a **column** is missing. Same refusal channel,
+/// The column-shaped sibling of [`unprovisioned_store_err`]: a store whose
+/// **table** is present but a **column** is missing. Same refusal channel,
 /// same actionable `lambo provision` sentence — a missing column converges on
 /// the provision path (`ensure_column` / `ADD COLUMN IF NOT EXISTS`).
 pub fn unprovisioned_column_err(kind: &str, table: &str, missing: &[&str]) -> StoreError {
@@ -430,7 +432,7 @@ pub trait GraphStore: Send + Sync {
     fn capabilities(&self) -> Capabilities;
 
     /// Refuse an **un-provisioned or un-migrated** store before it can accept a
-    /// write (J3 round-1, F5).
+    /// write.
     ///
     /// `init_schema` runs from exactly one place in the product — `lambo
     /// provision` (`crate::cli::provision`) — and never on the attach path. So a
@@ -460,8 +462,8 @@ pub trait GraphStore: Send + Sync {
         Ok(())
     }
 
-    /// #148: re-key every stored concept whose key the pre-#148 rule
-    /// (stemming identifier tokens) wrote, run by `lambo provision` after the
+    /// #148, #301: re-key every stored concept whose key an older rule
+    /// (stemming identifiers, or keeping empty stems) wrote, run by `lambo provision` after the
     /// schema. Refuses while a session lease is live; idempotent. Default: an
     /// adapter with no durable keys (`MemoryStore`, test doubles) has nothing
     /// to re-key.
@@ -511,7 +513,7 @@ pub trait GraphStore: Send + Sync {
     ///   absent [`Capabilities::VECTOR_SEARCH`].
     ///
     /// **How much authority this carries depends on the adapter, and for one of them
-    /// it can be none** (F-R1-2). An adapter whose column has no width of its own
+    /// it can be none.** An adapter whose column has no width of its own
     /// (SQLite's `BLOB`) has no schema number to report. It reports, in precedence
     /// order: the operator's [`StoreConfig::vector_dim`] pin when set, else the
     /// resolved `[embedder] dim`, else the [`crate::embed::EmbedderConfig`] default.
@@ -543,7 +545,7 @@ pub trait GraphStore: Send + Sync {
     /// backends enforce this; the advisory default (no lease) lets everything
     /// through.
     ///
-    /// **Idempotency contract (flush replay, F5):** adapters MUST implement
+    /// **Idempotency contract (flush replay):** adapters MUST implement
     /// every mutation kind with upsert / `ON CONFLICT` semantics. The flush
     /// task may replay a batch that partially succeeded (a mid-batch backend
     /// failure, a retried flush, or a retained batch re-attempted after a
@@ -553,10 +555,10 @@ pub trait GraphStore: Send + Sync {
     /// idempotent this way (node/edge upserts by natural key, canonization
     /// transitions by event id); adapters must preserve that property.
     ///
-    /// **`created_at` parity (STORE-5, accepted divergence):** after an identical
+    /// **`created_at` parity (accepted divergence):** after an identical
     /// flush history, `load_session` returns `created_at: Some(now)` on Cockroach
     /// (schema `TIMESTAMPTZ NOT NULL DEFAULT now()`) but `None` on SQLite/Memory
-    /// (no session-metadata `Mutation` kind exists to bind it — S5 snapshot-only).
+    /// (no session-metadata `Mutation` kind exists to bind it — snapshot-only).
     /// Adapters may differ here; do NOT rely on `created_at` presence.
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError>;
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError>;
@@ -614,8 +616,9 @@ pub trait GraphStore: Send + Sync {
     /// session's durable contract in the same transactional snapshot as every
     /// candidate query and refuse a mismatch. The fail-closed default preserves
     /// source compatibility for third-party v0.2.0 adapters without silently
-    /// weakening H1: adapters that advertise vector search must explicitly add
-    /// an atomic implementation before Lambo's production recall paths use it.
+    /// weakening that check: adapters that advertise vector search must
+    /// explicitly add an atomic implementation before Lambo's production
+    /// recall paths use it.
     /// Non-vector adapters retain their original capability refusal.
     async fn vector_candidates_checked(
         &self,
@@ -640,7 +643,7 @@ pub trait GraphStore: Send + Sync {
     ///
     /// When it is, a session **holder** answers that read from its in-memory
     /// graph instead of calling the store: the graph holds the same vectors
-    /// (the stored codec round-trips `f32` exactly, CON-8), plus the ones not
+    /// (the stored codec round-trips `f32` exactly), plus the ones not
     /// yet flushed, so the ranking is the store's without the store's I/O
     /// (spec §2.1, the graph is primary). Readers without a live graph keep
     /// calling the store either way.
@@ -691,23 +694,23 @@ pub trait GraphStore: Send + Sync {
     /// ([`crate::types::Edge::about_time`]) is at or before
     /// `now - min_edge_age`. This is a read-time reinterpretation of the
     /// stored edges (no migration); every adapter must agree with
-    /// [`MemoryStore`](crate::store::MemoryStore).
+    /// [`MemoryStore`].
     ///
-    /// **Type split (CON-6):** this surface returns `u64`, but the frozen
+    /// **Type split:** this surface returns `u64`, but the frozen
     /// [`crate::types::Concept::blast_radius`] /
     /// [`crate::types::CanonizationEvent::blast_radius`] fields are
     /// `Option<i32>` by pinned contract. Implementers MUST narrow at the write
     /// gate with a typed error — `u32::try_from(value).map_err(|_| invariant(
     /// ...))` — never a silent `as` cast: an out-of-range radius is an invariant
-    /// violation, not a value to truncate. (P6's canonization sweep consumes
+    /// violation, not a value to truncate. (The canonization sweep consumes
     /// this method and writes the i32 field.)
     ///
-    /// **Injected clock (F8).** The age cutoff is `now - min_edge_age`, and
+    /// **Injected clock.** The age cutoff is `now - min_edge_age`, and
     /// `now` is the **caller's** instant — adapters must not reach for
-    /// [`chrono::Utc::now`]. One canonization eval cycle takes its clock once
-    /// (P6 §"`now` is injected"); an adapter-internal wall clock made a single
-    /// cycle read two clocks and made the 60s inflation guard un-simulatable
-    /// under a mocked clock, so every eval-level test had to zero it.
+    /// [`chrono::Utc::now`]. One canonization eval cycle takes its clock once;
+    /// an adapter-internal wall clock made a single cycle read two clocks and
+    /// made the 60s inflation guard un-simulatable under a mocked clock, so
+    /// every eval-level test had to zero it.
     async fn blast_radius(
         &self,
         session: &SessionId,
@@ -841,7 +844,7 @@ pub trait GraphStore: Send + Sync {
     }
 
     // -----------------------------------------------------------------------
-    // Single-writer lease (spec §2.2, T8.6)
+    // Single-writer lease (spec §2.2)
     // -----------------------------------------------------------------------
 
     /// Atomically acquire the session's single-writer lease for `holder`,
@@ -861,14 +864,15 @@ pub trait GraphStore: Send + Sync {
     ///   age for a diagnostic.
     ///
     /// **Clock discipline.** `ttl` is a duration, not a timestamp: the backend
-    /// stamps `acquired_at`/`expires_at` from its own clock (spec §6.4 / F18).
+    /// stamps `acquired_at`/`expires_at` from its own clock (spec §6.4).
     /// A caller-supplied absolute instant must never reach a lease row.
     ///
     /// **Default is advisory (non-enforcing).** The provided implementation
     /// always grants, persisting nothing — it exists so test doubles and any
     /// store that has not implemented enforcement keep their prior behaviour
-    /// (single-writer was advisory before T8.6). The three real backends
-    /// (`MemoryStore`, `SqliteStore`, `CockroachStore`) override it with true
+    /// (single-writer was advisory before leases were store-enforced). The
+    /// real backends (`MemoryStore`, `SqliteStore`, and `PgStore`, which is
+    /// both `CockroachStore` and `PostgresStore`) override it with true
     /// enforcement. A store that grants here provides no cross-process
     /// guarantee — the in-process `ACTIVE_SESSIONS` log is the only catch.
     async fn acquire_lease(
@@ -892,14 +896,14 @@ pub trait GraphStore: Send + Sync {
         }))
     }
 
-    /// Read the session's lease row without touching it (J2).
+    /// Read the session's lease row without touching it.
     ///
     /// **Read-only, and that is load-bearing.** This is how a `serve` that lost
     /// the lease finds the current holder's `endpoint` so it can proxy, and how
     /// it re-finds it on every reconnect attempt. It must never acquire,
     /// refresh, or steal: a proxy that took the lease would heartbeat and hold
     /// a session it cannot serve, wedging every process on the machine — which
-    /// is strictly worse than the exit-1 J2 exists to replace. See
+    /// is strictly worse than the exit-1 that proxying exists to replace. See
     /// `mcp::serve`'s proxy loop, where the invariant is restated at the site
     /// that could violate it.
     ///
@@ -908,7 +912,7 @@ pub trait GraphStore: Send + Sync {
     /// backends override it. A caller must treat `None` as "no reachable
     /// holder" and fail honestly rather than guess an address.
     ///
-    /// **A real adapter MUST override this** (J2-R1-13). The default exists so
+    /// **A real adapter MUST override this.** The default exists so
     /// the in-tree `GraphStore` test doubles — which store no lease — need no
     /// edit, not as a behaviour any adapter should inherit. An adapter that
     /// keeps it silently disables proxying for every session on that store, and
@@ -927,7 +931,11 @@ pub trait GraphStore: Send + Sync {
     /// upsert shape as [`Self::acquire_lease`] — a refresh is just a re-acquire
     /// by the same holder, so a holder whose lease was stolen after expiry
     /// learns it lost the session ([`LeaseOutcome::Held`]) instead of silently
-    /// squatting a row it no longer owns. Default is advisory (always grants).
+    /// squatting a row it no longer owns. A row that was released or expired
+    /// under another holder is taken over at a NEW token, so a caller must
+    /// compare the returned token with the one it holds: the heartbeat treats
+    /// any other token as a lost lease (#293). Default is advisory (always
+    /// grants).
     async fn refresh_lease(
         &self,
         session: &SessionId,
@@ -944,7 +952,7 @@ pub trait GraphStore: Send + Sync {
     /// Idempotent and holder-scoped: it expires the row only if `holder` still
     /// owns it, so a stale release (after our lease already expired and was
     /// re-taken) can never evict the *new* holder. It never deletes the row:
-    /// the row's fencing token must outlive every holder (#23 review H2; see
+    /// the row's fencing token must outlive every holder (#23; see
     /// [`lease`]). Default is a no-op.
     async fn release_lease(
         &self,
@@ -954,15 +962,15 @@ pub trait GraphStore: Send + Sync {
         Ok(())
     }
 
-    /// **J4.** Record that the session's lease was just refused to `refused_by`
+    /// Record that the session's lease was just refused to `refused_by`
     /// (the refused writer's holder token) against `current_holder` (the
     /// incumbent, from the lease row at refusal time). `at` is stamped by the
-    /// store's own clock — never a caller instant (F18).
+    /// store's own clock — never a caller instant.
     ///
     /// The refused writer is alive on this path and calls this when it learns
     /// it lost; the incumbent learns the fact here too (its
     /// [`Self::pending_lease_refusals`] poll), which is what lets a refused
-    /// acquisition appear in the ledger **from both sides** (J4). Best-effort: a
+    /// acquisition appear in the ledger **from both sides**. Best-effort: a
     /// store that cannot record (advisory default) is still a store that
     /// refuses; the refusal simply carries no cross-process record.
     async fn record_lease_refusal(
@@ -974,7 +982,7 @@ pub trait GraphStore: Send + Sync {
         Ok(())
     }
 
-    /// **J4.** Refusals recorded against `session` at or after store-clock
+    /// Refusals recorded against `session` at or after store-clock
     /// `since`, newest first. The incumbent holder polls this to learn it
     /// turned away a takeover and to append its own ledger line. Default:
     /// none (advisory stores record nothing).
@@ -987,10 +995,10 @@ pub trait GraphStore: Send + Sync {
     }
 
     // -----------------------------------------------------------------------
-    // Flush stats publication (T85-3)
+    // Flush stats publication
     // -----------------------------------------------------------------------
 
-    /// Persist this session's observable flush stats (T85-3).
+    /// Persist this session's observable flush stats.
     ///
     /// Called ONLY by the lease-holding writer's `FlushTask` after a flush
     /// cycle, so a reader in another process can render real
@@ -999,8 +1007,9 @@ pub trait GraphStore: Send + Sync {
     /// the flush path.
     ///
     /// **Default is a no-op** so non-target backends, test doubles, and the
-    /// advisory-default stores keep their prior behaviour; the three real
-    /// stores (`MemoryStore`, `SqliteStore`, `CockroachStore`) override it.
+    /// advisory-default stores keep their prior behaviour; the real stores
+    /// (`MemoryStore`, `SqliteStore`, and `PgStore`, which is both
+    /// `CockroachStore` and `PostgresStore`) override it.
     async fn write_flush_stats(
         &self,
         _session: &SessionId,
@@ -1009,7 +1018,7 @@ pub trait GraphStore: Send + Sync {
         Ok(())
     }
 
-    /// Read the session's persisted flush stats (T85-3), for a reader.
+    /// Read the session's persisted flush stats, for a reader.
     ///
     /// Returns `None` when no writer has published yet, or when the store does
     /// not support it — the honest `n/a` fallback, not a fabricated value.
@@ -1031,7 +1040,7 @@ pub trait GraphStore: Send + Sync {
     ///
     /// Returns one [`SessionHealth`] per non-erased session, ordered by
     /// `session_id` ascending. Erased session tombstones (`lambo:erased`) are
-    /// omitted. Live lease checks use the store's own clock (F18), never a
+    /// omitted. Live lease checks use the store's own clock, never a
     /// caller instant. Read-only: takes no lease and mutates nothing.
     ///
     /// Default fails closed with [`StoreError::Capability`] so an adapter that
@@ -1057,7 +1066,7 @@ pub const COCKROACH_DSN_ENV: &str = "LAMBO_COCKROACH_DSN";
 /// Environment variable carrying the PostgreSQL DSN.
 ///
 /// Must equal `PostgresDialect::DSN_ENV`; `store::pg::postgres`'s test module
-/// asserts it. Before E2E-F2 this name was printed in the missing-DSN error and
+/// asserts it. Previously this name was printed in the missing-DSN error and
 /// read by nothing in configuration resolution.
 pub const POSTGRES_DSN_ENV: &str = "LAMBO_POSTGRES_DSN";
 
@@ -1088,27 +1097,26 @@ pub const POSTGRES_IAM_ENV: &str = "LAMBO_POSTGRES_IAM";
 /// Deserialize accepts the same aliases as [`FromStr`] (trimmed, case-insensitive):
 /// `memory|mem|ram`, `cockroach|crdb`, `postgres|pg`, `sqlite|sqlite3`.
 ///
-/// **Alias split (B1).** Until 0.3.0, `"postgres"` and `"pg"` mapped onto
+/// **Alias split.** Until 0.3.0, `"postgres"` and `"pg"` mapped onto
 /// [`StoreKind::Cockroach`]. That was a choice: both engines speak the Postgres
 /// wire protocol through the same sqlx driver, and there was no PostgreSQL
 /// dialect yet. It is also a lie the Cockroach adapter's `VECTOR(n)`,
-/// `CREATE VECTOR INDEX`, and `::STRING` never meant on PostgreSQL. B1 splits
-/// the aliases so no string maps across the boundary; a leftover
-/// `kind = "postgres"` pointed at Cockroach fails loud at construction (B2
-/// has not landed DDL) rather than silently ranking with Cockroach SQL.
+/// `CREATE VECTOR INDEX`, and `::STRING` never meant on PostgreSQL. The split
+/// means no string maps across the boundary: `kind = "postgres"` builds the
+/// PostgreSQL adapter and never ranks with Cockroach SQL.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StoreKind {
     /// In-RAM adapter (tests, fixture-ok tracks). Feature: `store-memory`.
     #[default]
     Memory,
-    /// CockroachDB primary (P3 / T3.2). Feature: `store-cockroach`.
+    /// CockroachDB primary. Feature: `store-cockroach`.
     /// Config strings: `"cockroach"`, `"crdb"`. Not `"postgres"` / `"pg"`.
     Cockroach,
-    /// PostgreSQL + pgvector (workstream B). Feature: `store-postgres`.
-    /// Config strings: `"postgres"`, `"pg"`. Fail-closed until B2 lands DDL.
+    /// PostgreSQL + pgvector. Feature: `store-postgres`.
+    /// Config strings: `"postgres"`, `"pg"`.
     Postgres,
-    /// SQLite offline / test tier (P3 / T3.3). Feature: `store-sqlite`.
+    /// SQLite offline / test tier. Feature: `store-sqlite`.
     Sqlite,
 }
 
@@ -1158,11 +1166,11 @@ impl StoreKind {
     pub const fn is_ready(self) -> bool {
         match self {
             Self::Memory => cfg!(feature = "store-memory"),
-            // T3.2: CockroachStore landed.
+            // CockroachStore landed.
             Self::Cockroach => cfg!(feature = "store-cockroach"),
-            // B2: templated width + hnsw from init. Compiled is ready.
+            // Templated width + hnsw from init. Compiled is ready.
             Self::Postgres => cfg!(feature = "store-postgres"),
-            // T3.3: SqliteStore lands with feature store-sqlite.
+            // SqliteStore lands with feature store-sqlite.
             Self::Sqlite => cfg!(feature = "store-sqlite"),
         }
     }
@@ -1225,8 +1233,7 @@ pub struct StoreConfig {
     /// absent: `LAMBO_COCKROACH_DSN` for `cockroach`, `LAMBO_POSTGRES_DSN` for
     /// `postgres`, with `DATABASE_URL` as a shared fallback for both. When this
     /// **is** set and the environment names a different database,
-    /// [`StoreConfig::overlay_env`] refuses rather than picking a winner
-    /// (E2E-F2).
+    /// [`StoreConfig::overlay_env`] refuses rather than picking a winner.
     #[serde(default)]
     pub dsn: Option<String>,
     /// SQLite file path or `sqlite::memory:`.
@@ -1243,8 +1250,7 @@ pub struct StoreConfig {
     /// comparison in `resolve_backends`**, not something `check_vector_compatibility`
     /// performs — the latter stays an *echo* for a width-agnostic store either way,
     /// since `vector_dimensions()` reports the pin itself once one is set, so the
-    /// comparison is `x == x` with a pin exactly as it is without one (F-R1-2 /
-    /// F-R2-3).
+    /// comparison is `x == x` with a pin exactly as it is without one.
     ///
     /// **Reporting** ignores it on Cockroach: `VECTOR(n)` is parsed out of its own
     /// DDL, which is a real schema authority and outranks a config assertion. The
@@ -1253,7 +1259,7 @@ pub struct StoreConfig {
     /// stale pin failing loud is the pin's whole job; on a store that persists no
     /// vectors at all (`memory`) the pin still asserts a width, and asserting one
     /// this process cannot honour is a config error worth refusing rather than
-    /// silently ignoring (F-R2-4).
+    /// silently ignoring.
     #[serde(default)]
     pub vector_dim: Option<usize>,
 }
@@ -1297,18 +1303,18 @@ impl StoreConfig {
     /// Resolve a non-empty DSN from env for one store kind, with the name of
     /// the variable it came from.
     ///
-    /// # Why this is kind-aware (E2E-F2)
+    /// # Why this is kind-aware
     ///
     /// It used to read `LAMBO_COCKROACH_DSN` then `DATABASE_URL` for every
-    /// kind. B1 then added `postgres`, so a `kind = "postgres"` deployment took
-    /// its DSN from a variable named after the other engine: on a machine whose
-    /// `.env` carries a production Cockroach DSN, every verb of a Postgres
-    /// config pointed at that cluster. Meanwhile `LAMBO_POSTGRES_DSN` existed
-    /// as the Postgres dialect's `DSN_ENV` associated constant (named rather
-    /// than linked: `store::pg::dialect` is a private module, and a doc link
-    /// into one is the warning class E2E-F7 closed and B-E2E-R2-6 re-closed),
-    /// was named in the missing-DSN error an operator is told to act on, and
-    /// was read by nothing in configuration resolution.
+    /// kind. The alias split then added `postgres`, so a `kind = "postgres"`
+    /// deployment took its DSN from a variable named after the other engine:
+    /// on a machine whose `.env` carries a production Cockroach DSN, every verb
+    /// of a Postgres config pointed at that cluster. Meanwhile
+    /// `LAMBO_POSTGRES_DSN` existed as the Postgres dialect's `DSN_ENV`
+    /// associated constant (named rather than linked: `store::pg::dialect` is a
+    /// private module, and a doc link into one is a rustdoc warning), was named
+    /// in the missing-DSN error an operator is told to act on, and was read by
+    /// nothing in configuration resolution.
     ///
     /// So each DSN-bearing kind now reads its own variable, and the error
     /// message names a variable that works.
@@ -1351,7 +1357,7 @@ impl StoreConfig {
     /// Non-empty env values win over file. Empty env values are treated as unset and leave
     /// the file value intact (including empty `LAMBO_COCKROACH_DSN=` placeholders in `.env`).
     ///
-    /// # The one exception: a DSN the file already chose (E2E-F2)
+    /// # The one exception: a DSN the file already chose
     ///
     /// An explicitly configured `store.dsn` is **not** silently replaced by the
     /// environment. If the two name different databases this refuses and names
@@ -1362,26 +1368,27 @@ impl StoreConfig {
     ///
     /// "Different databases" is measured by `store_dsn_identity` in
     /// `src/store/dsn.rs` (private, so named rather than linked from this
-    /// public item: E2E-F7's class again), not by string equality, so
+    /// public item), not by string equality, so
     /// the common secret-handling shape keeps working: a file DSN that names
     /// the database and an environment DSN that adds the password are the same
     /// database, the environment's spelling wins, and nothing is refused. Two
     /// spellings that differ in host, port, database or user are two databases
     /// and are refused.
     ///
-    /// # What is compared is not what is printed (B-E2E-R4-2)
+    /// # What is compared is not what is printed
     ///
     /// The message quotes `store_dsn_echo`, not the identity. A spelling
     /// neither parser recognises is not quotable — it prints as
     /// `<unparseable dsn>`, because the only way to promise "(passwords
-    /// stripped)" about a string we could not parse is to not echo it
-    /// (B-E2E-R3-1) — but it is still *comparable*, and comparing it is this
-    /// refusal's entire job. Round 3 used one function for both and so compared
-    /// the placeholder: two malformed DSNs then looked identical here, the
-    /// refusal fell silent, and the environment took a different real host than
-    /// the file named. That is E2E-F2 reopened, and it is why the two halves are
-    /// two functions. When a quote is withheld the message says so, so that two
-    /// identical-looking placeholders do not read as a spurious refusal.
+    /// stripped)" about a string we could not parse is to not echo it — but it
+    /// is still *comparable*, and comparing it is this refusal's entire job. An
+    /// earlier version used one function for both and so compared the
+    /// placeholder: two malformed DSNs then looked identical here, the refusal
+    /// fell silent, and the environment took a different real host than the
+    /// file named. That is the silent override this refusal exists to prevent,
+    /// reopened, and it is why the two halves are two functions. When a quote
+    /// is withheld the message says so, so that two identical-looking
+    /// placeholders do not read as a spurious refusal.
     pub fn overlay_env(mut self) -> Result<Self, StoreError> {
         if let Some(k) = Self::env_kind()? {
             self.kind = k;
@@ -1389,9 +1396,9 @@ impl StoreConfig {
         if let Some((var, env_dsn)) = Self::dsn_from_env_for_kind(self.kind) {
             if let Some(file_dsn) = self.dsn.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 // Compared on identity, printed on echo: two different jobs and
-                // two different functions since B-E2E-R4-2. Collapsing them was
-                // what let two malformed-but-dialable DSNs naming different
-                // hosts compare equal here and reopen E2E-F2.
+                // two different functions. Collapsing them was what let two
+                // malformed-but-dialable DSNs naming different hosts compare
+                // equal here and let the environment silently override the file.
                 let id_file = crate::store::dsn::store_dsn_identity(file_dsn);
                 let id_env = crate::store::dsn::store_dsn_identity(&env_dsn);
                 if id_file != id_env {
@@ -1424,7 +1431,7 @@ impl StoreConfig {
 fn missing_feature(kind: StoreKind) -> StoreError {
     StoreError::Backend(format!(
         "store kind `{kind}` is not compiled into this binary; rebuild with \
-         `--features {}` (see dev-diary/notes/level-b-pluggability.md)",
+         `--features {}` (see Features in docs/reference/config.mdx)",
         kind.feature_name()
     ))
 }
@@ -1449,7 +1456,7 @@ pub(crate) enum StoreAccessMode {
 /// [`build_store`], plus the process's configured dense-vector width.
 ///
 /// SQLite consumes it: `concepts.embedding` is a `BLOB` with no width of its
-/// own. Postgres consumes it too: B2 templates the width into `vector(n)` at
+/// own. Postgres consumes it too: it templates the width into `vector(n)` at
 /// init, so this function copies the argument into the pin slot when the pin
 /// is absent. Cockroach parses `VECTOR(n)` out of its own DDL and ignores this.
 ///
@@ -1457,7 +1464,7 @@ pub(crate) enum StoreAccessMode {
 ///
 /// 1. [`StoreConfig::vector_dim`] — the operator's explicit pin, an assertion about
 ///    what the database holds. Wins over the embedder because it is the only one of
-///    the three that is an independent authority (F-R1-2).
+///    the three that is an independent authority.
 /// 2. the `vector_dim` argument — `resolve::resolve_backends` passes
 ///    `Some(embedder_cfg.dim)`, so with no pin the store reports the width the
 ///    process configured rather than a constant baked into the adapter. Note this
@@ -1465,9 +1472,9 @@ pub(crate) enum StoreAccessMode {
 ///    check on that path — and setting a pin does not change that: the pin becomes
 ///    the reported width, so the echo echoes the pin. What bites on a pin/embedder
 ///    disagreement is the explicit comparison in `resolve::resolve_backends`, which
-///    runs *before* `check_vector_compatibility` and returns first (F-R2-3).
+///    runs *before* `check_vector_compatibility` and returns first.
 /// 3. the [`crate::embed::EmbedderConfig`] default — a **default, not a configured
-///    width** (F-R1-8). Direct `build_store` callers (provision tools, store-only
+///    width**. Direct `build_store` callers (provision tools, store-only
 ///    verbs such as `resolve_store_only`, tests) land here, and nothing on that path
 ///    configured or verified the number: it may disagree with every session in the
 ///    database. It exists so no adapter needs a width constant of its own, and it is
@@ -1548,7 +1555,7 @@ pub(crate) fn build_store_with_options(
             // startup context; see sqlite/mod.rs).
             #[cfg(feature = "store-sqlite")]
             {
-                // CON-3 (D2): a missing path is a hard error, mirroring
+                // A missing path is a hard error, mirroring
                 // CockroachStore's missing-DSN check above — the durable tier
                 // must never silently fall back to an ephemeral in-memory
                 // database whose data evaporates at exit. Direct
@@ -1589,7 +1596,7 @@ pub fn store_from_env() -> Result<Box<dyn GraphStore>, StoreError> {
 mod tests {
     use super::*;
 
-    /// J3 F5. The preflight's coverage is derived from the DDL, so this pins the
+    /// The preflight's coverage is derived from the DDL, so this pins the
     /// derivation — including that it reads EVERY table in the shipped
     /// migration, which is what stops the check drifting behind the next schema
     /// addition the way `write_intents` drifted past every existing path.
@@ -1701,7 +1708,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
             "  postgres  ".parse::<StoreKind>().unwrap(),
             StoreKind::Postgres
         );
-        // B1 alias split: no string maps across. A leftover kind = "postgres"
+        // Alias split: no string maps across. A leftover kind = "postgres"
         // must not silently become Cockroach.
         assert_ne!(
             "postgres".parse::<StoreKind>().unwrap(),
@@ -1766,7 +1773,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
 
     #[test]
     fn cockroach_build_behavior() {
-        // T3.2: with the feature compiled, build_store returns a working adapter
+        // With the feature compiled, build_store returns a working adapter
         // (constructed lazily — no connection at build time); without it, fail closed
         // with a rebuild hint and never fall back to memory.
         let cfg = StoreConfig {
@@ -1796,7 +1803,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
 
     #[test]
     fn postgres_build_behavior() {
-        // B2: with the feature compiled, build_store returns a working adapter
+        // With the feature compiled, build_store returns a working adapter
         // (constructed lazily: no connection at build time); without it, fail
         // closed with a rebuild hint and never fall back to memory.
         let cfg = StoreConfig {
@@ -1824,7 +1831,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         }
     }
 
-    /// B2-R1-1: production is `resolve_backends` passing `Some(embedder_cfg.dim)`.
+    /// Production is `resolve_backends` passing `Some(embedder_cfg.dim)`.
     /// Deleting the Postgres-arm copy of that argument into the pin slot must
     /// make this go red (silent init at 1024 against a 768 embedder).
     #[test]
@@ -1887,11 +1894,11 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
             vector_dim: None,
         });
         if cfg!(feature = "store-sqlite") {
-            // T3.3: with the feature on, build_store returns a working adapter.
+            // With the feature on, build_store returns a working adapter.
             let s = r.expect("sqlite store must build under store-sqlite");
-            // F2: SQLite advertises VECTOR_SEARCH, and the capability/width pair must
-            // be self-consistent (CON-5) even on the bare `build_store` path that has
-            // no embedder config to take a width from.
+            // SQLite advertises VECTOR_SEARCH, and the capability/width pair must
+            // be self-consistent even on the bare `build_store` path that has no
+            // embedder config to take a width from.
             assert_eq!(s.capabilities(), Capabilities::VECTOR_SEARCH);
             assert!(s.vector_dimensions().is_some());
             crate::resolve::check_vector_search_contract(s.as_ref(), StoreKind::Sqlite)
@@ -1911,7 +1918,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         }
     }
 
-    /// CON-3 (D2): selecting the sqlite tier without a path is a hard error —
+    /// Selecting the sqlite tier without a path is a hard error —
     /// never a silent fallback to an ephemeral `sqlite::memory:` DB whose data
     /// evaporates at exit.
     #[test]
@@ -1972,7 +1979,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         env.remove("LAMBO_STORE");
         env.remove("LAMBO_SQLITE_PATH");
 
-        // E2E-F2: the base kind used to be `Memory`, a kind with no DSN at all,
+        // The base kind used to be `Memory`, a kind with no DSN at all,
         // and the overlay handed it one anyway. The overlay is kind-aware now,
         // so this half has to run on a kind that really reads a DSN. `dsn: None`
         // is the shape CI and existing deployments use (secret in the
@@ -1996,7 +2003,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         assert_eq!(base.clone().overlay_env().unwrap().dsn, None);
 
         // Empty primary, secondary set: DATABASE_URL still works, which is the
-        // secret path E2E-F2's fix must not break.
+        // secret path the kind-aware overlay must not break.
         env.set("DATABASE_URL", "from-database-url");
         assert_eq!(
             StoreConfig::dsn_from_env().as_deref(),
@@ -2025,7 +2032,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         env.remove("DATABASE_URL");
     }
 
-    /// E2E-F2, the secret path: a file DSN that names the database and an
+    /// The secret path: a file DSN that names the database and an
     /// environment DSN that adds the password are the **same** database. That
     /// must not be refused, and the environment's spelling (the one with the
     /// credentials) is what the process opens.
@@ -2064,7 +2071,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         env.remove("DATABASE_URL");
     }
 
-    /// E2E-F2, the precedence path: an explicitly configured `store.dsn` is
+    /// The precedence path: an explicitly configured `store.dsn` is
     /// never silently replaced by an environment DSN naming a **different**
     /// database. The refusal names both sides and the variable.
     ///
@@ -2122,21 +2129,21 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         }
     }
 
-    /// B-E2E-R4-2: E2E-F2's refusal fires even when neither side can be quoted.
+    /// The DSN-disagreement refusal fires even when neither side can be quoted.
     ///
-    /// This is the round-4 review's constructed reopening, run end to end. Both
-    /// DSNs defeat `parse_postgres_url` (the empty port) and both fail the echo
-    /// gate (the literal "password" in the database name), so under round 3 —
+    /// This is a constructed reopening, run end to end. Both DSNs defeat
+    /// `parse_postgres_url` (the empty port) and both fail the echo gate (the
+    /// literal "password" in the database name), so under an earlier version —
     /// where one function served as both the printer and the identity — the two
     /// sides canonicalised to the same `<unparseable dsn>`, `overlay_env` found
     /// them equal, skipped this refusal, and set `self.dsn` to the
     /// environment's. `sqlx::postgres::PgConnectOptions::from_str` resolves them
     /// to `host-a`/`db_password_a` and `host-b`/`db_password_b`, so that silence
     /// handed every verb, `provision` included, a different real database than
-    /// the config file named. That is the P1 this whole refusal exists for.
+    /// the config file named. That is the failure this whole refusal exists for.
     ///
     /// To watch this go red, make `store::dsn::unaccounted_identity` return the
-    /// placeholder — which is exactly what round 3 shipped.
+    /// placeholder — which is exactly what that earlier version shipped.
     #[test]
     fn two_unquotable_dsns_still_reach_the_disagreement_refusal() {
         let env = env_lock();
@@ -2173,7 +2180,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
 
         // The same spelling on both sides is not a disagreement, and still is
         // not one when it is a spelling we cannot parse. This is the half of
-        // round 3's behaviour that the digest deliberately keeps.
+        // the earlier version's behaviour that the digest deliberately keeps.
         env.set("LAMBO_POSTGRES_DSN", "postgres://app@host-a:/db_password_a");
         assert_eq!(
             cfg.overlay_env().unwrap().dsn.as_deref(),
@@ -2182,7 +2189,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         env.remove("LAMBO_POSTGRES_DSN");
     }
 
-    /// E2E-F2: `LAMBO_POSTGRES_DSN` is the Postgres kind's variable and
+    /// `LAMBO_POSTGRES_DSN` is the Postgres kind's variable and
     /// `LAMBO_COCKROACH_DSN` is the Cockroach kind's. Neither reaches across,
     /// which is what stopped a `kind = "postgres"` config on a machine with a
     /// production `LAMBO_COCKROACH_DSN` in `.env` from opening that cluster.
@@ -2291,7 +2298,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
     #[tokio::test]
     #[cfg(feature = "store-memory")]
     async fn flush_stats_write_then_read_round_trips_memory() {
-        // T85-3: a writer publishes flush stats; a reader (same store, possibly
+        // A writer publishes flush stats; a reader (same store, possibly
         // another process) reads them back. Absent = honest `None` (n/a).
         let store = MemoryStore::new();
         let sid = SessionId::from("stats-roundtrip");

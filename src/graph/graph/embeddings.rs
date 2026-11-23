@@ -1,11 +1,13 @@
 //! The session's embedding space: stamping and replacing the
 //! [`EmbeddingContract`](crate::types::EmbeddingContract), the atomic full
-//! re-embed ([`Graph::reembed_all`]), the same-space backfill
-//! ([`Graph::embed_missing`]) and the contract accessor.
+//! re-embed ([`Graph::reembed_all`]), its in-place twin for a session already
+//! under the live contract ([`Graph::reembed_in_place`]), the same-space
+//! backfill ([`Graph::embed_missing`]) and the contract accessor.
 //!
 //! One session never mixes two model spaces: every path here either verifies
 //! the stamped contract or rewrites the vectors and the contract in one
-//! drained batch (vectors first, contract last).
+//! drained batch (vectors first, contract last; on a session with no
+//! contract, contract first, #322).
 
 use super::{invariant, Graph};
 use crate::types::{LamboError, Mutation, Node, NodeId};
@@ -110,7 +112,7 @@ impl Graph {
     }
 
     /// Atomic full re-embed: rewrite **every** concept vector into a new space
-    /// and swap the session contract in one staged graph transaction (K2).
+    /// and swap the session contract in one staged graph transaction.
     ///
     /// This is the operation `lambo re-embed` runs when a session migrates to a
     /// different embedder (e.g. bge_m3 → candle): the `EmbeddingContract`
@@ -138,19 +140,28 @@ impl Graph {
     ///   migration) and, like the RAM invariants everywhere, refuses a
     ///   non-different contract as a no-op.
     ///
-    /// Mutations are appended in order, so the drained batch carries every
-    /// `UpsertNode` (new vectors) **before** the trailing `SetEmbedding` (new
-    /// contract). The store applies one flushed batch transactionally, so the
-    /// durable session never holds the new contract beside old-space vectors —
-    /// and on a crash mid-flush the old contract and old vectors survive
-    /// together, which is consistent. Callers MUST flush the drained batch to
-    /// the store; until then the RAM graph is ahead of the durable state.
+    /// Mutations are appended in order, so on a stamped session the drained
+    /// batch carries every `UpsertNode` (new vectors) **before** the trailing
+    /// `SetEmbedding` (new contract). The store applies one flushed batch
+    /// transactionally, so the durable session never holds the new contract
+    /// beside old-space vectors — and on a crash mid-flush the old contract
+    /// and old vectors survive together, which is consistent.
+    ///
+    /// On a session with **no** contract (#322) the `SetEmbedding` comes
+    /// **first**. Every store treats a first stamp as the legacy upgrade and
+    /// nulls all of the session's vectors in the same transaction; after the
+    /// upserts it would null the vectors just written, leaving the contract
+    /// and no vector. There is no trusted vector to keep (the load already
+    /// ignores them), so the quarantine runs first and the new vectors land
+    /// after it, as on an ordinary first write. The graph ends the same
+    /// either way. Callers MUST flush the drained batch to the store; until
+    /// then the RAM graph is ahead of the durable state.
     pub fn reembed_all(
         &mut self,
         updates: Vec<(NodeId, Vec<f32>)>,
         contract: crate::types::EmbeddingContract,
     ) -> Result<(), LamboError> {
-        self.reembed(updates, contract, false).map(|_| ())
+        self.reembed(updates, contract, false, false).map(|_| ())
     }
 
     /// [`Graph::reembed_all`], nulling the vector of every image concept
@@ -164,7 +175,49 @@ impl Graph {
         updates: Vec<(NodeId, Vec<f32>)>,
         contract: crate::types::EmbeddingContract,
     ) -> Result<usize, LamboError> {
-        self.reembed(updates, contract, true)
+        self.reembed(updates, contract, true, false)
+    }
+
+    /// In-place full re-embed (#296): rewrite **every** text concept vector
+    /// of a session that **already carries** `contract`, keeping the
+    /// contract.
+    ///
+    /// This is the repair for an embedder canary drift: the embedder behind
+    /// an unchanged contract name (a re-quantised model, another server
+    /// build, a provider revision) no longer produces the vectors already
+    /// stored, and the canary is only ever checked on a session whose stored
+    /// contract equals the live one, which is the state
+    /// [`Graph::reembed_all`] refuses. It is explicit (only
+    /// `lambo re-embed --rewrite-same-contract` calls it) because rewriting a
+    /// space in place is otherwise indistinguishable from a no-op migration.
+    ///
+    /// Everything [`Graph::reembed_all`] checks is checked the same way:
+    /// every text concept exactly once, no image vector left behind (see
+    /// [`Graph::reembed_in_place_dropping_image_vectors`]), every vector of
+    /// the contract's width and finite. In addition the session must carry
+    /// exactly `contract` (another contract is a migration) and hold at
+    /// least one vector (a session with none is a backfill,
+    /// [`Graph::embed_missing`]). The contract does not change, so the
+    /// drained batch is the `UpsertNode`s alone, with no `SetEmbedding`;
+    /// the store applies it in one transaction like any flushed batch.
+    pub fn reembed_in_place(
+        &mut self,
+        updates: Vec<(NodeId, Vec<f32>)>,
+        contract: &crate::types::EmbeddingContract,
+    ) -> Result<(), LamboError> {
+        self.reembed(updates, contract.clone(), false, true)
+            .map(|_| ())
+    }
+
+    /// [`Graph::reembed_in_place`], nulling the vector of every image
+    /// concept as [`Graph::reembed_all_dropping_image_vectors`] does.
+    /// Returns how many image vectors were nulled.
+    pub fn reembed_in_place_dropping_image_vectors(
+        &mut self,
+        updates: Vec<(NodeId, Vec<f32>)>,
+        contract: &crate::types::EmbeddingContract,
+    ) -> Result<usize, LamboError> {
+        self.reembed(updates, contract.clone(), true, true)
     }
 
     fn reembed(
@@ -172,8 +225,23 @@ impl Graph {
         updates: Vec<(NodeId, Vec<f32>)>,
         contract: crate::types::EmbeddingContract,
         drop_image_vectors: bool,
+        in_place: bool,
     ) -> Result<usize, LamboError> {
-        if let Some(existing) = &self.embedding {
+        if in_place {
+            if self.embedding.as_ref() != Some(&contract) {
+                return Err(invariant(
+                    "an in-place re-embed rewrites a session that already carries exactly this \
+                     contract; this session carries another one or none, which is a migration \
+                     (reembed_all)",
+                ));
+            }
+            if !self.concepts().any(|c| c.embedding.is_some()) {
+                return Err(invariant(
+                    "an in-place re-embed needs a stored vector to rewrite; this session holds \
+                     none, so fill its missing vectors with embed_missing",
+                ));
+            }
+        } else if let Some(existing) = &self.embedding {
             if existing.dim != contract.dim {
                 return Err(invariant(format!(
                     "cannot re-embed session from width {} to width {}; a re-embed never \
@@ -247,8 +315,23 @@ impl Graph {
             }
         }
 
+        // #322: on a session with no contract, stamp the contract FIRST. The
+        // store's first-stamp legacy quarantine nulls every vector of the
+        // session in the batch's transaction, so a trailing stamp would erase
+        // the vectors this batch writes. A stamped session keeps the order
+        // below: vectors first, contract last.
+        let stamp_first = !in_place && self.embedding.is_none();
+        if stamp_first {
+            self.embedding = Some(contract.clone());
+            self.append_mutation(Mutation::SetEmbedding {
+                session_id: self.session_id.clone(),
+                embedding: Some(contract.clone()),
+            });
+        }
+
         // Rewrite each concept's vector in the node map, then emit its upsert
-        // mutation (the batch orders every UpsertNode before the SetEmbedding).
+        // mutation (on a stamped session the batch orders every UpsertNode
+        // before the SetEmbedding).
         for (id, vector) in updates {
             // Write through the node map, then emit the upsert from a CLONE:
             // `append_mutation` takes `&mut self`, which cannot overlap the
@@ -288,11 +371,16 @@ impl Graph {
             // #116: a vector change is one a hybrid plan reads.
             self.note_plan_relevant_write(id);
         }
-        self.embedding = Some(contract.clone());
-        self.append_mutation(Mutation::SetEmbedding {
-            session_id: self.session_id.clone(),
-            embedding: Some(contract),
-        });
+        // In place, the contract does not move: no `SetEmbedding`, as for
+        // the backfill below (one would say nothing and read as a migration).
+        // A contract-less session was stamped above.
+        if !in_place && !stamp_first {
+            self.embedding = Some(contract.clone());
+            self.append_mutation(Mutation::SetEmbedding {
+                session_id: self.session_id.clone(),
+                embedding: Some(contract),
+            });
+        }
         Ok(dropped)
     }
 
@@ -302,7 +390,8 @@ impl Graph {
     /// This is the backfill twin of [`Graph::reembed_all`], and the two are
     /// mutually exclusive by design: `reembed_all` migrates *between* spaces
     /// and therefore refuses to run when the live contract is already the
-    /// stored one, which is exactly the state a backfill runs in. Without this
+    /// stored one, which is exactly the state a backfill runs in (rewriting
+    /// the existing vectors of that state is [`Graph::reembed_in_place`]). Without this
     /// method a session that accumulated NULL vectors inside its own current
     /// space had no repair path at all — the 2026-09-01 dogfood finding, where
     /// `lambo re-embed` correctly refused with "already carries exactly this

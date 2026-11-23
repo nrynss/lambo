@@ -38,12 +38,15 @@
 //! ## `last_demotion_time` (COH-3)
 //!
 //! Every demoted observation is stamped with `last_demotion_time = Some(now)`
-//! (the interaction's `created_at` — deterministic, no clock). This is the only
-//! shipped write path that sets the field (spec §10 "Demotion sets
-//! `last_demotion_time`"; T6.3 cooldown / T6.4 depend on it). The matching
+//! (the interaction's `created_at` — deterministic, no clock), so each one
+//! starts inside the Stage 3 re-promotion cooldown (spec §10 "Demotion sets
+//! `last_demotion_time`"; T6.3 cooldown / T6.4 depend on it). It is not the
+//! only write path that sets the field: the canonization evaluator's budget
+//! and supersession demotions carry it on their `CanonizationEvent`, and
+//! `Graph::apply_canonization_transition` stamps it on the concept. The matching
 //! `canonization_events` audit row for the demotion is P6's carry — demote
-//! emits no `CanonizationEvent` (no `Mutation` kind exists for one); see
-//! `dev-diary/notes/adve-wave3-graph-decisions.md`.
+//! emits no `CanonizationEvent` (no `Mutation` kind exists for one), a
+//! decision of the wave-3 graph review.
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -147,7 +150,7 @@ pub fn demote(
             // repromotion cooldown / T6.4 read this field. The matching
             // canonization_events audit row for the demotion is P6's carry
             // (demote emits no CanonizationEvent — no Mutation kind exists for
-            // one; recorded in dev-diary/notes/adve-wave3-graph-decisions.md).
+            // one).
             last_demotion_time: Some(interaction_created_at),
             embedding: None,
             human_confirmed: 0,

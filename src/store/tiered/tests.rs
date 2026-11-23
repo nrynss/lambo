@@ -376,7 +376,7 @@ async fn attach(store: &TieredStore, sid: &SessionId, who: &LeaseHolder) -> u64 
 }
 
 /// Wait for every repair the store has in flight (repairs run in the
-/// background, M1); the one place tests wait for them.
+/// background); the one place tests wait for them.
 async fn settle(store: &TieredStore) {
     store.repairs_settled().await;
 }
@@ -462,7 +462,7 @@ async fn a_committed_flush_is_mirrored_and_the_index_serves_the_vector_leg() {
     assert_eq!(fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
-/// M3: a hit that came back without its stored vector (a cluster that
+/// A hit that came back without its stored vector (a cluster that
 /// excludes vectors from `_source`) keeps the engine's score; the others are
 /// re-scored exactly, and the limit applies after the re-rank.
 #[test]
@@ -672,7 +672,12 @@ async fn a_contract_mismatch_is_refused_and_a_switch_queries_only_the_new_index(
     assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
     assert!(err.to_string().contains("contract"), "{err}");
 
-    // Switch the session to `other` and re-embed only c2.
+    // Switch the session to `other` and re-embed only c2. c1 keeps its
+    // vector durably, now under `other` (a same-width switch quarantines
+    // nothing). Before #319 the mirror indexed only c2 under `other` and
+    // stayed in sync, so c1 was left out of the new contract's index; now
+    // the switch is repaired from the durable store, and the new index
+    // holds what the store holds.
     let switch = batch(
         2,
         vec![
@@ -682,20 +687,205 @@ async fn a_contract_mismatch_is_refused_and_a_switch_queries_only_the_new_index(
                 s.c2,
                 s.origin,
                 "beta",
-                Some(vec![1.0, 0.0, 0.0, 0.0]),
+                Some(vec![1.0, 0.2, 0.0, 0.0]),
             )),
         ],
     );
     store.flush(&switch, Some(token)).await.unwrap();
+    settle(&store).await;
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+    let knn_before = fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
     let got = store
         .vector_candidates_checked(&sid, &PROBE, &other, 10)
         .await
         .unwrap();
     assert_eq!(
-        ids(&got),
-        vec![s.c2],
-        "c1 lives only in the old contract's index and is not ranked"
+        fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst),
+        knn_before + 1,
+        "only the new contract's index is queried"
     );
+    assert_eq!(ids(&got), vec![s.c2, s.c1]);
+    let new_index = fake.index_name(&other);
+    assert!(
+        fake.live(&sid)
+            .values()
+            .all(|(index, _)| index == &new_index),
+        "the old contract's documents are swept"
+    );
+    let err = store
+        .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+}
+
+/// #319: a re-embed migration in `Graph::reembed_all`'s real order (every
+/// `UpsertNode`, then the trailing `SetEmbedding`) through the tier. The
+/// previous mirror projected the new vectors into the OLD contract's index
+/// and nothing into the new one, advanced the marker and stayed in sync
+/// (`formal/LamboProofs/Tiered/History.lean`: `reembed_migration_misindexed`,
+/// `project_reembed_into_old_index`). Now the batch is not mirrored: the
+/// session goes stale and a repair re-indexes it from the durable snapshot
+/// (`mirror_switch_writes_nothing`, `reembed_migration_held_back`), so the
+/// new contract's index holds exactly the re-embedded vectors and the old
+/// contract's documents are swept (`reembed_migration_repaired`).
+#[tokio::test]
+async fn a_reembed_migration_is_indexed_under_the_new_contract() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("reembed");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (s, mut b) = seed_batch(&sid, 1);
+    // A graph loads only concepts its interactions derive.
+    b.mutations
+        .extend([s.c1, s.c2, s.c3].map(|target| Mutation::UpsertEdge {
+            edge: crate::types::Edge {
+                event_time: None,
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                source: s.origin,
+                target,
+                edge_type: crate::types::EdgeType::Derives,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: Utc::now(),
+                last_reinforced: Utc::now(),
+            },
+        }));
+    store.flush(&b, Some(token)).await.unwrap();
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+
+    let next = EmbeddingContract {
+        model: Some("next-model".into()),
+        ..contract()
+    };
+    let rewritten = [
+        (s.c1, vec![0.0, 0.0, 1.0, 0.0]),
+        (s.c2, vec![0.0, 0.0, 0.0, 1.0]),
+        (s.c3, vec![0.0, 0.0, 0.6, 0.8]),
+    ];
+    let mut g =
+        crate::graph::Graph::from_snapshot(primary.load_session(&sid).await.unwrap()).unwrap();
+    g.reembed_all(rewritten.to_vec(), next.clone()).unwrap();
+    let migration = g.drain_log();
+    assert!(
+        matches!(
+            migration.mutations.as_slice(),
+            [
+                Mutation::UpsertNode { .. },
+                Mutation::UpsertNode { .. },
+                Mutation::UpsertNode { .. },
+                Mutation::SetEmbedding { .. }
+            ]
+        ),
+        "reembed_all's order: {:?}",
+        migration.mutations
+    );
+    store.flush(&migration, Some(token)).await.unwrap();
+    settle(&store).await;
+
+    let status = store.tier_status(&sid);
+    assert_eq!(status.sync, TierSync::InSync, "{status:?}");
+    assert_eq!(status.mirror_failures, 0, "a migration is not a failure");
+    assert_eq!(fake.marker(&sid), Some(migration.mutation_epoch));
+    let new_index = fake.index_name(&next);
+    let live = fake.live(&sid);
+    assert_eq!(live.len(), rewritten.len(), "{live:?}");
+    for (id, vector) in &rewritten {
+        let (index, doc) = &live[&id.0.to_string()];
+        assert_eq!(
+            index, &new_index,
+            "{id:?} is indexed under the new contract"
+        );
+        assert_eq!(
+            &doc.embedding, vector,
+            "{id:?} carries its re-embedded vector"
+        );
+    }
+
+    let knn_before = fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    let got = store
+        .vector_candidates_checked(&sid, &[0.0, 0.0, 1.0, 0.1], &next, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst),
+        knn_before + 1,
+        "the new contract's read is served from the index"
+    );
+    assert_eq!(ids(&got), vec![s.c1, s.c3, s.c2]);
+    let err = store
+        .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+}
+
+/// #319, the relabel half: `--allow-embedding-mismatch` flushes a lone
+/// `SetEmbedding` (a same-kind model rename that keeps every vector). The
+/// previous mirror wrote nothing, advanced the marker and stayed in sync, so
+/// the vectors the store now holds under the new contract were in no
+/// document of its index (`relabel_leaves_new_index_empty` in
+/// `formal/LamboProofs/Tiered/History.lean`). Now the batch is repaired from the
+/// durable store (`mirror_switch_writes_nothing`), and the new contract's
+/// index serves the kept vectors.
+#[tokio::test]
+async fn a_relabel_is_indexed_under_the_new_contract() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("relabel");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (s, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+
+    let renamed = EmbeddingContract {
+        model: Some("renamed".into()),
+        ..contract()
+    };
+    store
+        .flush(
+            &batch(2, vec![set_contract(&sid, Some(renamed.clone()))]),
+            Some(token),
+        )
+        .await
+        .unwrap();
+    let status = store.tier_status(&sid);
+    assert_ne!(status.sync, TierSync::InSync, "the relabel is not trusted");
+    assert_eq!(status.mirror_failures, 0, "a relabel is not a failure");
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("contract changed")),
+        "{status:?}"
+    );
+
+    settle(&store).await;
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+    assert_eq!(fake.marker(&sid), Some(2));
+    let new_index = fake.index_name(&renamed);
+    let live = fake.live(&sid);
+    assert_eq!(live.len(), 2, "{live:?}");
+    for (id, vector) in [(s.c1, [1.0, 0.0, 0.0, 0.0]), (s.c2, [0.0, 1.0, 0.0, 0.0])] {
+        let (index, doc) = &live[&id.0.to_string()];
+        assert_eq!(
+            index, &new_index,
+            "{id:?} is indexed under the new contract"
+        );
+        assert_eq!(doc.embedding, vector.to_vec(), "{id:?} keeps its vector");
+    }
+    let knn_before = fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    let got = store
+        .vector_candidates_checked(&sid, &PROBE, &renamed, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst),
+        knn_before + 1,
+        "served from the index"
+    );
+    assert_eq!(ids(&got), vec![s.c1, s.c2]);
     let err = store
         .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
         .await
@@ -871,7 +1061,7 @@ fn one_more(sid: &SessionId, s: &Seeded, epoch: u64) -> (NodeId, MutationBatch) 
     (id, b)
 }
 
-/// M1: a flush that finds its session stale asks for a repair and returns.
+/// A flush that finds its session stale asks for a repair and returns.
 /// The repair (a whole-session read, bulk re-index and delete-by-query) runs
 /// in the background, so it delays neither this batch's durability nor the
 /// next one's.
@@ -897,7 +1087,7 @@ async fn a_flush_does_not_wait_for_the_repair_it_triggers() {
     assert_eq!(fake.marker(&sid), Some(2));
 }
 
-/// M1: attaching to a session whose marker is behind returns at once; reads
+/// Attaching to a session whose marker is behind returns at once; reads
 /// fall back to the primary until the background repair lands.
 #[tokio::test]
 async fn attaching_does_not_wait_for_the_repair() {
@@ -930,7 +1120,7 @@ async fn attaching_does_not_wait_for_the_repair() {
     assert!(fake.live(&sid).contains_key(&s.c1.0.to_string()));
 }
 
-/// M1/M4: one repair per session at a time. Requests that arrive while it
+/// One repair per session at a time. Requests that arrive while it
 /// runs collapse into a single rerun, which picks up what they committed.
 #[tokio::test]
 async fn repairs_run_one_at_a_time_per_session() {
@@ -960,7 +1150,7 @@ async fn repairs_run_one_at_a_time_per_session() {
     assert!(live.contains_key(&c3.0.to_string()) && live.contains_key(&c4.0.to_string()));
 }
 
-/// F4: a flush that commits while a repair runs is not in the repair's
+/// A flush that commits while a repair runs is not in the repair's
 /// snapshot (and was not mirrored: mirrors wait for the session to be in
 /// sync). The repair must not mark the session in sync when it ends; reads
 /// keep falling back until the rerun has indexed that flush too, and then
@@ -1013,7 +1203,7 @@ async fn a_repair_overtaken_by_a_flush_is_not_trusted_until_the_rerun() {
     assert!(fake.live(&sid).contains_key(&c3.0.to_string()));
 }
 
-/// M1: a mirror against a slow cluster is bounded by the mirror deadline;
+/// A mirror against a slow cluster is bounded by the mirror deadline;
 /// the flush returns and the session goes stale for a repair.
 #[tokio::test]
 async fn a_mirror_on_a_slow_cluster_is_bounded() {
@@ -1043,7 +1233,7 @@ async fn a_mirror_on_a_slow_cluster_is_bounded() {
     );
 }
 
-/// M1: a repair stuck past its deadline is abandoned and the session marked
+/// A repair stuck past its deadline is abandoned and the session marked
 /// stale (the backoff spaces the next attempt).
 #[tokio::test]
 async fn a_repair_past_its_deadline_marks_the_session_stale() {
@@ -1069,7 +1259,7 @@ async fn a_repair_past_its_deadline_marks_the_session_stale() {
     fake.release_deletes();
 }
 
-/// F5: a repair task that panics does not wedge the session. Its
+/// A repair task that panics does not wedge the session. Its
 /// single-flight flag is cleared, the session is marked stale, and the next
 /// request starts a fresh repair that lands; the entry stays evictable.
 #[tokio::test]
@@ -1109,7 +1299,7 @@ async fn a_panicking_repair_does_not_wedge_the_session() {
     assert!(!store.tracked_sessions().contains(&sid), "never evicted");
 }
 
-/// F2: the holder stalls past its lease TTL in the middle of a repair, and
+/// The holder stalls past its lease TTL in the middle of a repair, and
 /// another process erases the session. The repair checks the durable lease
 /// before each bulk chunk, the sweep and the marker, so once it resumes it
 /// writes nothing more: the erased session is not rebuilt in the index. The
@@ -1161,7 +1351,7 @@ async fn a_repair_that_lost_its_lease_stops_writing() {
     assert_eq!(store.with_state(&sid, |st| st.held), None);
 }
 
-/// F6: an erase through the store that is running a repair of the session
+/// An erase through the store that is running a repair of the session
 /// (its lease lapsed, so the erase may proceed) stops that repair and waits
 /// for it before sweeping. Nothing the repair had in flight survives the
 /// erase, and its state does not come back.
@@ -1207,7 +1397,7 @@ async fn erase_stops_this_stores_repair_before_it_sweeps() {
     );
 }
 
-/// F2, the mirror side: a flush the primary accepted is not mirrored once
+/// Lease loss, the mirror side: a flush the primary accepted is not mirrored once
 /// this store has recorded the lease as lost (a refused heartbeat between
 /// the commit and the mirror); the session goes stale instead.
 #[tokio::test]
@@ -1231,7 +1421,42 @@ async fn a_flush_is_not_mirrored_after_the_lease_was_lost() {
     assert_eq!(store.tier_status(&sid).sync, TierSync::Stale);
 }
 
-/// M1: releasing the lease gives an in-flight repair a grace period, then
+/// #293 review: a refresh that re-takes the lease (after the operator
+/// override, or another writer that came and went) comes back at a new token
+/// the session's writer does not hold; the heartbeat fences on it. The tier
+/// must not adopt that token either, or a fenced handle's index repair would
+/// pass `ensure_fenced` under it until the lease lapsed.
+#[tokio::test]
+async fn a_refresh_that_retakes_the_lease_does_not_adopt_its_token() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("retaken");
+    let w = holder("w");
+    let token = attach(&store, &sid, &w).await;
+    let ttl = Duration::from_secs(60);
+
+    // A healthy refresh keeps the held token.
+    assert!(store
+        .refresh_lease(&sid, &w, ttl)
+        .await
+        .unwrap()
+        .is_acquired());
+    assert_eq!(store.with_state(&sid, |st| st.held), Some(token));
+
+    // The override expires the row on the primary; the refresh re-takes it.
+    primary.release_lease(&sid, &w).await.unwrap();
+    let LeaseOutcome::Acquired(info) = store.refresh_lease(&sid, &w, ttl).await.unwrap() else {
+        panic!("the refresh re-takes the released row");
+    };
+    assert_eq!(info.token, token + 1);
+    assert_eq!(
+        store.with_state(&sid, |st| st.held),
+        None,
+        "a re-taken token is not the writer's: the tier must stop calling it held"
+    );
+}
+
+/// Releasing the lease gives an in-flight repair a grace period, then
 /// abandons it rather than holding the release (and `close`) hostage.
 #[tokio::test]
 async fn releasing_the_lease_abandons_a_stuck_repair_after_the_grace() {
@@ -1258,7 +1483,7 @@ async fn releasing_the_lease_abandons_a_stuck_repair_after_the_grace() {
     assert!(fake.live(&sid).contains_key(&c2.0.to_string()));
 }
 
-/// F7: every fetched hit carries its stored vector, so the over-fetch is
+/// Every fetched hit carries its stored vector, so the over-fetch is
 /// what bounds a read's response. It stays `limit + 16` for ordinary limits
 /// and never exceeds the store-wide candidate limit.
 #[tokio::test]
@@ -1307,7 +1532,7 @@ async fn an_index_query_failure_serves_the_read_from_the_primary() {
     assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
 }
 
-/// M2: after `threshold` consecutive failed reads the breaker opens and
+/// After `threshold` consecutive failed reads the breaker opens and
 /// reads go straight to the durable store without asking the index; after
 /// the cool-down one read probes it, and a success closes the breaker.
 #[tokio::test]
@@ -1351,7 +1576,7 @@ async fn failing_index_reads_open_a_breaker_that_a_probe_closes() {
     assert_eq!(knn(), 5, "closed again");
 }
 
-/// M2: a read that hangs (a blackholed cluster) is cut at the read
+/// A read that hangs (a blackholed cluster) is cut at the read
 /// deadline, served from the durable store, and counts toward the breaker.
 #[tokio::test]
 async fn a_hanging_index_read_is_cut_at_the_deadline_and_counts() {
@@ -1386,7 +1611,7 @@ async fn a_hanging_index_read_is_cut_at_the_deadline_and_counts() {
     );
 }
 
-/// L5: releasing the lease drops the session's tier state.
+/// Releasing the lease drops the session's tier state.
 #[tokio::test]
 async fn releasing_the_lease_forgets_the_session() {
     let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
@@ -1401,7 +1626,7 @@ async fn releasing_the_lease_forgets_the_session() {
     assert!(!store.tracked_sessions().contains(&sid));
 }
 
-/// L5: a reader that touches many sessions keeps a bounded map, evicting
+/// A reader that touches many sessions keeps a bounded map, evicting
 /// sessions it neither holds nor repairs, least recently used first; a held
 /// session is never evicted.
 #[tokio::test]
@@ -1489,7 +1714,7 @@ async fn a_marker_behind_the_durable_epoch_is_caught_at_the_next_load() {
     assert_eq!(fake.marker(&sid), Some(2));
 }
 
-/// F1: a reader loads the session after the holder's flush committed but
+/// A reader loads the session after the holder's flush committed but
 /// before its mirror landed, so it sees the marker behind. That is the same
 /// race as a marker ahead, from the other side: once the mirror lands, the
 /// reader's next read re-checks and serves from the index again.
@@ -1533,7 +1758,7 @@ async fn a_reader_that_saw_the_marker_behind_returns_once_the_mirror_lands() {
     assert_eq!(reader.tier_status(&sid).sync, TierSync::InSync);
 }
 
-/// F1: the re-check is bounded. A reader that keeps finding the marker
+/// The re-check is bounded. A reader that keeps finding the marker
 /// behind costs one durable load per session per backoff, not one per read.
 #[tokio::test]
 async fn a_reader_rechecks_a_stale_session_at_most_once_per_backoff() {
@@ -1565,7 +1790,7 @@ async fn a_reader_rechecks_a_stale_session_at_most_once_per_backoff() {
     assert_eq!(reader.tier_status(&sid).sync, TierSync::Stale);
 }
 
-/// F1, the holder's side: a holder whose session went stale and that does
+/// The same race, the holder's side: a holder whose session went stale and that does
 /// not flush again still gets its index back. A read asks for the repair.
 #[tokio::test]
 async fn a_holder_read_of_a_stale_session_asks_for_a_repair() {
@@ -1590,7 +1815,7 @@ async fn a_holder_read_of_a_stale_session_asks_for_a_repair() {
     assert_eq!(got.first().map(|h| h.item), Some(s.c1));
 }
 
-/// M4: the holder's process loads an older snapshot (e1) while its own flush
+/// The holder's process loads an older snapshot (e1) while its own flush
 /// has already committed and mirrored e2, so the marker is *ahead* of the
 /// load. That is not staleness: repairing from the older snapshot would
 /// re-index the node e2 deleted, delete the concept e2 added and rewind the
@@ -1647,7 +1872,7 @@ async fn a_marker_ahead_of_the_loaded_snapshot_is_rechecked_not_repaired() {
     assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
 }
 
-/// M4: a marker that is still ahead after the re-load is left alone: the
+/// A marker that is still ahead after the re-load is left alone: the
 /// session is not trusted (reads fall back) and nothing is repaired from a
 /// snapshot older than what the index already reflects.
 #[tokio::test]
@@ -1686,7 +1911,7 @@ async fn a_marker_still_ahead_after_a_reload_is_never_repaired_from() {
     assert_eq!(store.tier_status(&sid).sync, TierSync::Unknown);
 }
 
-/// F3: a marker that stays ahead for a holder (the durable store was
+/// A marker that stays ahead for a holder (the durable store was
 /// restored from a backup while the index survived) is not a race. It is
 /// never repaired from, and the holder backs off: its flushes do not each
 /// pay a full durable load (and a warning) to find the same thing.
@@ -1967,7 +2192,7 @@ async fn an_unattributable_delete_only_batch_deletes_by_id() {
     );
 }
 
-/// L4: an unleased write (the seed and fixture path) is never mirrored. The
+/// An unleased write (the seed and fixture path) is never mirrored. The
 /// engine would apply it with internal versioning, which bumps an externally
 /// versioned document to V+1 and collides with the next leased write at
 /// `(T << 32) | (c + 1)`: that write's 409 counts as success and a stale
@@ -2013,7 +2238,7 @@ async fn plant_snapshot(primary: &Arc<dyn GraphStore>, fake: &FakeIndex, sid: &S
     }
 }
 
-/// H1, the by-id half: a delete-by-id that loses a document to a version
+/// Nothing left searchable, the by-id half: a delete-by-id that loses a document to a version
 /// conflict is retried, not counted as done.
 #[tokio::test]
 async fn an_unattributed_delete_retries_a_version_conflict() {
@@ -2156,7 +2381,7 @@ async fn erase_removes_the_session_from_the_index_and_a_rerun_finishes_it() {
     assert_eq!(fake.live(&other).len(), 2, "other sessions untouched");
 }
 
-/// H1: the writer's last flush was mirrored with `refresh=false` and erase
+/// The writer's last flush was mirrored with `refresh=false` and erase
 /// runs inside one refresh interval. Delete-by-query only sees what a
 /// refresh exposed, so the erase must refresh first, and must not report
 /// done while anything of the session is still searchable.
@@ -2190,7 +2415,7 @@ async fn erase_removes_documents_a_refresh_has_not_exposed_yet() {
     assert_eq!(fake.marker(&sid), None);
 }
 
-/// H1, the repair half: a repair's "delete everything below the version I
+/// Nothing left searchable, the repair half: a repair's "delete everything below the version I
 /// just wrote" must also catch documents mirrored inside the last refresh
 /// interval, or a node deleted durably keeps a searchable vector.
 #[tokio::test]
@@ -2225,7 +2450,7 @@ async fn a_repair_sweeps_documents_a_refresh_has_not_exposed_yet() {
     assert_eq!(fake.marker(&sid), Some(2));
 }
 
-/// H1: a document rewritten between delete-by-query's scroll and its delete
+/// A document rewritten between delete-by-query's scroll and its delete
 /// is a version conflict the engine skips under `conflicts=proceed`. Erase
 /// retries it, and reports done only once a count finds nothing left.
 #[tokio::test]
@@ -2447,7 +2672,7 @@ mod sqlite_parity {
         assert!(fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
     }
 
-    /// M3: an engine that scores approximately (int8 quantization, an f32
+    /// An engine that scores approximately (int8 quantization, an f32
     /// `_score`) only prunes the pool. The tier re-ranks what it returns with
     /// the stored vectors, so ranks and scores are the exact scan's, bit for
     /// bit, and near-ties at the limit resolve by the issue-2 tie-break.
@@ -2492,7 +2717,7 @@ mod sqlite_parity {
         assert!(fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
     }
 
-    /// M3: two vectors the quantizer orders the wrong way round. Asked for
+    /// Two vectors the quantizer orders the wrong way round. Asked for
     /// one, the engine alone would return the wrong one; the over-fetch
     /// hands both to the exact re-rank, which picks the right one.
     #[tokio::test]
@@ -2587,7 +2812,7 @@ async fn a_reload_after_a_clean_mirror_is_in_sync() {
 }
 
 // ---------------------------------------------------------------------------
-// Hybrid derive on a holder over the tier (#18 review M6, amending #8)
+// Hybrid derive on a holder over the tier (#18, amending #8)
 // ---------------------------------------------------------------------------
 
 /// Reduces hybrid's "concept - context" framing to the label, so the
@@ -2605,7 +2830,7 @@ impl crate::embed::Embedder for LabelEmbedder {
         self.embed_as(text, crate::test_util::TextRole::Document)
             .await
     }
-    // #22 design R6: a delegating embedder forwards every method, or it
+    // #22: a delegating embedder forwards every method, or it
     // silently inherits the defaults (a query embedded as a document, an
     // image refused).
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
@@ -2642,7 +2867,7 @@ impl LabelEmbedder {
     }
 }
 
-/// M6: a paraphrase derived seconds after the original merges into it on a
+/// A paraphrase derived seconds after the original merges into it on a
 /// holder over the tier, although the index has not seen the original (not
 /// flushed, and the index lags). Derive's semantic merge ranks in the
 /// holder's graph and never asks the index; recall still does.
@@ -2720,7 +2945,7 @@ async fn a_holder_derive_merges_a_paraphrase_the_index_has_not_seen() {
     mem.close().await.unwrap();
 }
 
-/// #22 PR 3 on a holder over the tier (M6): an image derive asks the index
+/// #22 PR 3 on a holder over the tier: an image derive asks the index
 /// nothing; a text derive whose nearest neighbour in the holder's graph is
 /// the image (cosine 1 here) stays a separate concept instead of merging
 /// into a picture; and the image's vector is mirrored into the index like
@@ -2881,7 +3106,7 @@ async fn a_recall_by_image_or_vector_over_the_tier_reads_the_index() {
     mem.close().await.unwrap();
 }
 
-/// Graded similarity over the tier (M2): #18's index answers a non-trivial
+/// Graded similarity over the tier: #18's index answers a non-trivial
 /// order, looks at cosines 0.8, 0.5 and 0.3 to a client vector, best
 /// first, and no recent leg lets the two unrelated looks derived last
 /// outrank the 0.3 one.
@@ -3012,7 +3237,7 @@ async fn graded_over_a_tier_with_an_exact_primary(
     (mem, fake, exact, contract, looks)
 }
 
-/// #22 PR 6 review Low 2: a recall by query vector over the tier when the
+/// #22: a recall by query vector over the tier when the
 /// index fails is served by the durable store's exact vector read, first
 /// on the failed index read itself and then with the breaker open (the
 /// index is not asked again). The graded order is the fallback's, and the
@@ -3058,7 +3283,7 @@ async fn a_recall_by_vector_over_a_failing_tier_is_served_by_the_durable_store()
     mem.close().await.unwrap();
 }
 
-/// #22 PR 6 review Low 2: when the durable fallback fails too, a recall by
+/// #22: when the durable fallback fails too, a recall by
 /// query vector fails (it has nothing to degrade to), as a bare store class
 /// with the backend detail kept out of the model-facing message.
 #[cfg(feature = "embed-fixture")]

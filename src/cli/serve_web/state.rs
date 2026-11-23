@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::auth::{portal_authority, AuthToken, HostCheck, PortalAuthority, WebCredential};
+use super::discovery::Discovery;
 use super::views::{SessionView, ViewBounds, ViewCache};
 use crate::cli::caps::CliError;
 use crate::config::{AllowedHost, WebConfig};
@@ -21,7 +22,11 @@ pub(super) struct AppState {
     /// Every served session, in order, the default first: the allowlist.
     pub(super) sessions: Vec<SessionId>,
     /// `[web] list_sessions`: is `GET /api/sessions` registered (#4 PR 3)?
+    /// Also on with `[web] discover_sessions` on a loopback bind (#276).
     pub(super) list_sessions: bool,
+    /// `[web] discover_sessions` (#276): store-wide discovery, off by
+    /// default ([`super::discovery`]).
+    pub(super) discovery: Discovery,
     pub(super) backends: ResolvedBackends,
     /// True when `--bind` reaches beyond loopback. A non-loopback bind always
     /// carries a credential (see [`authorize_bind_web`](super::auth::authorize_bind_web)).
@@ -68,7 +73,10 @@ impl AppState {
             host_check: HostCheck::for_authority(&authority, allowed_hosts),
             authority,
             sessions,
-            list_sessions: web.list_sessions,
+            // Discovery's listing is automatic on loopback only; beyond
+            // it the operator still opts in with `list_sessions` (#276).
+            list_sessions: web.list_sessions || (web.discover_sessions && !exposed),
+            discovery: Discovery::new(web.discover_sessions),
             default_session,
             backends,
             exposed,

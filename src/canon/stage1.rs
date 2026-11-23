@@ -1,7 +1,7 @@
-//! Stage 1 — Candidate (T6.1, spec §10, #36 PR 3).
+//! Stage 1 — Candidate (spec §10, #36 PR 3).
 //!
 //! Pure predicate: reports which concepts currently clear Stage 1. It does
-//! **not** apply a `None → Candidate` transition (T6.4 owns writes).
+//! **not** apply a `None → Candidate` transition (the canonization task owns writes).
 //!
 //! ## Evidence-led admission (#36 PR 3)
 //!
@@ -21,7 +21,7 @@
 //! Canonical concepts are never candidates. There is **no peer minimum and no
 //! percentile cut**: the spec's "20 non-Canonical peers and strictly above
 //! P90" was a quota, and a quota moves with whatever else the session holds.
-//! Measured on a rig snapshot (design note `design-36-canonization.md`),
+//! Measured on a rig snapshot (#36's design analysis),
 //! replaying recall traffic at k = 0/1/2 moved the P90 Canonical count
 //! 68/74/78 and flipped which fair-test ruling reached Venerable; the evidence
 //! floor gave the same set every time. A young or small session (fewer than
@@ -35,7 +35,7 @@
 //! The order only decides which members a bounded cycle takes first
 //! (`EvalParams::batch_size`); it never decides membership, so access
 //! frequency (#30) can reorder the queue but cannot admit or refuse anyone.
-//! A missing, non-finite or negative score entry orders as `0.0` (ALGO-10's
+//! A missing, non-finite or negative score entry orders as `0.0` (the
 //! `sane_weight` convention, see [`sane_score`]).
 //!
 //! ## Batched input
@@ -43,19 +43,26 @@
 //! The dependent-interaction count is computed for every concept in **one
 //! pass over the edges** ([`dependent_interaction_counts`]), over the in-RAM
 //! graph the cycle already holds under its read guard: no per-node store
-//! round-trip, so Stage 1 stays I/O-free (the evaluator's R2-4 property). It
+//! round-trip, so Stage 1 stays I/O-free, as the evaluator requires. It
 //! follows the stores' Stage 2 rules exactly (session-scoped concepts,
 //! edge about-time and interaction about-time at or before `now - min_age`,
 //! own origin excluded, a dependent reached twice counted once), and a
 //! parity test holds it to `MemoryStore` and SQLite on the shared #36
 //! dependents case. [`dependent_interactions`] answers the same question for
 //! one node in `O(degree)`, for inspect.
+//!
+//! Solo's dependents term ([`solo_dependent_interaction_counts`],
+//! [`solo_dependent_interactions`], #300) is the same count with one
+//! difference: a dependence is credited to the interaction that wrote it,
+//! not to its dependent's origin. The two agree wherever every dependence
+//! was written in its dependent's origin turn.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
+use crate::daemon::conflict::WriterTimeline;
 use crate::graph::Graph;
 use crate::types::{tie_break_by_key, CanonizationStatus, Edge, Node, NodeId, ScoreTable};
 
@@ -109,11 +116,30 @@ fn age_cutoff(min_age: Duration, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     now.checked_sub_signed(age)
 }
 
+/// Which interaction a dependence edge is credited to.
+#[derive(Clone, Copy)]
+enum Credit<'a> {
+    /// The dependent's origin interaction: Swarm's Stage 1 count, the same
+    /// measurement as Stage 2's `distinct`.
+    DependentOrigin,
+    /// The interaction that wrote the edge (#300): Solo's dependents term.
+    /// It is the one interaction flushed at the edge's `created_at`, the
+    /// stamp every write path copies from the writing interaction
+    /// ([`WriterTimeline::sole_writer`]); with none or several there, the
+    /// dependent's origin, as [`Credit::DependentOrigin`].
+    Writer(&'a WriterTimeline),
+}
+
 /// The `(pillar, interaction)` this edge contributes, if any: the edge
 /// declares a dependence ([`Edge::dependence`]), is aged, both ends are
-/// concepts of `graph`, and the dependent's origin interaction is in `graph`,
-/// aged, and not the pillar's own origin.
-fn dependent_origin(graph: &Graph, e: &Edge, cutoff: DateTime<Utc>) -> Option<(NodeId, NodeId)> {
+/// concepts of `graph`, and the interaction it is credited to (`credit`) is
+/// in `graph`, aged, and not the pillar's own origin.
+fn dependent_origin(
+    graph: &Graph,
+    e: &Edge,
+    cutoff: DateTime<Utc>,
+    credit: Credit<'_>,
+) -> Option<(NodeId, NodeId)> {
     if e.about_time() > cutoff {
         return None;
     }
@@ -123,10 +149,16 @@ fn dependent_origin(graph: &Graph, e: &Edge, cutoff: DateTime<Utc>) -> Option<(N
     else {
         return None;
     };
-    if d.origin_interaction == p.origin_interaction {
+    let credited = match credit {
+        Credit::DependentOrigin => d.origin_interaction,
+        Credit::Writer(timeline) => timeline
+            .sole_writer(e.created_at)
+            .unwrap_or(d.origin_interaction),
+    };
+    if credited == p.origin_interaction {
         return None;
     }
-    match graph.node(d.origin_interaction) {
+    match graph.node(credited) {
         Some(Node::Interaction(i)) if i.about_time() <= cutoff => Some((pillar, i.id)),
         _ => None,
     }
@@ -143,9 +175,56 @@ pub fn dependent_interaction_counts(
     let Some(cutoff) = age_cutoff(min_age, now) else {
         return HashMap::new();
     };
+    counts_with(graph, cutoff, Credit::DependentOrigin)
+}
+
+/// Solo's dependents term (#300): [`dependent_interaction_counts`] with each
+/// dependence credited to the interaction that **wrote** it, not to its
+/// dependent's origin. An edge is about what the turn that wrote it is about
+/// (`event_time.rs`), and `record_action` reuses an existing action node, so
+/// the action's origin says nothing about when it declared a new
+/// dependence. The writer is the one interaction flushed at the edge's
+/// `created_at` (every write path copies that stamp from its interaction);
+/// with none or several there the dependent's origin is credited, so where
+/// every dependence was written in its dependent's origin turn the two
+/// counts agree. The own-origin exclusion asks whether the pillar's own turn
+/// wrote the dependence. A re-sent identical dependence reinforces its edge
+/// and keeps its stamps, so it is credited to its first writer.
+///
+/// Swarm's Stage 1 and Stage 2 keep [`dependent_interaction_counts`]'s
+/// dating: Stage 2 reads store rows that carry no writer, and its
+/// supersession filter (#20) deliberately refuses a new edge from an old
+/// concept.
+pub fn solo_dependent_interaction_counts(
+    graph: &Graph,
+    min_age: Duration,
+    now: DateTime<Utc>,
+) -> HashMap<NodeId, usize> {
+    let Some(cutoff) = age_cutoff(min_age, now) else {
+        return HashMap::new();
+    };
+    counts_with(graph, cutoff, Credit::Writer(&WriterTimeline::of(graph)))
+}
+
+/// [`solo_dependent_interaction_counts`] with a writer timeline the caller
+/// already holds for `graph` (the evaluator's, cached by graph epoch), so
+/// nothing is rebuilt.
+pub(crate) fn solo_dependent_interaction_counts_with(
+    graph: &Graph,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    timeline: &WriterTimeline,
+) -> HashMap<NodeId, usize> {
+    let Some(cutoff) = age_cutoff(min_age, now) else {
+        return HashMap::new();
+    };
+    counts_with(graph, cutoff, Credit::Writer(timeline))
+}
+
+fn counts_with(graph: &Graph, cutoff: DateTime<Utc>, credit: Credit<'_>) -> HashMap<NodeId, usize> {
     let mut pairs: HashSet<(NodeId, NodeId)> = HashSet::new();
     for e in graph.edges() {
-        if let Some(pair) = dependent_origin(graph, e, cutoff) {
+        if let Some(pair) = dependent_origin(graph, e, cutoff, credit) {
             pairs.insert(pair);
         }
     }
@@ -167,17 +246,68 @@ pub fn dependent_interactions(
     let Some(cutoff) = age_cutoff(min_age, now) else {
         return 0;
     };
+    interactions_with(graph, node, cutoff, Credit::DependentOrigin)
+}
+
+/// [`solo_dependent_interaction_counts`] for one node: `O(degree)` plus one
+/// writer-timeline build (`O(interactions)`) when the node has a dependence
+/// edge at all. Agrees with the batched map for every node.
+pub fn solo_dependent_interactions(
+    graph: &Graph,
+    node: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+) -> usize {
+    let Some(cutoff) = age_cutoff(min_age, now) else {
+        return 0;
+    };
+    let has_dependence = graph
+        .incident_edges(node)
+        .into_iter()
+        .any(|e| e.dependence().is_some_and(|(pillar, _)| pillar == node));
+    if !has_dependence {
+        return 0;
+    }
+    interactions_with(
+        graph,
+        node,
+        cutoff,
+        Credit::Writer(&WriterTimeline::of(graph)),
+    )
+}
+
+/// [`solo_dependent_interactions`] with a writer timeline the caller already
+/// holds for `graph`: `O(degree)`, nothing rebuilt.
+pub(crate) fn solo_dependent_interactions_with(
+    graph: &Graph,
+    node: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    timeline: &WriterTimeline,
+) -> usize {
+    let Some(cutoff) = age_cutoff(min_age, now) else {
+        return 0;
+    };
+    interactions_with(graph, node, cutoff, Credit::Writer(timeline))
+}
+
+fn interactions_with(
+    graph: &Graph,
+    node: NodeId,
+    cutoff: DateTime<Utc>,
+    credit: Credit<'_>,
+) -> usize {
     graph
         .incident_edges(node)
         .into_iter()
-        .filter_map(|e| dependent_origin(graph, e, cutoff))
+        .filter_map(|e| dependent_origin(graph, e, cutoff, credit))
         .filter(|(pillar, _)| *pillar == node)
         .map(|(_, interaction)| interaction)
         .collect::<HashSet<NodeId>>()
         .len()
 }
 
-/// Finite, non-negative score, else `0.0` — ALGO-10's `sane_weight`
+/// Finite, non-negative score, else `0.0` — the `sane_weight`
 /// convention, applied at the point of use, so a NaN can neither jump the
 /// queue (`total_cmp` sorts NaN above every real score) nor be dropped.
 fn sane_score(score: f64) -> f64 {
@@ -411,6 +541,83 @@ mod tests {
         );
     }
 
+    /// #300: Solo credits a dependence to the interaction flushed at the
+    /// edge's `created_at`, not to its dependent's origin, so the own-origin
+    /// exclusion is about the writing turn in both directions; with no single
+    /// interaction at that instant it falls back to the dependent's origin.
+    /// Swarm's count keeps the dependent-origin dating throughout. Mirrors
+    /// `Policy.dependentOriginsW_not_own` and
+    /// `Policy.own_origin_is_the_writing_turn` in
+    /// `formal/LamboProofs/Policy/Support.lean`.
+    #[test]
+    fn solo_credits_a_dependence_to_the_interaction_that_wrote_it() {
+        // Dependent 10 shares the pillar's origin i1; its edge was written
+        // by i3 (80 minutes back).
+        let shared_origin = || {
+            let mut g = graph_with([
+                concept(1, 1, 0, CanonizationStatus::None),
+                concept(10, 1, 0, CanonizationStatus::None),
+            ]);
+            g.upsert_edge(edge(10, 1, EdgeType::Dependency, 80))
+                .unwrap();
+            g
+        };
+        let g = shared_origin();
+        assert_eq!(dependent_interactions(&g, nid(1), MIN_AGE, now()), 0);
+        assert_eq!(solo_dependent_interactions(&g, nid(1), MIN_AGE, now()), 1);
+        // The other direction. Dependent 11 comes from i2 (90 minutes back);
+        // pillar 1 from i3 (80), which also wrote the dependence, after both
+        // existed: Swarm counts i2, Solo nothing.
+        let mut g = graph_with([
+            concept(1, 3, 0, CanonizationStatus::None),
+            concept(11, 2, 0, CanonizationStatus::None),
+        ]);
+        g.upsert_edge(edge(11, 1, EdgeType::Dependency, 80))
+            .unwrap();
+        assert_eq!(dependent_interactions(&g, nid(1), MIN_AGE, now()), 1);
+        assert_eq!(solo_dependent_interactions(&g, nid(1), MIN_AGE, now()), 0);
+        // An edge stamped between interactions (30 minutes back) has no
+        // writer: the dependent's origin is credited, as before.
+        let g = pillar_with(0, &[2, 3]);
+        assert_eq!(solo_dependent_interactions(&g, nid(1), MIN_AGE, now()), 2);
+        // Two interactions flushed at the edge's instant: no single writer,
+        // so the dependent's origin (the pillar's own) again.
+        let mut g = shared_origin();
+        let mut twin = interaction(6, 80);
+        twin.previous_id = Some(iid(9));
+        g.insert_interaction(twin).unwrap();
+        assert_eq!(solo_dependent_interactions(&g, nid(1), MIN_AGE, now()), 0);
+    }
+
+    /// The batched and single-node Solo counts agree on every node of the
+    /// shared #36 dependents case, at both ages. They agree with Swarm's
+    /// count on every concept whose dependence edges are each stamped at
+    /// their dependent's origin (`Policy.dependentOriginsW_eq`) or at no
+    /// single interaction (the fallback credits the dependent's origin, so
+    /// those edges agree by construction). That is all but `P`:
+    /// `P -Hierarchical-> X` is stamped at `i5`, `P`'s own turn, so its child
+    /// `X` (from `i1`) is a dependent interaction for Swarm and none for Solo.
+    #[test]
+    fn solo_counts_agree_with_each_other_and_with_swarm_on_the_dependents_case() {
+        use crate::test_util::dependents::concept_id;
+        let g = crate::test_util::dependents::graph();
+        let at = crate::test_util::dependents::now();
+        for age in [crate::test_util::dependents::MIN_AGE, Duration::ZERO] {
+            let solo = solo_dependent_interaction_counts(&g, age, at);
+            let mut swarm = dependent_interaction_counts(&g, age, at);
+            assert_eq!(swarm.remove(&concept_id("P")), Some(1), "at {age:?}");
+            assert_eq!(solo, swarm, "at {age:?}");
+            for c in g.concepts() {
+                assert_eq!(
+                    solo.get(&c.id).copied().unwrap_or(0),
+                    solo_dependent_interactions(&g, c.id, age, at),
+                    "{} at {age:?}",
+                    c.content
+                );
+            }
+        }
+    }
+
     /// Canonical concepts are never candidates; Candidates and Venerables
     /// that still hold the evidence are reported (the cycle keeps only
     /// still-`None` ones).
@@ -575,7 +782,7 @@ mod tests {
         }
     }
 
-    /// Review L9: an edge and an interaction exactly at `now - min_age`
+    /// An edge and an interaction exactly at `now - min_age`
     /// count, one second younger do not, on the graph and on MemoryStore.
     #[cfg(feature = "store-memory")]
     #[tokio::test]

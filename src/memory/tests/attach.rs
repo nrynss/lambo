@@ -31,7 +31,7 @@ pub(super) fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// **P2-b.** The attach line names the live promotion policy, beside
+/// The attach line names the live promotion policy, beside
 /// `match_strategy`.
 ///
 /// This is the operator's only in-process answer to "which policy is this
@@ -132,7 +132,7 @@ async fn fresh_session_is_stamped_with_the_live_embedding_contract() {
     mem.close().await.unwrap();
 }
 
-/// STORE-1 / Level B: attaching with a different embedder kind, model or
+/// Level B: attaching with a different embedder kind, model or
 /// dim than the session was written with must refuse, not mix vector spaces.
 #[tokio::test]
 async fn session_attach_rejects_embedder_kind_model_and_dim_mismatch() {
@@ -286,4 +286,71 @@ async fn build_rejects_zero_cadence_before_acquiring_the_lease() {
         .await
         .expect("a valid second build must succeed; a leaked lease would wedge it");
     second.close().await.unwrap();
+}
+
+/// #296: the operator override's WARN ("relabeled the session's existing
+/// vectors") is logged only once the relabel succeeded. A cross-kind
+/// override over stored vectors is refused by the relabel and logs no WARN;
+/// a same-kind rename relabels and logs it.
+///
+/// Mirrors `Contract.attachWarnsFixed_relabelled` and
+/// `Contract.example_warn_only_after_relabel`.
+#[tokio::test]
+async fn the_override_warn_is_logged_only_after_the_relabel_succeeds() {
+    let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+    let mem = memory_on(store.clone(), "warn-after-relabel").await;
+    mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap();
+    // The memory store has no vector column, so the derive stored none:
+    // give the concept one.
+    let id = mem.graph().read().concepts().next().unwrap().id;
+    mem.graph()
+        .write()
+        .seed_test_vectors(vec![(id, vec![0.5_f32; 1024])]);
+    mem.close().await.unwrap();
+    let stored = store
+        .load_session(&SessionId::new("warn-after-relabel"))
+        .await
+        .unwrap();
+    assert!(
+        stored.concepts.iter().any(|c| c.embedding.is_some()),
+        "test setup: the session holds a vector"
+    );
+
+    let attach = |c: EmbeddingContract| {
+        let store = store.clone();
+        async move {
+            Memory::builder()
+                .session("warn-after-relabel")
+                .agent("operator")
+                .store(store)
+                .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+                .embedding_contract(c)
+                .allow_embedding_mismatch(true)
+                .flush_interval(Duration::from_secs(3_600))
+                .build()
+                .await
+        }
+    };
+    let (logs, _guard) = capture_logs(tracing::Level::WARN);
+    let warn = "operator allowed an embedding contract mismatch";
+
+    let err = attach(contract("bge_m3", 1024)).await.unwrap_err();
+    assert!(err.to_string().contains("cannot relabel"), "{err}");
+    assert!(
+        !logs.contains(warn),
+        "no relabel happened, so no WARN: {}",
+        logs.contents()
+    );
+
+    let renamed = EmbeddingContract {
+        kind: "fixture".into(),
+        model: Some("fixture-renamed".into()),
+        dim: 1024,
+    };
+    let mem = attach(renamed.clone()).await.unwrap();
+    assert_eq!(mem.embedding_contract(), &renamed);
+    assert!(logs.contains(warn), "{}", logs.contents());
+    mem.close().await.unwrap();
 }

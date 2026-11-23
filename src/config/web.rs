@@ -68,8 +68,38 @@
 //! capability (write implies read); a name or `token_env` may then not
 //! appear in both tables. An inherited `"*"` keeps serve's meaning, the
 //! `[serve] sessions` plus every name under a `[[serve.credential]]`
-//! prefix, never this allowlist (#4 PR 3 review M1). Tokens are read from the environment by
+//! prefix, never this allowlist (#4 PR 3). Tokens are read from the environment by
 //! `lambo serve-web` at startup, never here.
+//!
+//! # Session discovery (#276)
+//!
+//! ```toml
+//! [web]
+//! sessions = ["lambo"]          # still required: the default the aliases serve
+//! discover_sessions = true      # also serve every live session in the store
+//! ```
+//!
+//! Off by default, and then nothing above changes. On (or with
+//! `lambo serve-web --discover-sessions`), the portal also serves every
+//! session the store holds that is not erased (`lambo:erased` tombstones
+//! are omitted, as `lambo stats --store` omits them) and whose name passes
+//! the addressed-id charset (a name outside it is skipped, never served or
+//! listed), including sessions created after startup, without a restart.
+//! It widens only grants whose scope already covers every served session:
+//! the implicit loopback grant, the legacy `LAMBO_AUTH_TOKEN` / `--auth-token`
+//! (`default`), and a `[[web.credential]]` whose `sessions` include `"*"`.
+//! Exact names, a `session_prefix`, and every inherited `[[serve.credential]]`
+//! (whose `"*"` is serve's hosted set) read exactly what they read without
+//! it. A discovered session is reached at `/s/<session>/` only: every
+//! request probes existence and erasure first, then loads lazily within
+//! `max_loaded_sessions`, as a `session_prefix` session does. On a loopback
+//! bind discovery also registers `GET /api/sessions` (as `list_sessions`
+//! does), which then names the discovered sessions after the served ones; on
+//! any other bind the listing still needs `list_sessions = true`. Each
+//! listing comes from a store read that began after the request arrived
+//! (the portal issues one read at a time; requests that arrive during a
+//! read share the next one), so a discovered session erased before the
+//! request is not listed.
 
 use std::time::Duration;
 
@@ -180,11 +210,11 @@ pub struct WebConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_loaded_sessions: Option<usize>,
     /// Simultaneous session loads. Default [`DEFAULT_LOAD_CONCURRENCY`];
-    /// 1 to [`MAX_CONCURRENCY`]. SQLite always uses 1.
+    /// 1 to `MAX_CONCURRENCY`. SQLite always uses 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_concurrency: Option<usize>,
     /// Simultaneous recalls, process-wide. Default
-    /// [`DEFAULT_RECALL_CONCURRENCY`]; 1 to [`MAX_CONCURRENCY`].
+    /// [`DEFAULT_RECALL_CONCURRENCY`]; 1 to `MAX_CONCURRENCY`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recall_concurrency: Option<usize>,
     /// Answer `GET /api/sessions` with the names the presenting credential
@@ -192,6 +222,15 @@ pub struct WebConfig {
     /// registered at all, so it is the uniform 404.
     #[serde(default, skip_serializing_if = "is_false")]
     pub list_sessions: bool,
+    /// Store-wide session discovery (#276): also serve every live,
+    /// non-erased session in the store that passes the addressed-id
+    /// charset, including sessions created after startup, to a caller
+    /// whose scope covers every served session (the implicit loopback
+    /// grant, the legacy token, a `[[web.credential]]` `"*"`). Off by
+    /// default: the allowlist is then the whole served set. Also set by
+    /// `lambo serve-web --discover-sessions`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub discover_sessions: bool,
     /// Import every `[[serve.credential]]` as a read grant with its scope
     /// and no capability (#4 design 4.1, Q5). Off by default: agents' write
     /// tokens are not portal tokens unless the operator says so.
@@ -538,6 +577,7 @@ mod tests {
         ))
         .expect("valid [web]");
         assert!(file.web.list_sessions && file.web.inherit_serve_credentials);
+        assert!(!file.web.discover_sessions, "discovery is opt-in");
         assert_eq!(file.web.credentials.len(), 2);
         assert_eq!(file.web.credentials[0].name, "viewers");
         assert_eq!(
@@ -547,6 +587,28 @@ mod tests {
         let off = LamboFile::from_toml_str("[web]\nsessions = [\"lambo\"]\n").expect("off");
         assert!(!off.web.list_sessions && !off.web.inherit_serve_credentials);
         assert!(off.web.credentials.is_empty());
+    }
+
+    /// #276: `discover_sessions` parses, is off when absent, serializes
+    /// only when on, and a misspelling is refused by name (Level B).
+    #[test]
+    fn discover_sessions_is_opt_in_and_registered() {
+        let on =
+            LamboFile::from_toml_str("[web]\nsessions = [\"lambo\"]\ndiscover_sessions = true\n")
+                .expect("valid [web]");
+        assert!(on.web.discover_sessions);
+        assert!(toml::to_string(&on.web)
+            .expect("serialize")
+            .contains("discover_sessions = true"));
+        let off = LamboFile::from_toml_str("[web]\nsessions = [\"lambo\"]\n").expect("off");
+        assert!(!off.web.discover_sessions);
+        assert!(!toml::to_string(&off.web)
+            .expect("serialize")
+            .contains("discover_sessions"));
+        let err = refused("[web]\ndiscover_session = true\n");
+        assert!(err.contains("unknown field `discover_session`"), "{err}");
+        // Wrong-typed: refused, not read as on.
+        refused("[web]\ndiscover_sessions = \"yes\"\n");
     }
 
     /// Design 4.1: read-only by grammar. `create`, `erase` and `admin` are
@@ -769,6 +831,7 @@ mod tests {
         assert_eq!(web.load_concurrency, Some(DEFAULT_LOAD_CONCURRENCY));
         assert_eq!(web.recall_concurrency, Some(DEFAULT_RECALL_CONCURRENCY));
         assert!(!web.list_sessions && !web.inherit_serve_credentials);
+        assert!(!web.discover_sessions);
         assert_eq!(web.credentials.len(), 1);
         assert_eq!(web.credentials[0].name, "lambo-viewers");
         assert_eq!(web.credentials[0].sessions, ["lambo"]);

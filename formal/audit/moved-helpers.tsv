@@ -1,0 +1,21 @@
+# Helpers moved to the shared library formal/LamboProofs/Lib/List.lean: old
+# name, then new name, tab-separated. Each kept its statement; only its
+# namespace changed. Read by scripts/formal/check-decl-equivalence.py --renames.
+Lambo.Fusion.any_of_mem	Lambo.Lib.any_of_mem
+Lambo.Fusion.length_filter_mono	Lambo.Lib.length_filter_mono
+Lambo.Fusion.length_filter_lt	Lambo.Lib.length_filter_lt
+Lambo.Fusion.length_filter_shift	Lambo.Lib.length_filter_shift
+Lambo.Hotlist.eq_of_nodup_map	Lambo.Lib.eq_of_nodup_map
+Lambo.Hotlist.length_le_of_nodup_subset	Lambo.Lib.length_le_of_nodup_subset
+Lambo.Conflict.two_le_length_iff	Lambo.Lib.two_le_length_iff
+Lambo.BatchQueue.eraseIdx_perm	Lambo.Lib.eraseIdx_perm
+Lambo.BatchQueue.map_eq_pointwise	Lambo.Lib.map_eq_pointwise
+Lambo.Flush.prefix_drop	Lambo.Lib.prefix_drop
+Lambo.Fit.getD_mem	Lambo.Lib.getD_mem
+Lambo.Fit.getD_mono	Lambo.Lib.getD_mono
+Lambo.Fit.getD_eq_getElem	Lambo.Lib.getD_eq_getElem
+Lambo.Confidence.foldl_max_ge_init	Lambo.Lib.foldl_max_ge_init
+Lambo.Confidence.foldl_max_ge	Lambo.Lib.foldl_max_ge
+Lambo.Confidence.foldl_max_mem	Lambo.Lib.foldl_max_mem
+Lambo.Policy.nodup_eraseDups	Lambo.Lib.nodup_eraseDups
+Lambo.Policy.length_eraseDups_le_cons	Lambo.Lib.length_eraseDups_le_cons

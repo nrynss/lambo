@@ -41,7 +41,7 @@ use crate::types::{AgentId, LamboError, SessionId};
 /// makes that comparison the right one: the applied-but-not-durable window
 /// *starts* when the write applies.
 ///
-/// An **unsettled** receipt never expires at all (J3-R1-3). Nothing caps how
+/// An **unsettled** receipt never expires at all. Nothing caps how
 /// long a job sits in a lane, so issue-time expiry could — and did, measured —
 /// answer `expired` about a job that was still running, after which
 /// `settle_one` discarded its outcome.
@@ -71,10 +71,10 @@ const _: () = assert!(
 pub const MEASURED_WORST_FLUSH_LAG_SECS: u64 = 227;
 
 /// Build-time invariant: a receipt must outlive the applied-but-not-durable
-/// window, or the crash window J3 widened is unauditable from the surface that
+/// window, or that crash window is unauditable from the surface that
 /// describes it.
 ///
-/// **This replaces a false guard** (J3-R1-3). The old one asserted
+/// **This replaces a false guard**. The old one asserted
 /// `RETENTION > HYBRID_IO_TIMEOUT + WRITE_QUEUE_DRAIN_BUDGET` and stated the
 /// conclusion "…so a receipt could not expire while its own write is still
 /// running" — which it did not prove, because expiry keyed on *issue* time and
@@ -98,7 +98,7 @@ pub const MAX_RECEIPT_IDS: usize = MAX_CONCEPTS_PER_DERIVE;
 
 /// Retained receipts, oldest **settled** one evicted first.
 ///
-/// **The memory arithmetic, recomputed honestly (J3-R1-6).** The figure quoted
+/// **The memory arithmetic, recomputed honestly.** The figure quoted
 /// here was "a summary plus at most `MAX_RECEIPT_IDS` × 36-byte node ids
 /// ≈ 2.4 KiB, so 4096 of them is ≈ 9.4 MiB", and it counted **one of two id
 /// lists**: [`AppliedSummary`] carries `created` *and* `matched`, each
@@ -112,7 +112,7 @@ pub const MAX_RECEIPT_IDS: usize = MAX_CONCEPTS_PER_DERIVE;
 /// can both push `created` past 64 on their own.
 ///
 /// The corrected figure does **not** move the constant, and **the memory budget
-/// is now the reason, not the sanity check** (J3 round-1 N4). What this
+/// is now the reason, not the sanity check**. What this
 /// paragraph used to say was: "4096 is driven by `PROBE_CLAMP_RPS > 3 ×
 /// MEASURED_LOCAL_EMBEDDER_RPS`, which needs `WRITE_QUEUE_MAX ≥ 424` and
 /// therefore `MAX_RETAINED_RECEIPTS ≥ 1696`. The memory budget is the sanity
@@ -147,11 +147,10 @@ pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 /// own I/O, every embed and vector lookup of its derive or `record_action`,
 /// runs under one [`HYBRID_IO_TIMEOUT`] deadline, and nothing after it awaits,
 /// so a job a worker has picked up settles, applied or failed, within that
-/// bound. On top of it sit the two drain budgets of the J3 reasoning
-/// (J3-R2R-5): a close's quiesce drains for one whole budget, and the second
-/// is slack for the worker to pick the job up. So a wait that runs out
-/// answers `pending` only when other writes were queued ahead in the same
-/// lane, and that answer is then the honest one.
+/// bound. On top of it sit two drain budgets: a close's quiesce drains for
+/// one whole budget, and the second is slack for the worker to pick the job
+/// up. So a wait that runs out answers `pending` only when other writes were
+/// queued ahead in the same lane, and that answer is then the honest one.
 ///
 /// It was 4 s, the two budgets alone. On the Metal rig a 3 to 4 concept
 /// derive's apply reached 4.6 s (p90 2 s) because each concept is embedded
@@ -161,7 +160,7 @@ pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 /// What a longer bound costs: a wait returns the moment its receipt settles,
 /// so only a wait on a slow write holds its slot longer. The population of
 /// waits is still capped by [`MAX_CONCURRENT_RECEIPT_WAITS`], which is what
-/// bounds the proxy's in-flight burst (the J2-R2-7 residual), and one agent
+/// bounds the proxy's in-flight burst, and one agent
 /// holds at most [`MAX_RECEIPT_WAITS_PER_AGENT`] of them.
 ///
 /// A waiting call does not extend a shutdown, though not because the
@@ -173,9 +172,9 @@ pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 /// waits return with it. A close cancelled before that point leaves them to
 /// their own deadline. A `pending_replay` id, owed to a replay the close stops, is not
 /// settled; its wait returns once the pipeline is sealed and the close has
-/// settled what its aborted workers left (#11 review P3-2, round 2 F1). Nothing in shutdown joins a waiting call either:
-/// `serve`'s final stage cancels the MCP services without awaiting their
-/// tool tasks.
+/// settled what its aborted workers left (#11). Nothing in shutdown joins a
+/// waiting call either: `serve`'s final stage cancels the MCP services without
+/// awaiting their tool tasks.
 pub const RECEIPT_WAIT_MAX: Duration =
     Duration::from_secs(HYBRID_IO_TIMEOUT.as_secs() + 2 * WRITE_QUEUE_DRAIN_BUDGET.as_secs());
 
@@ -197,12 +196,12 @@ const _: () = assert!(
 
 /// Concurrent receipt waits this process will hold at once.
 ///
-/// **This is the J2-R2-7 / J2-R3-3 coupled residual's bound, and it is here
+/// **This bounds the proxy's in-flight burst, and it is here
 /// rather than in the proxy because this is the surface that creates the
 /// population.** A waiting `lambo_stats(receipt=…, wait_ms=…)` call is a
 /// long-lived in-flight request — there is no `lambo_receipt` tool, which is
-/// what this docstring named twice (J3-R2-8); the eighth tool is the deviation
-/// §J3 argues, and `lambo_stats` is the surface that shipped instead — so
+/// what this docstring named twice; the eighth tool was a proposed
+/// deviation, and `lambo_stats` is the surface that shipped instead — so
 /// through a proxy it occupies an entry in the pump's `inflight`
 /// list for the whole wait — and `answer_lost` writes one un-raced frame per
 /// in-flight id to a client that may not be reading. So the waiting surface,
@@ -216,7 +215,7 @@ const _: () = assert!(
 pub const MAX_CONCURRENT_RECEIPT_WAITS: usize = 16;
 
 /// Receipt waits one agent may hold at once: half of
-/// [`MAX_CONCURRENT_RECEIPT_WAITS`] (#11 review P3-1).
+/// [`MAX_CONCURRENT_RECEIPT_WAITS`] (#11).
 ///
 /// The slots are shared by every agent on the pipeline, and a wait over the
 /// cap answers at once instead of waiting. With no share, one agent issuing
@@ -282,14 +281,14 @@ pub const MAX_PIGGYBACK_RECEIPTS: usize = 8;
 /// It carries the issuing process's epoch, the issue time and a sequence
 /// number, and those three fields are what let a lookup answer *expired*,
 /// *restart-lost* and *never-issued* distinctly instead of collapsing all three
-/// into "unknown" (§J3: "expired must not read as unknown, and restart-lost
-/// must not either"). Nothing has to be remembered about an id after its
+/// into "unknown" (expired must not read as unknown, and restart-lost
+/// must not either). Nothing has to be remembered about an id after its
 /// outcome is discarded, because the id itself says when it was issued and by
 /// which process.
 ///
 /// It is **not a capability**: possession of an id does not authorise reading
 /// its outcome. The receipt store scopes every held receipt to the agent that
-/// created it (J1), and a lookup by a different agent is refused.
+/// created it, and a lookup by a different agent is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ReceiptId {
     /// Random per-process value. A foreign epoch is what makes `restart_lost`
@@ -304,7 +303,22 @@ pub struct ReceiptId {
 impl ReceiptId {
     /// Wire prefix. Versioned so a later format change is detectable rather
     /// than silently mis-parsed as this one.
-    const PREFIX: &'static str = "lwr1";
+    pub(super) const PREFIX: &'static str = "lwr1";
+
+    /// Whether `s` is a receipt id of another version of this format,
+    /// `lwr<digits>.` with a version other than 1, as a newer build would
+    /// write. Such an id is not this build's to settle: the replay
+    /// quarantines it (#295). Any other id that does not parse is malformed
+    /// and settled `failed`.
+    pub(super) fn is_other_version(s: &str) -> bool {
+        let Some(rest) = s.strip_prefix("lwr") else {
+            return false;
+        };
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        !digits.is_empty()
+            && rest[digits.len()..].starts_with('.')
+            && digits.parse::<u64>() != Ok(1)
+    }
 
     pub(super) fn new(epoch: u64, issued: DateTime<Utc>, seq: u64) -> Self {
         Self {
@@ -415,16 +429,16 @@ pub struct AppliedSummary {
     /// The **true** number created, which may exceed `created.len()` because
     /// the list is truncated at [`MAX_RECEIPT_IDS`]. Carried separately so a
     /// truncated list can never read as a short one, and because this is the
-    /// number I1's metric 2 counts.
+    /// number DOGFOOD metric 2 counts.
     pub created_count: usize,
     /// The true number matched, for the same reason.
     pub matched_count: usize,
     /// Hybrid semantic merges — `derive` only.
     ///
-    /// **This and the two fields below are I1's DOGFOOD metric 2 fact set,
-    /// relocated rather than dropped.** Before J3 they rode the ledger call
-    /// line, which J3's ack can no longer carry: at ack time the write has not
-    /// happened. Keeping them on the receipt means the metric-2 distinction
+    /// **This and the two fields below are the DOGFOOD metric 2 fact set,
+    /// relocated rather than dropped.** Before durable intents they rode the
+    /// ledger call line, which the ack can no longer carry: at ack time the
+    /// write has not happened. Keeping them on the receipt means the metric-2 distinction
     /// (`semantic_merged`, a similarity merge that adds no `Derives` edge,
     /// against `matched`, a re-derive that does) is still recoverable — from
     /// the receipt instead of from the line.
@@ -437,7 +451,7 @@ pub struct AppliedSummary {
     /// a derive wrote no edges, which is not what it means.
     pub edges: Option<usize>,
     /// Concepts persisted **with a vector** — *applied ≠ embedded* as a
-    /// first-class receipt fact (J3-R3-1). `Some` only under the hybrid
+    /// first-class receipt fact. `Some` only under the hybrid
     /// strategy, the one that embeds — for `derive` and, since bef53e6, for
     /// `record_action`. A canonical-strategy write never produces vectors by
     /// design, and an absent key must never read as "zero of something that
@@ -499,7 +513,7 @@ impl AppliedSummary {
 
 /// The answer to "what happened to this receipt?".
 ///
-/// **Twelve** variants, and **none of them is "unknown"** (J3 round-1 F1: this
+/// **Twelve** variants, and **none of them is "unknown"** (this
 /// count said "seven" at eight, then at ten; it is checked by a test now rather
 /// than restated by hand). Two of the twelve are unsettled —
 /// [`ReceiptAnswer::Pending`] and [`ReceiptAnswer::PendingReplay`] — and the
@@ -521,10 +535,14 @@ impl AppliedSummary {
 pub enum ReceiptAnswer {
     /// Admitted, not yet decided. Also what a timed-out wait answers *for a
     /// receipt this process holds* — a replay-owed id answers
-    /// [`ReceiptAnswer::PendingReplay`] instead (J3-R2R-5).
+    /// [`ReceiptAnswer::PendingReplay`] instead.
     Pending,
-    /// Admitted by a **previous** process, recorded as a durable intent, and
-    /// still owed a replay (J3 round-1 N8).
+    /// Recorded as a durable intent and still owed: admitted by a
+    /// **previous** process and not yet replayed, or admitted by this one and
+    /// held because the embedder did not answer it or an earlier write of its
+    /// agent (#295, `Lanes::held`). Unsettled: a held write later applied or
+    /// refused in this process settles from here, and a close answers it
+    /// [`ReceiptAnswer::IntentRecorded`].
     ///
     /// Split from [`ReceiptAnswer::Pending`] because the two are not the same
     /// situation and the taxonomy's own principle is that every non-answer is a
@@ -536,9 +554,15 @@ pub enum ReceiptAnswer {
     PendingReplay,
     /// Applied through the ordinary path.
     Applied(AppliedSummary),
-    /// Attempted and rejected. The write did not happen.
+    /// Attempted and rejected: this process wrote nothing for it and will not
+    /// try again. Final here; one case is final only for this process: a write
+    /// refused because this handle lost its single-writer lease keeps its
+    /// intent, which the session's current holder may apply, so that holder
+    /// can answer the same id [`ReceiptAnswer::AppliedAfterRestart`]. An
+    /// embedder outage does not answer this: the write is held and answers
+    /// [`ReceiptAnswer::PendingReplay`] (#295).
     ///
-    /// **The string is the N4 class, not the error** (JE2E-12). This receipt is
+    /// **The string is the error's class, not the error**. This receipt is
     /// the *only* channel a background write's failure has to the model, and it
     /// used to interpolate `LamboError::to_string()` verbatim — so a sqlite
     /// "unable to open database file: /path" or a driver message reached a
@@ -571,27 +595,37 @@ pub enum ReceiptAnswer {
     ),
     /// Not applied before this session closed, and **not lost**: the validated
     /// job is recorded as a durable intent, and the next serve of this session
-    /// re-attempts it — idempotently, in submission order (J3 durable
+    /// re-attempts it — idempotently, in submission order (durable
     /// intents). Terminal *for this process*; the next process's answer for
     /// this id is `applied_after_restart` (or `failed`, if the replay is
     /// refused for the content, or `pending_replay` while it is still owed).
     ///
-    /// **Settled only after the close's final flush has completed** (#117
-    /// review M1). It used to be settled during the quiesce, before that
+    /// **Settled only after the close's final flush has completed** (#117).
+    /// It used to be settled during the quiesce, before that
     /// flush ran, so a close whose flush then failed (or a degraded or fenced
     /// session) had already told a caller "durable intent" about a record that
     /// never landed. `abort_workers` now sets the receipts aside and
     /// `WritePipeline::settle_deferred` answers them once the flush reports:
     /// this answer on success, [`ReceiptAnswer::CloseUnflushed`] otherwise.
+    /// "Success" is per write (#345): a write whose put a background flush
+    /// dead-lettered answers `CloseUnflushed` even when the final flush
+    /// completes, since its intent never reached the store.
     IntentRecorded,
     /// Not applied before this session closed, and the close could **not**
-    /// complete its final flush: it failed, the session was degraded, or the
-    /// lease was lost and the tail dropped (#117 review M1). The write's intent
-    /// is durable only if an earlier background flush took it, so whether the
-    /// next serve replays it is unknown from here. A retried `close()` whose
-    /// flush completes upgrades this to [`ReceiptAnswer::IntentRecorded`].
+    /// vouch for its intent: the close could not complete its final flush (it
+    /// failed, the session was degraded, or the lease was lost and the tail
+    /// dropped, #117), or a background flush dead-lettered the batch that
+    /// carried the intent's put (#345). After an incomplete flush the write's
+    /// intent is durable only if an earlier background flush committed it,
+    /// so whether the next serve replays it is unknown from here. A retried
+    /// `close()` whose flush completes upgrades this to
+    /// [`ReceiptAnswer::IntentRecorded`], except for a dead-lettered intent,
+    /// which no flush can bring back.
     CloseUnflushed,
-    /// Never attempted: the queue was full when the ack was issued.
+    /// Never attempted: refused at admission. The agent's lane, the whole
+    /// queue or its payload cap was full (writes held behind an embedder
+    /// outage count toward all three), or the session was closing or had
+    /// lost its lease. The string is `DropReason::describe`'s, naming which.
     Dropped(String),
     /// This process issued it and has since discarded its outcome — either the
     /// retention window passed or it was evicted as the oldest held receipt,
@@ -605,15 +639,15 @@ pub enum ReceiptAnswer {
     /// Well-formed, from this process's epoch, but past the highest sequence
     /// number this process has ever issued. Nobody issued it.
     NeverIssued,
-    /// Held, but by another agent. Receipts are per-agent scoped (J1).
+    /// Held, but by another agent. Receipts are per-agent scoped.
     Forbidden,
 }
 
-/// The model-facing form of a background write's failure (JE2E-12).
+/// The model-facing form of a background write's failure.
 ///
-/// N4's rule, applied to the async path: the model gets a class and a pointer to
-/// the log, never the raw error, which can carry a store URL, a store file path
-/// or a driver message. This is the same sentence `mcp::server::tool_err`
+/// The synchronous path's rule, applied to the async path: the model gets a
+/// class and a pointer to the log, never the raw error, which can carry a
+/// store URL, a store file path or a driver message. This is the same sentence `mcp::server::tool_err`
 /// produces for the synchronous path, built from the same
 /// [`crate::surface::error::err_class`] so the two cannot drift.
 ///
@@ -650,7 +684,7 @@ impl ReceiptAnswer {
 
     /// A unique index per variant, with **no `_` arm** — the mechanical
     /// exhaustiveness that makes the "Twelve variants" docstring true by
-    /// construction (J3-R2R-4): a thirteenth variant is a compile error here
+    /// construction: a thirteenth variant is a compile error here
     /// before it can drift out of the taxonomy tests.
     pub fn ordinal(&self) -> usize {
         match self {
@@ -673,12 +707,15 @@ impl ReceiptAnswer {
     pub fn describe(&self) -> String {
         match self {
             ReceiptAnswer::Pending => "pending — admitted, not yet applied; ask again".into(),
-            ReceiptAnswer::PendingReplay => "pending — admitted by an EARLIER serve of this \
-                                             session and recorded as a durable intent; still \
-                                             owed a replay, behind a backlog replayed one write \
-                                             at a time. It may settle in this process or in a \
-                                             later one; ask again, and recall rather than \
-                                             re-deriving."
+            ReceiptAnswer::PendingReplay => "pending — recorded as a durable intent and still \
+                                             owed: either admitted by an EARLIER serve of this \
+                                             session and waiting in this serve's replay, one \
+                                             write at a time, or held in this serve behind a \
+                                             write of the same agent the embedder (or the \
+                                             store's vector lookup) did not answer, and \
+                                             retried in the background. It may \
+                                             settle in this process or in a later one; ask \
+                                             again, and recall rather than re-deriving."
                 .into(),
             ReceiptAnswer::Applied(s) => {
                 let mut detail = format!("applied — {}", s.summary);
@@ -744,11 +781,14 @@ impl ReceiptAnswer {
                                               order. Fetch this receipt id there to learn the \
                                               outcome, or recall."
                 .into(),
-            ReceiptAnswer::CloseUnflushed => "close did not finish its final flush — this write \
-                                              was not applied before the session closed, and it \
-                                              may or may not have been saved as an intent for \
-                                              the next serve to re-attempt. Recall before \
-                                              re-deriving."
+            ReceiptAnswer::CloseUnflushed => "close could not confirm this write was saved — its \
+                                              receipt did not settle before the session closed, \
+                                              and the write may or may not have applied. If the \
+                                              close's final flush did not finish, its intent may \
+                                              or may not have been saved for the next serve to \
+                                              re-attempt; if the store rejected the batch that \
+                                              carried its intent, that intent was not saved. \
+                                              Recall before re-deriving."
                 .into(),
             ReceiptAnswer::Dropped(why) => {
                 format!("DROPPED before it was attempted, nothing was written — {why}")
@@ -802,8 +842,8 @@ pub(super) fn unpack_durable_summary(summary: &str) -> (String, Option<SessionId
 
 pub(super) struct Entry {
     pub(super) agent: AgentId,
-    /// The session whose server delivers this receipt (#33 PR 4 review
-    /// H1), when it is not this pipeline's own: a layered session's write
+    /// The session whose server delivers this receipt (#33 PR 4),
+    /// when it is not this pipeline's own: a layered session's write
     /// scoped to a layer is applied by the layer's pipeline but delivered
     /// only through the session that sent it. `None` for this session's own
     /// writes. Agent ids are caller-asserted and shared across projects, so
@@ -812,7 +852,7 @@ pub(super) struct Entry {
     /// When the answer became terminal, and therefore when
     /// [`RECEIPT_RETENTION`] starts. `None` while the write is queued or
     /// running — and an entry with `None` here is **never** expired and never
-    /// evicted (J3-R1-3).
+    /// evicted.
     pub(super) settled_at: Option<DateTime<Utc>>,
     pub(super) answer: ReceiptAnswer,
 }
@@ -846,7 +886,7 @@ impl Receipts {
     /// Drop **settled** entries whose retention window has passed, oldest
     /// first.
     ///
-    /// **An unsettled entry is skipped, never expired** (J3-R1-3). Nothing caps
+    /// **An unsettled entry is skipped, never expired**. Nothing caps
     /// how long a job sits in a lane, so the old issue-time sweep could answer
     /// `expired` about a job that was still running — measured, with
     /// `outstanding = 1` — after which [`settle_one`] discarded its outcome
@@ -932,7 +972,7 @@ impl Receipts {
 
 /// Record one outcome against its receipt.
 ///
-/// **Settle first, sweep second** (J3-R1-3). The first version expired before it
+/// **Settle first, sweep second**. The first version expired before it
 /// looked the entry up, so a receipt swept while its own job was still running
 /// took the job's outcome with it: the counters moved, and no receipt recorded
 /// what happened. The sweep now runs after, and cannot touch an entry settled
@@ -951,6 +991,19 @@ pub(super) fn settle_one(
         r.undelivered.entry(agent).or_default().push_back(*id);
     }
     r.expire(now);
+}
+
+/// #295: answer a held write `pending_replay` (see `Lanes::held`). Only an
+/// unsettled entry moves, and it stays unsettled, so the write's later
+/// outcome in this serve (or a close's `intent_durable`) still settles it;
+/// nothing is queued for delivery, since nothing was decided.
+pub(super) fn hold_one(receipts: &PlMutex<Receipts>, id: &ReceiptId) {
+    let mut r = receipts.lock();
+    if let Some(entry) = r.entries.get_mut(id)
+        && !entry.answer.is_settled()
+    {
+        entry.answer = ReceiptAnswer::PendingReplay;
+    }
 }
 
 impl WritePipeline {
@@ -1036,7 +1089,7 @@ impl WritePipeline {
             None => self.lookup(agent, id),
         };
         let budget = budget.min(RECEIPT_WAIT_MAX);
-        // The agent's share first (#11 review P3-1), so an agent at its share
+        // The agent's share first (#11), so an agent at its share
         // never takes a global slot another agent could have had.
         let Some(_share) = AgentWaitShare::claim(&self.waits_per_agent, agent) else {
             tracing::debug!(
@@ -1078,15 +1131,14 @@ impl WritePipeline {
             if tokio::time::Instant::now() >= deadline {
                 return answer;
             }
-            // Closed (#11 review P3-2): once the lanes are sealed and the
+            // Closed (#11): once the lanes are sealed and the
             // close has settled every receipt it held, nothing in this
             // process can settle the id. A `pending_replay` id is owed to a
             // replay the close stopped, so without this its wait ran on
             // against a closed session to its own deadline. Keyed on the
             // close's settle, not on the workers being marked aborted (a
             // whole join earlier), and answered with a fresh lookup, so a
-            // settle that landed after the one above is not reported stale
-            // (#11 review round 2, F1).
+            // settle that landed after the one above is not reported stale.
             if self.closed_to_settles() {
                 return lookup();
             }
@@ -1108,7 +1160,7 @@ impl WritePipeline {
     /// Take one receipt out of the piggyback queue because it has just been
     /// delivered **explicitly**, in the response to a fetch of that id.
     ///
-    /// J3-R1-9: `answered` wraps every tool, so a `lambo_stats(receipt = R)`
+    /// `answered` wraps every tool, so a `lambo_stats(receipt = R)`
     /// used to carry both the explicit `receipt` block for R *and* a piggyback
     /// note naming R — one model reading its own write outcome twice in one
     /// message. Take-once is unaffected: the receipt is delivered exactly once
@@ -1176,7 +1228,7 @@ impl WritePipeline {
     }
 
     /// [`WritePipeline::lookup`] for a caller that delivers to
-    /// `deliver_to` (#33 PR 4 review H1): a receipt this pipeline holds for
+    /// `deliver_to` (#33 PR 4): a receipt this pipeline holds for
     /// another destination is [`ReceiptAnswer::Forbidden`], as another
     /// agent's is. `None` is this pipeline's own writes.
     pub fn lookup_for(

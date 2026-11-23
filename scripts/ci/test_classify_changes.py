@@ -31,6 +31,14 @@ class PathClassification(unittest.TestCase):
             "evidence/issue-221/repro-8concept-qwen3-4b-2560.json",
             "evidence/issue-221/repro-8concept-qwen3-4b-1024.json",
             "evidence/issue-237/calibration-elastic-jina-v3-1024.json",
+            "evidence/157-layer-tuning/README.md",
+            "evidence/issue-221/runs/qwen3-4b-2560.json",
+            "evidence/issue-221/runs/qwen3-4b-1024.json",
+            "evidence/issue-237/runs/elastic-jina-v3-1024.json",
+            # include_str!'d by src/formal_constants_tests.rs (#291).
+            "formal/LamboProofs/Hotlist/List.lean",
+            # include_str!'d by src/formal_oracle_tests.rs (#291).
+            "formal/oracle/Order.json",
         ]
         for path in inputs:
             with self.subTest(path=path):
@@ -40,16 +48,41 @@ class PathClassification(unittest.TestCase):
         paths = [f"{prefix}/{page}.mdx" for prefix in ["docs/reference", "site/src/content/docs"]
                  for page in ["cli", "mcp", "installation", "config", "api", "migration",
                               "macos"]]
-        paths.append("scripts/docs/check-mirror-drift.sh")
+        paths += [
+            # Every docs page: the anchor and example checks read them all.
+            "site/src/content/docs/index.mdx", "site/src/content/docs/canonization.mdx",
+            "docs/reference/evidence.mdx", "docs/reference/docs.json",
+            "scripts/docs/check-mirror-drift.sh", "scripts/docs/check-doc-anchors.py",
+            "scripts/docs/check-doc-examples.py", "scripts/docs/test_check_doc_anchors.py",
+        ]
         for path in paths:
             with self.subTest(path=path):
                 self.assertEqual(classifier.classify_paths([path]), {"rust": False, "mirror": True})
 
     def test_unrelated_docs_and_evidence_stay_lightweight(self):
         self.assertEqual(classifier.classify_paths([
-            "README.md", "dev-diary/handoff.md", "site/src/content/docs/index.mdx",
+            "README.md", "docs/operations/dogfood-rig.md", "site/src/components/MdxNote.astro",
             "evidence/issue-221/README.md", "scripts/loadtest/mcp_load.py",
+            # formal/ outside the models the Rust tests read (#291).
+            "formal/README.md", "formal/lakefile.toml", "formal/lean-toolchain",
+            "formal/LamboProofs.lean", "formal/OracleExport/Order.lean",
+            "scripts/formal/check-oracle.sh",
         ]), {"rust": False, "mirror": False})
+
+    def test_what_docs_anchors_cite_runs_both(self):
+        # Rust inputs the docs' anchors also cite: a change to one can break a
+        # `lean:`, `const:`, `code:`, `test:` or `oracle:` anchor
+        # (check-doc-anchors.py, check-doc-examples.py), so it starts the docs
+        # job too: mcp.mdx cites integration tests under tests/ and the SQL
+        # schema under migrations/.
+        for path in [
+            "formal/LamboProofs/Canon.lean", "formal/oracle/Canon.json",
+            "src/formal_constants_tests.rs", "src/canon/eval.rs", "src/daemon/events.rs",
+            "tests/binary_parity.rs", "tests/serve_single_writer_lease.rs",
+            "migrations/sqlite/001_init.sql", "migrations/cockroach/001_init.sql",
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(classifier.classify_paths([path]), {"rust": True, "mirror": True})
 
     def test_workflow_and_ci_script_changes_validate_both(self):
         for path in [".github/workflows/release.yml", "scripts/ci/release_gate.py"]:
@@ -91,6 +124,11 @@ class EventClassification(unittest.TestCase):
         self.write("web/app.js", "changed")
         self.commit()
         self.assertEqual(self.classify(), {"rust": True, "mirror": False})
+
+    def test_push_src_runs_rust_and_docs(self):
+        self.write("src/lib.rs", "changed")
+        self.commit()
+        self.assertEqual(self.classify(), {"rust": True, "mirror": True})
 
     def test_pr_compares_base_to_checked_out_head(self):
         self.write("docs/reference/cli.mdx", "changed")

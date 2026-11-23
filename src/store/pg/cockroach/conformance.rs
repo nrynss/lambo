@@ -1856,7 +1856,7 @@ async fn conformance_suite() {
 ///    `EXPLAIN (OPT, VERBOSE)`, whose operator is spelled `vector-search`
 ///    (hyphenated), and asserted the spaced `vector search` — so it failed at the
 ///    first assertion on ANY cluster, behind ANY index, even with a perfect vector
-///    plan. See `dev-diary/evidence/20260813-131108-…-camera-proof-diagnosis.txt`.
+///    plan. See `evidence/20260813-131108-vector-index-camera-proof-diagnosis.txt`.
 /// 2. `WHERE embedding IS NOT NULL` — which is load-bearing and must not be removed,
 ///    since NULL-`dist` rows hard-error the `f64` decode — cannot be proven implied
 ///    by a NON-partial vector index, so the optimizer planned a FULL SCAN. T7.4 made

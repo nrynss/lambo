@@ -197,6 +197,37 @@ fn ordering_cap_and_dedup() {
     assert_eq!(REPLACEMENT_CANDIDATE_LIMIT, 3);
 }
 
+/// #302: a duplicate id keeps its highest-scoring occurrence wherever it
+/// stands in the store's order ("in any order", "ranked by cosine"), not
+/// its first one. Mirrors the Lean theorems `Supersession.keepF_best` (one
+/// entry per id, at its highest score) and
+/// `Supersession.selectF_order_independent` (the list does not depend on
+/// hit order or repetition), and the `selectF` examples on these inputs.
+#[test]
+fn a_duplicate_id_keeps_its_highest_cosine() {
+    use ConceptType::Logic;
+    let olds = (1..=4)
+        .map(|n| concept(n, &format!("{OLD} {n}"), Logic))
+        .collect();
+    let g = graph(concept(0, NEW, Logic), olds);
+    let hits = [
+        hit(1, 0.86),
+        hit(2, 0.90),
+        hit(3, 0.89),
+        hit(4, 0.88),
+        hit(1, 0.95),
+    ];
+    let want = vec![(id(1), 0.95), (id(2), 0.90), (id(3), 0.89)];
+    assert_eq!(listed(&g, &hits, &[]), want);
+    let reversed: Vec<_> = hits.iter().rev().cloned().collect();
+    assert_eq!(listed(&g, &reversed, &[]), want);
+    // An occurrence below the floor does not hide one above it.
+    assert_eq!(
+        listed(&g, &[hit(1, 0.50), hit(1, 0.92)], &[]),
+        vec![(id(1), 0.92)]
+    );
+}
+
 /// A pair already joined by `against` or `depends_on`, either way, is
 /// settled: never listed.
 #[test]
@@ -237,7 +268,7 @@ fn a_skipped_hit_is_not_listed() {
     assert_eq!(listed(&g, &hits, &[]).len(), 2);
 }
 
-/// M2: the concepts the write merged with are listed, marked `merged`
+/// The concepts the write merged with are listed, marked `merged`
 /// (every tied member, m3), ranked with the rest; the others are not
 /// marked. A merged concept the call also restated is still skipped.
 #[test]
@@ -439,7 +470,7 @@ fn dated_graph(new_at: (i64, Option<i64>), old_at: (i64, Option<i64>)) -> Graph 
     g
 }
 
-/// M1: a candidate dated after the new concept is listed but marked
+/// A candidate dated after the new concept is listed but marked
 /// `newer`, compared by the trigger's clamped about-time; an older one is
 /// not, and a tie is not (the trigger's tie rule records no direction, so
 /// nothing says the candidate is the later fact).

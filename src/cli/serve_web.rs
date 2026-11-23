@@ -1,9 +1,9 @@
-//! `lambo serve-web` — the T8.5 demo window: a read-only page onto a session.
+//! `lambo serve-web` — the demo window: a read-only page onto a session.
 //!
 //! # What it is
 //!
-//! A single axum server that renders three things and nothing else: the T5.3
-//! **recall context block verbatim**, the T6.4 **canonization event feed**, and
+//! A single axum server that renders three things and nothing else: the
+//! **recall context block verbatim**, the **canonization event feed**, and
 //! durable session counts. It is a window onto the product's real output, not a
 //! product — no framework, no build step, no client state beyond a poll cursor.
 //!
@@ -11,9 +11,13 @@
 //!
 //! It serves an explicit allowlist: the ordered union of the repeatable
 //! `--session` and `[web] sessions` ([`plan_sessions`]). There is no store
-//! discovery. An explicit credential `session_prefix` also reads existing
+//! discovery unless the operator opts in (#276: `[web] discover_sessions` or
+//! `--discover-sessions`, see `discovery`). An explicit credential
+//! `session_prefix` also reads existing
 //! sessions under that prefix, including sessions created after startup (#241).
-//! Exact scopes and `"*"` remain limited to the startup allowlist. Each session is read at `/s/{session}/` and
+//! Exact scopes and `"*"` remain limited to the startup allowlist, except that
+//! with discovery on, `"*"` (and the implicit and legacy grants) also reads
+//! the store's live sessions. Each session is read at `/s/{session}/` and
 //! `/s/{session}/api/...`; the unscoped `/` and `/api/...` are aliases for the
 //! first (the default), so a one-session portal is exactly what it was. With
 //! more than one session every name must pass the strict addressed-id charset
@@ -38,7 +42,7 @@
 //!
 //! # Read-only, by construction
 //!
-//! **Auth, mirroring T8.7's fail-closed rule.** Two consequences this module
+//! **Auth, mirroring the HTTP serve's fail-closed rule.** Two consequences this module
 //! is built around:
 //!
 //! 1. **This app must stay read-only.** Every route is registered with
@@ -63,10 +67,10 @@
 //! # Reader, not writer (spec §2.2)
 //!
 //! This process is a **reader**: it never constructs a [`Memory`], never takes
-//! the T8.6 writer lease, and never spawns GC — same discipline as
+//! the writer lease, and never spawns GC — same discipline as
 //! [`crate::cli::recall`] and [`crate::cli::stats`]. Recall runs
 //! `cli::recall::run_detailed_on` on the session's reader view, the same
-//! pipeline `lambo recall` runs through `run_detailed` (the H3
+//! pipeline `lambo recall` runs through `run_detailed` (the
 //! single-execution seam — CLI string, `hits` and `response_annotations` come
 //! from one run), so the page cannot drift from what the CLI and MCP surfaces
 //! return.
@@ -84,7 +88,7 @@
 //!   lease, which would mean this page could not run beside a live `lambo serve`.
 //! * **`flush_lag` / `log_depth` are reported as `n/a` only when no writer has
 //!   published them yet.** The writer's `FlushTask` publishes its flush stats
-//!   into the shared store after each cycle (T85-3), and this reader fetches
+//!   into the shared store after each cycle, and this reader fetches
 //!   them — so a live writer shows real numbers. When no writer has published
 //!   yet (or the store doesn't support it), the page reports `n/a`. A reader
 //!   that fabricated `0` would be claiming a durability bound it cannot see
@@ -98,7 +102,7 @@
 //! feed, and `durable_change_age_ms` (how long since this reader last observed
 //! the durable snapshot change) — all of which move during a demo scenario.
 //!
-//! # Deployment (P9 target: AWS)
+//! # Deployment (target: AWS)
 //!
 //! * **Self-contained binary.** `web/index.html`, `web/app.css` and `web/app.js`
 //!   are `include_str!`-embedded. No CDN, no webfont, no asset directory to
@@ -127,6 +131,7 @@
 //! | `headers` | `nosniff` on every response the router answers, and the page CSP on `text/html`, as the outermost layer (#92) |
 //! | `auth` | [`AuthToken`], env-over-flag resolution, the non-loopback refusal, the credential set and the bearer gate |
 //! | `scope` | which session a request reads: the per-request resolution, before routing (#4) |
+//! | `discovery` | opt-in store-wide session discovery: who it reaches, the single-flight store read (#276) |
 //! | `state` | `AppState`: served sessions, backends, credential set, view cache |
 //! | `views` | the per-session reader views: one load per TTL, single-flight, bounded (#4) |
 //! | `dto` | every response and query type |
@@ -158,6 +163,7 @@ use crate::store::StoreKind;
 use crate::types::SessionId;
 
 mod auth;
+mod discovery;
 mod dto;
 mod headers;
 mod projections;
@@ -173,7 +179,7 @@ use routes::router;
 use state::AppState;
 
 // ---------------------------------------------------------------------------
-// Embedded assets — the whole client, compiled into the binary (P9/AWS).
+// Embedded assets — the whole client, compiled into the binary (AWS target).
 // ---------------------------------------------------------------------------
 
 const INDEX_HTML: &str = include_str!("../../web/index.html");
@@ -253,7 +259,7 @@ pub struct ServedSessions {
 /// sessions`: their ordered union, each once, the first the default.
 ///
 /// Refuses (a usage error, exit 2) an empty union, and every name
-/// [`check_served`] refuses. The CLI runs it before any backend is built,
+/// `check_served` refuses. The CLI runs it before any backend is built,
 /// so a bad name costs no model load.
 pub fn plan_sessions(cli: &[String], web: &WebConfig) -> Result<ServedSessions, CliError> {
     let mut sessions: Vec<String> = Vec::new();
@@ -427,11 +433,11 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
 
     // Fail fast on an unprovisioned or unreachable store, as the startup load
     // used to. Sessions themselves load lazily, on the first request that
-    // needs one (#4 Q15), and the H1 mismatch warning moves to that load,
-    // naming the session. H1 reader policy is otherwise unchanged: the
-    // structural portal stays available, `/api/session` and `/api/pulse`
-    // carry the stored and live contracts (the page renders a banner), and
-    // recall stays fail-closed on a mismatched session.
+    // needs one (#4 Q15), and the contract mismatch warning moves to that
+    // load, naming the session. The mismatch reader policy is otherwise
+    // unchanged: the structural portal stays available, `/api/session` and
+    // `/api/pulse` carry the stored and live contracts (the page renders a
+    // banner), and recall stays fail-closed on a mismatched session.
     backends
         .store
         .preflight_schema()
@@ -531,6 +537,19 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
              the token."
         );
     }
+    // #276: who discovery reaches, by credential name, and where it lists.
+    if state.discovery.enabled() {
+        let reached: Vec<&str> = state
+            .authority
+            .grants()
+            .into_iter()
+            .filter(|grant| state.discovery.reaches(grant))
+            .map(|grant| grant.name())
+            .collect();
+        for note in discovery::startup_notes(&reached, exposed, state.list_sessions) {
+            eprintln!("⚑ lambo serve-web: {note}");
+        }
+    }
     let implicit = !state.authority.requires_bearer();
     let unserved = auth::unserved_names(&state.authority, &state.sessions);
     // A prefix with no startup pins can still read existing dynamic sessions.
@@ -548,7 +567,9 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         legacy_beside_configured,
         &warning_reach,
         &unserved,
-        implicit && state.list_sessions,
+        // `[web] list_sessions` itself: discovery's own listing on loopback
+        // is announced by its startup notes above (#276).
+        implicit && args.web.list_sessions,
         inherit_note,
     ) {
         eprintln!("⚑ lambo serve-web: {warning}");
@@ -568,11 +589,10 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
 /// one line each, never a token:
 ///
 /// * the legacy token beside configured credentials (`[[web.credential]]`
-///   or inherited ones; review L1: the line names both, since either may be
-///   the only kind): a `LAMBO_AUTH_TOKEN`
-///   left exported after credentials were configured keeps `default`, and
-///   with it every served session, readable by whoever holds it (as
-///   `lambo serve` warns, #32 PR 5 review I3);
+///   or inherited ones; the line names both, since either may be the only
+///   kind): a `LAMBO_AUTH_TOKEN` left exported after credentials were
+///   configured keeps `default`, and with it every served session, readable
+///   by whoever holds it (as `lambo serve` warns, #32 PR 5 review);
 /// * a credential that names sessions not on the allowlist (`unserved`):
 ///   they are never read, whatever the credential says;
 /// * a credential that reads no served session (its names are not on the
@@ -580,9 +600,9 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
 ///   only the uniform 404;
 /// * the listing under the implicit grant (`listing_unauthenticated`):
 ///   every served name to anyone who reaches the port (design 6.2, R5);
-/// * `inherit_serve_credentials` on with nothing to import (`inherit`,
-///   review L3): the operator expects agent tokens to work, and with no
-///   other credential the portal is in fact unauthenticated on loopback.
+/// * `inherit_serve_credentials` on with nothing to import (`inherit`): the
+///   operator expects agent tokens to work, and with no other credential the
+///   portal is in fact unauthenticated on loopback.
 fn startup_warnings(
     legacy_beside_configured: bool,
     reach: &[(&str, usize)],
@@ -641,7 +661,7 @@ fn startup_warnings(
 }
 
 /// Why `inherit_serve_credentials` imported nothing, for
-/// [`startup_warnings`] (review L3).
+/// [`startup_warnings`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InheritNote {
     /// Nothing imported; other credentials still require a bearer.
@@ -651,7 +671,7 @@ enum InheritNote {
     NothingImportedUnauthenticated,
 }
 
-/// [`InheritNote`] for a portal over `credentials` (review L3): `None`
+/// [`InheritNote`] for a portal over `credentials`: `None`
 /// unless `[web] inherit_serve_credentials` is on and no credential came
 /// from `[serve]`. Names are unique across both tables, so an imported
 /// credential is any that `[[web.credential]]` does not name.

@@ -1,0 +1,110 @@
+{
+  "workers": 16,
+  "secs": 120.0,
+  "think": 0.5,
+  "seed": 1,
+  "mix": {
+    "lambo_recall": 40.0,
+    "lambo_derive": 38.0,
+    "lambo_record_action": 18.0,
+    "lambo_stats": 4.0
+  },
+  "wall_s": 121.0,
+  "drain": {
+    "drained": true,
+    "drain_s": 0.5,
+    "drain_timeout_s": 300.0
+  },
+  "calls": 3474,
+  "ok_calls": 3474,
+  "latency_ms": {
+    "lambo_derive": {
+      "n": 1344,
+      "p50": 43.99,
+      "p90": 87.33,
+      "p99": 125.85,
+      "mean": 44.97,
+      "max": 171.01
+    },
+    "lambo_recall": {
+      "n": 1348,
+      "p50": 48.25,
+      "p90": 92.73,
+      "p99": 133.87,
+      "mean": 52.28,
+      "max": 197.82
+    },
+    "lambo_record_action": {
+      "n": 641,
+      "p50": 47.36,
+      "p90": 95.0,
+      "p99": 156.85,
+      "mean": 50.15,
+      "max": 283.0
+    },
+    "lambo_stats": {
+      "n": 141,
+      "p50": 14.53,
+      "p90": 70.12,
+      "p99": 101.09,
+      "mean": 25.45,
+      "max": 102.26
+    }
+  },
+  "errors": {},
+  "worker_errors": 0,
+  "worker_error_kinds": {},
+  "writes": {
+    "acked": 1985,
+    "refused_at_ack": 0,
+    "refused_at_ack_reasons": {},
+    "transport_failed": 0,
+    "receipts_queried": 1985,
+    "receipt_states": {
+      "applied": 1985
+    },
+    "settled": 1985,
+    "failed": 0,
+    "failure_rate": 0.0,
+    "write_failure_rate_all": 0.0,
+    "failed_reasons": {},
+    "failed_reasons_server_ledger": {},
+    "sampled": false
+  },
+  "flags": {
+    "expired_receipts": 0,
+    "retention_risk": false,
+    "receipt_retention_s": 300.0
+  },
+  "reasons_redacted": true,
+  "final_stats": {
+    "concept_count": 14639,
+    "dead_lettered": 0,
+    "degraded": false,
+    "embedded_concepts": 14639,
+    "write_queue_abandoned": 0,
+    "write_queue_accepted": 1985,
+    "write_queue_applied": 1985,
+    "write_queue_apply_ms_max": 301,
+    "write_queue_apply_ms_p50": 120,
+    "write_queue_apply_ms_p90": 181,
+    "write_queue_apply_samples": 256,
+    "write_queue_bound": 1024,
+    "write_queue_bound_source": "observed",
+    "write_queue_deferred": 0,
+    "write_queue_dropped": 0,
+    "write_queue_dropped_closed": 0,
+    "write_queue_failed": 0,
+    "write_queue_items_per_sec": 55.39255833660357,
+    "write_queue_lane_bound": 64,
+    "write_queue_measured": true,
+    "write_queue_outstanding": 0,
+    "write_queue_probe_optimism": 4.096655585340084,
+    "write_queue_probe_serial_items_per_sec": 25.65853858047368,
+    "write_queue_replay_blocked": null,
+    "write_queue_replay_owed": 0,
+    "write_queue_replayed": 0,
+    "write_queue_serial_items_per_sec": 6.263289174782712
+  },
+  "problems": []
+}

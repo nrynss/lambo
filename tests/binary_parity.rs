@@ -687,10 +687,10 @@ fn mcp_stdio_publishes_the_spec_tools_and_the_image_tool_and_refuses_a_client_ti
     let mut mcp = spawn_serve_stdio(&s, SESSION, "agent-a");
     initialize(&mut mcp);
 
-    // tools/list -> the seven spec §6.2 tools, plus lambo_derive_image
+    // tools/list -> the seven spec §6.2 tools and lambo_stale, plus lambo_derive_image
     // because the fixture embedder embeds images (#22 design 6.1; a
-    // text-only deployment lists exactly the seven, pinned in-process by
-    // server.rs the_router_publishes_exactly_the_seven_spec_tools).
+    // text-only deployment lists exactly the eight core tools, pinned in-process by
+    // src/mcp/server/tests/schemas.rs the_router_publishes_exactly_the_eight_core_tools).
     mcp.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
     let listed = mcp.read_response(2);
     assert!(

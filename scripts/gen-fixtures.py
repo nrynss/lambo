@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate Lambo v0.1 fixture graphs (T1.4). Run from repo root:
+"""Generate Lambo v0.1 fixture graphs. Run from repo root:
 
     python3 scripts/gen-fixtures.py
 
@@ -32,6 +32,8 @@ SID = "session-rest-api"
 
 # --- canonical keys ----------------------------------------------------------
 # Porter (English) stems for the closed fixture vocabulary (probe-verified).
+# "Porter" here and in the fixture notes means rust-stemmers' Algorithm::English,
+# Snowball English (Porter2); the wording stays so the generated fixtures do not change.
 STEM = {
     "registering":"regist","register":"regist","registered":"regist",
     "users":"user","user":"user","systems":"system","system":"system",
@@ -305,7 +307,7 @@ recall_goldens = {
     ],
 }
 
-# --- canonicalization-cases (T6 contract) -------------------------------------
+# --- canonicalization-cases (canonization contract) ---------------------------
 canon_cases = [
     {"category": "case",   "input": "User Schema", "expected_key": "schema user", "note": "lowercase + sort"},
     {"category": "hyphen", "input": "user-schema", "expected_key": "schema user", "note": "split hyphens"},

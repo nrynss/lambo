@@ -4,7 +4,7 @@
 //! # `lambo_derive_image` is listed only where it can work (#22 design 6.1)
 //!
 //! The router keeps the tool only when the session's embedder embeds images
-//! or the operator accepts client vectors ([`image_tool_listed`]). Both are
+//! or the operator accepts client vectors (`image_tool_listed`). Both are
 //! process facts: the embedder is resolved once per process and
 //! `accept_client_vectors` is process config, so every session one serve
 //! holds lists the same tools, and nothing about a session or a caller
@@ -17,7 +17,7 @@
 //! never a second [`Memory`] (a second one would spawn a rival task trio
 //! against a divergent RAM copy of the same session).
 //!
-//! # F18 — flush timestamps are server-side
+//! # Flush timestamps are server-side
 //!
 //! `created_at` remains server-stamped for every tool call. `lambo_derive` and
 //! `lambo_record_action` additionally accept an optional `event_time`: the
@@ -42,8 +42,8 @@
 //!
 //! * `params` — the published parameter schemas and the `agent_id` door check;
 //! * `response` — model-safe errors, warnings, receipts and panic containment;
-//! * `trace` — the I1 ledger's per-call trace slot and recall facts;
-//! * `stats` — the `lambo_stats` / I2 heartbeat payload;
+//! * `trace` — the call ledger's per-call trace slot and recall facts;
+//! * `stats` — the `lambo_stats` / heartbeat payload;
 //! * `tools` — the tool bodies, one file per tool (the two text writes share
 //!   one).
 
@@ -85,7 +85,7 @@ pub(crate) use trace::{CallCredential, CallGrant};
 pub struct LamboServer {
     mem: Arc<Memory>,
     tool_router: ToolRouter<Self>,
-    /// I1 call ledger, `None` unless `serve --ledger` named a path.
+    /// Call ledger, `None` unless `serve --ledger` named a path.
     ///
     /// `None` is the whole of "off": no scope is established, so no facts are
     /// built, no timestamps are taken beyond the one `Instant` every call
@@ -106,7 +106,7 @@ pub struct LamboServer {
     /// by a multi-session serve from `[serve] layers`.
     layers: layers::ServerLayers,
     /// Whether this session is itself a layer of another session in this
-    /// serve (#33 PR 4 review L2): every project reads it, so its own
+    /// serve (#33 PR 4 review): every project reads it, so its own
     /// writes refuse relative file paths as a write scoped to it does. Set
     /// by a multi-session serve from `[serve] layers`; `false` otherwise.
     is_layer: bool,
@@ -150,7 +150,7 @@ impl LamboServer {
     }
 
     /// The same handle, serving a session that is itself a layer of
-    /// another (#33 PR 4 review L2). Clones share it.
+    /// another (#33 PR 4 review). Clones share it.
     pub(crate) fn serving_a_layer(self, is_layer: bool) -> Self {
         Self { is_layer, ..self }
     }
@@ -178,7 +178,7 @@ impl LamboServer {
         }
     }
 
-    /// The same handle, recording every tool call to the I1 ledger.
+    /// The same handle, recording every tool call to the call ledger.
     ///
     /// `serve --ledger` is the only caller. Clones share the ledger, as they
     /// share the `Memory`: the streamable-http transport clones this handle per
@@ -206,7 +206,7 @@ impl LamboServer {
     }
 
     /// Run a tool through [`LamboServer::observed`] and then piggyback this
-    /// caller's settled write receipts onto the result (J3).
+    /// caller's settled write receipts onto the result.
     ///
     /// **One wrapper, so it cannot be forgotten for one tool.** The same
     /// reasoning that keeps every `*_impl` behind
@@ -252,13 +252,13 @@ pub(crate) fn image_tool_listed(mem: &Memory) -> bool {
         || mem.config().accept_client_vectors
 }
 
-// Each `#[tool]` handler is a thin, panic-contained wrapper (R1/T82-5) around a
+// Each `#[tool]` handler is a thin, panic-contained wrapper around a
 // `*_impl` body in the plain `impl` block below. Keeping the bodies out of the
 // macro'd block means the containment cannot be forgotten for one tool: the
 // wrapper is the only thing the router can reach.
 #[tool_router]
 impl LamboServer {
-    /// Three-phase recall (spec §8) rendered as the T5.3 context block.
+    /// Three-phase recall (spec §8) rendered as the context block.
     ///
     /// The block is returned verbatim as text content — it is the artifact the
     /// calling agent is meant to read — with warnings appended as a *second*
@@ -282,7 +282,7 @@ impl LamboServer {
 
     /// Derive concepts from a fresh interaction (spec §7).
     ///
-    /// The interaction's `created_at` is stamped server-side (F18). Callers may
+    /// The interaction's `created_at` is stamped server-side. Callers may
     /// optionally supply the evidence's historical `event_time`.
     #[tool(
         name = "lambo_derive",
@@ -329,7 +329,7 @@ impl LamboServer {
     }
 
     /// Record an agent action (spec §7) — a `Resource` concept plus `Causal` /
-    /// `Dependency` edges, on a fresh server-stamped interaction (F18).
+    /// `Dependency` edges, on a fresh server-stamped interaction.
     #[tool(
         name = "lambo_record_action",
         description = "Record an action the agent took, with what it produces, modifies and \
@@ -360,17 +360,17 @@ impl LamboServer {
 
     /// Take (or release) a soft lock on a node — spec §11.
     ///
-    /// Not durable: reservations are RAM-local to this process (pinned contract
-    /// S5). "No reservation" after a restart does **not** mean nobody else is
-    /// working on the node.
+    /// Not durable: reservations are RAM-local to this process (a pinned
+    /// contract). "No reservation" after a restart does **not** mean nobody
+    /// else is working on the node.
     ///
-    /// **Cooperative, and said so out loud (J1).** The lock is held under the
+    /// **Cooperative, and said so out loud.** The lock is held under the
     /// caller-asserted `agent_id`, which nothing here authenticates — over stdio
     /// the client owns the process, over HTTP one token authenticates the server
     /// rather than each agent. So: distinct ids get distinct locks and contend
     /// honestly; callers that send the same id share one lock and can release
     /// each other's. That is the same trust level §11 soft locks always had
-    /// (advisory, RAM-only, never blocking a write); what J1 removed was the
+    /// (advisory, RAM-only, never blocking a write); what was removed is the
     /// blanket refusal of foreign ids, which left every client but one of a
     /// shared serve with no mutual-exclusion primitive at all.
     #[tool(
@@ -471,7 +471,7 @@ impl LamboServer {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for LamboServer {
     /// The macro's own dispatch, inside the call's credential scope
-    /// (#32 PR 5 review I6): the configured credential the HTTP request
+    /// (#32 PR 5 review): the configured credential the HTTP request
     /// authenticated as, read from the request parts rmcp attaches, so the
     /// call ledger can name it. Stdio, and the `default` and `local`
     /// credentials, carry none.
@@ -486,7 +486,7 @@ impl ServerHandler for LamboServer {
             .map(|credential| Arc::clone(&credential.0));
         // #33 PR 3: how the call arrived, for a layered call's per-layer
         // check: an HTTP request with its grant (or, refused, without one),
-        // or no parts at all (stdio and the J2 endpoint).
+        // or no parts at all (stdio and the session endpoint).
         let auth = parts.map(|parts| {
             trace::CallAuth::Http(
                 parts

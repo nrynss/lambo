@@ -809,8 +809,9 @@ impl LamboServer {
     /// as one field on one line** (J1-R1-1, below).
     ///
     /// **The id is caller-asserted and unauthenticated.** Over stdio the client
-    /// owns the process; over HTTP one bearer token authenticates the server,
-    /// not each agent. So identity here is a cooperative declaration, exactly
+    /// owns the process; over HTTP a bearer token or a `[[serve.credential]]`
+    /// authenticates a client to the server, never an agent. So identity here
+    /// is a cooperative declaration, exactly
     /// like the soft locks it drives (spec §11: advisory, RAM-only). Distinct
     /// ids get distinct locks; callers sharing an id share locks knowingly. The
     /// compensating control is that this is *said out loud* — in every
@@ -861,8 +862,8 @@ impl LamboServer {
         // it: measured (J1-R2-3), a 256-char holder still evicts the block it
         // annotates below ~160 `max_tokens`, and the reservation line renders
         // outside the budget entirely. The remainder is a rendering-side
-        // question, carried as a §J2 residual in
-        // `dev-diary/lambo-for-mooshik/J-multi-client.md` — not closed here.
+        // question, an open J2 residual (a losing serve proxies to the
+        // holder), not closed here.
         // The divergence from
         // `--agent` and from `AgentId` (both uncapped) is deliberate: this
         // door is where unauthenticated remote identity is policed; trusted

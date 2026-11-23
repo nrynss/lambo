@@ -120,7 +120,7 @@ Every recall also reports how strong its best match was, as two fields beside `h
 
 | Field | What it is | When it is `None` |
 |---|---|---|
-| `bm25` | The keyword leg's best BM25 score, as the index returned it. `Some(0.0)` means the leg ran and no concept shares a word with the query. A concept whose durable name matches the query is ranked with a keyword score of 1.0 in place of its BM25; `bm25` is never that 1.0, it is the index's own best (see `exact_name_match`). | The keyword leg did not run: no inverted index installed, a recall by image or vector with no text, or a dependency question answered by graph traversal. Also when every score the index returned was not a finite number. |
+| `bm25` | The keyword leg's best BM25 score, as the index returned it. `Some(0.0)` means the leg ran and no concept shares a word with the query. A concept whose durable name matches the query is ranked with a keyword score of at least 1.0, the higher of its own BM25 and 1.0, however far down the matches its BM25 ranks; `bm25` never takes that floor, it is the index's own best (see `exact_name_match`). | The keyword leg did not run: no inverted index installed, a recall by image or vector with no text, or a dependency question answered by graph traversal. Also when every score the index returned was not a finite number. |
 | `vector_cosine` | The vector leg's best cosine similarity between the query and a stored concept vector. | The vector leg did not run or found nothing: a store without vector search, a failed query embed or vector read, no embedded concept, or a dependency question answered by graph traversal. Also when the leg ran but nothing it returned counts: every cosine was not a finite number, or every concept it returned is outside the graph the recall answers from (below). |
 | `exact_name_match` | `true` when the query is the durable name of a concept of the session, compared after the same normalization as names (so a case or spacing variant of the name matches): direct evidence the store holds what was asked for, which no BM25 value expresses. | Never; `false` when the keyword leg did not run. |
 
@@ -237,7 +237,11 @@ contradiction, ties going to the smaller canonical key and then the smaller
 id of `by`. `writer` is the agent acting when the edge was first written,
 falling back to `by`'s origin agent. No `DaemonEvent` is published for it.
 Recall re-validates it at read time like every hot entry, so it lapses when
-newer evidence becomes eligible, or when `by` is collected. The entries of one detector pass share one writer
+newer evidence becomes eligible, or when `by` is collected. Each cycle the
+hot list is first cut to what that cycle detects, and only then are the
+budget and the bound enforced (#298), so an entry the cycle no longer
+detects never evicts a fresh one: while the cycle's hits fit, the list
+holds every one of them. The entries of one detector pass share one writer
 timeline, rebuilt only when the graph's epoch moves.
 
 Recall renders `recall::format::contradiction_warning` on the hit and
@@ -493,7 +497,7 @@ on.
 
 ## Settings
 
-`Config` holds the product settings: recall defaults, flush timing, canonization thresholds, and scoring weights. Pass it to the builder with `.config(...)`.
+`Config` holds the product settings: recall defaults, flush timing, canonization cadence and limits, and scoring weights. The canonization gate thresholds are compiled into Lambo and are not `Config` fields. Pass it to the builder with `.config(...)`.
 
 These are library settings you pass in Rust when you build a `Memory`. Thirteen of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `canonization_supersede` is a top-level boolean; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`; `[embedder]` carries `accept_client_vectors` (with a `LAMBO_ACCEPT_CLIENT_VECTORS` override), `calibration`, `calibrated_merge_threshold` and `calibrated_layer_floor` (#87), and `suspected_supersession_line` (#198). `[fusion]` carries `recall_fusion` (#173). `[selection]` carries `recall_selection` (#181). Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/config).
 
@@ -512,7 +516,7 @@ let mem = Memory::builder()
 | `default_top_k` | `5` | Hits a recall returns when the caller omits `top_k`. |
 | `default_max_tokens` | `500` | Token budget for the rendered context block. |
 | `default_traversal_depth` | `2` | Graph expansion depth during recall. |
-| `match_strategy` | `Hybrid` | `Canonical` or `Hybrid` — selects the recall matching scope, whether a derive embeds, **and** the call-time validation rule set (see `MatchStrategy` in the source authority). J3-R2R-7: `Canonical` adds `reject_repeated_observation` and the single-`Hierarchical`-parent rule. |
+| `match_strategy` | `Hybrid` | `Canonical` or `Hybrid` — selects the recall matching scope, whether a derive embeds, **and** the call-time validation rule set (see `MatchStrategy` in the source authority). `Canonical` adds `reject_repeated_observation` and the single-`Hierarchical`-parent rule. |
 | `semantic_match_threshold` | `0.85` | Similarity above which two concepts match. Must be between `0` and `1`. |
 | `accept_client_vectors` | `false` | Whether the surfaces (MCP and CLI) accept a vector a client computed, for an image or a query. A process setting: every session one `lambo serve` holds gets the same value. `Memory` itself does not read it. Set from `[embedder] accept_client_vectors` or `LAMBO_ACCEPT_CLIENT_VECTORS`. |
 | `calibration` | `Builtin` | Whether recall uses the built-in per-contract recent-leg score and layer floor (#87): `Builtin` or `Off`. Set from `[embedder] calibration`. |
@@ -520,19 +524,19 @@ let mem = Memory::builder()
 | `calibrated_layer_floor` | `true` | Whether, in this session's layered recall, a layer whose floor was not set takes its embedding contract's measured floor (#87; EmbeddingGemma 2 at 768 dims: 0.72) instead of 0.50. Needs `calibration` at `Builtin`. A floor set with `with_min_similarity` always applies. Set from `[embedder] calibrated_layer_floor`. |
 | `suspected_supersession_line` | `Validated` | When recall shows the `⚠ Possibly superseded by "…" (id …), not declared` line on the older hit of a suspected supersession (#198): `Validated` only under an embedding contract whose trigger precision was measured at 0.90 or better (BGE-M3), `On` for every contract, `Off` for none. The `possibly_superseded_by` field is set either way. Set from `[embedder] suspected_supersession_line`; see [Configuration](/config). |
 | `backend_flush_interval` | 1 second | How often pending writes flush, which sets how far behind durable storage a session can be. |
-| `backend_flush_max_batch` | `500` | Mutations per flush batch. |
-| `backend_flush_retries` | `3` | Attempts before a batch is dead-lettered. |
-| `backend_log_max` | `50000` | Cap on the write-behind log. |
+| `backend_flush_max_batch` | `500` | Early-flush trigger, not a cap: once this many mutations wait to be flushed, they flush before the next interval tick (checked every 100 ms), except during the 10 s hold after a batch's retries ran out. A flush sends everything waiting, which can be more, for example a batch retained through an outage with the writes behind it. |
+| `backend_flush_retries` | `3` | Retries after a flush attempt that failed with a retryable error (an outage, a timeout), so `backend_flush_retries + 1` attempts, with a backoff from 100 ms doubling to at most 10 s. When they are used up the batch is kept, not dropped, and tried again, with any newer writes behind it, after a 10 s hold. Three kinds of error are neither retried nor kept. A batch the store rejects with a constraint violation, or because of a value it cannot store (a character its encoding cannot hold, a row too big), is dead-lettered at once (dropped and counted in `dead_lettered`) and the session goes on; the dead letter is the whole batch, writes kept from an earlier outage included, and it counts once. A batch the store rejects with a permanent error about the store itself (an undefined table or column, a missing privilege) degrades the session at once, as under `backend_log_max`, rather than being retried and kept until the backlog does; `close` then returns an error. Connection failures, timeouts, serialization conflicts and any error not known to be permanent are retried as above. A stale write (another writer took the lease) fences the handle and drops the batch. |
+| `backend_log_max` | `50000` | Degrade threshold, not a cap: when the mutations not yet durable (the in-memory log and the batch being flushed) exceed it, or the store rejects a batch with a permanent error about the store itself (see `backend_flush_retries`), the session degrades to `durability = "none"`. The flush loop stops writing to the store and drops the backlog it holds, retained writes included, and everything it drains after; if `close` stops the loop first, the backlog returns to the log. Either way `close` returns an error. While recalls run during an outage, their access counts can take up to half of it. |
 | `daemon_tick_interval` | 1 second | How often the background workers rescore and re-run the detectors. |
 | `max_canonical_nodes` | `1000` | Cap on canonical concepts. |
 | `canonization_min_peer_count` | `20` | Inert since 0.6.0: no policy reads it, because Stage 1 admits on evidence with no peer minimum. A non-default value is named by `Config::warnings`. |
-| `canonization_edge_min_age` | 60 seconds | How long an edge must exist before it counts as evidence. |
+| `canonization_edge_min_age` | 60 seconds | Age floor for canonization evidence. The promotion stages measure it on about-time: an edge or interaction counts once its about-time is this far before the cycle's clock, so one with an older `event_time` counts at once. Supersession and the contradiction warning measure it on write time: evidence counts once it was written this long ago. |
 | `canonization_coverage_window` | 14 days | Stage 2 denominator cap: eligible evidence spread / min(session extent, cap). At least one day, in whole milliseconds, at most `i64::MAX` milliseconds. A library setting only; older evidence does not expire. |
 | `canonization_eval_interval` | 60 seconds | How often promotion is evaluated. Also settable from the file, as `[daemon] canonization_eval_interval_secs`. |
 | `canonization_eval_batch_size` | `50` | Concepts evaluated per pass. |
-| `canonization_repromotion_cooldown` | 300 seconds | Wait before a demoted concept can be promoted again. |
+| `canonization_repromotion_cooldown` | 300 seconds | After a demotion, how long the concept cannot be promoted to Canonical (Stage 3) or supersede another concept. It can return to Candidate and Venerable meanwhile. |
 | `canonization_supersede` | `false` | Evidence-driven supersession (see [Supersession](#supersession)). Also settable from the file, as the top-level `canonization_supersede` key. |
-| `promotion_policy` | `Swarm` | Which promotion policy canonization runs. `Swarm` admits a Candidate on evidence: `gc_survived >= 3` and dependents from at least two interactions other than the concept's own (no peer minimum, no percentile cut; the composite score only orders the queue), and every later hop is its stage's verdict. `Solo` (single-writer promotion) admits a Candidate when `(Sessions × 1.0) + (Human Confirmed × 4.0) + (Dependent Interactions × 2.0) − (Reverts × 3.0)`, multiplied by its concept type's eviction resistance (Constraint 1.5 … Observation 0.7), reaches 3.0; sessions are distinct ≥24-hour-apart supports (derivations and declared dependents; since 0.6.0 not actions that only produced or modified the concept) measured on **event time**, dependent interactions are the same count Swarm's Stage 1 reads, and human confirmations enter only through the confirm verb (`Memory::confirm_human`), never an agent write. Under `Solo` the Candidate → Venerable and Venerable → Canonical hops need the score's band (6.0 / 10.0) **and** the stage verdict Swarm needs, cooldown included (since 0.6.0; before, the band alone decided). `Swarm` stays the default. Selectable from `lambo.toml` or `LAMBO_PROMOTION_POLICY` (see [Configuration](/config)); there is no `serve` flag. |
+| `promotion_policy` | `Swarm` | Which promotion policy canonization runs. `Swarm` admits a Candidate on evidence: `gc_survived >= 3` and dependents from at least two interactions other than the concept's own (no peer minimum, no percentile cut; the composite score only orders the queue), and every later hop is its stage's verdict. `Solo` (single-writer promotion) admits a Candidate when `(Sessions × 1.0) + (Human Confirmed × 4.0) + (Dependent Interactions × 2.0) − (Reverts × 3.0)`, multiplied by its concept type's eviction resistance (Constraint 1.5 … Observation 0.7), reaches 3.0; sessions are distinct ≥24-hour-apart supports (derivations and declared dependents; since 0.6.0 not actions that only produced or modified the concept) measured on **event time**, dependent interactions count, as Swarm's Stage 1 does, the distinct other interactions the concept's dependents come from (aged, its own origin excluded), and both terms date a declared dependence by the interaction that wrote it, not by the dependent's origin (since 0.15.0, #300: a repeated `record_action` that adds a new `depends_on` now counts on its own day; in the other direction, a dependence written in the concept's own origin interaction from an older concept no longer counts and its support moves to the writing day, so existing Solo Candidates and Venerables can lose score; Stage 1 under Swarm, and Stage 2 under both policies, credit the dependent's origin, so writer-dated evidence can make a Solo Candidate that Stage 2 never credits toward Venerable), and human confirmations enter only through the confirm verb (`Memory::confirm_human`), never an agent write. Under `Solo` the Candidate → Venerable and Venerable → Canonical hops need the score's band (6.0 / 10.0) **and** the stage verdict Swarm needs, cooldown included (since 0.6.0; before, the band alone decided). `Swarm` stays the default. Selectable from `lambo.toml` or `LAMBO_PROMOTION_POLICY` (see [Configuration](/config)); there is no `serve` flag. |
 | `scoring` | `0.25`, `0.20`, `0.20`, `0.35` | Recency, frequency, session activity, and density weights. |
 | `recall_weights` | `0.5`, `0.5` | How much the background score and the query relevance each contribute. |
 | `recall_fusion` | `max` | How recall combines its keyword, vector and recent legs into the query relevance (#173): `RecallFusion { kind, k, keyword_weight, vector_weight, recent_weight }`, `FusionKind::Max` (the highest raw leg score) or `FusionKind::Rrf` (reciprocal rank fusion, `k` 3, weights 1, 1 and 0.3). Set from `[fusion]`; see [Recall fusion](/config#recall-fusion) for the measurements. |
@@ -593,10 +597,10 @@ A session has exactly one writer. Lambo enforces this in the store with a per-se
 
 - `build()` acquires the lease or fails, naming the process that holds it. `close()` releases it.
 - A heartbeat keeps a live holder's lease fresh and lets a crashed holder's lease expire.
-- If a holder's lease is taken over, that holder is fenced. Its further writes are refused and its pending writes are dropped, so it cannot overwrite the new holder.
+- If a holder's lease is taken over, that holder is fenced. Its further writes are refused and its pending writes are dropped, so it cannot overwrite the new holder. It is fenced at the first flush the store refuses for its stale token or at its next heartbeat, whichever comes first, and also when its own heartbeat takes the lease back at a new token (after an operator takeover, for example).
 
 <Note>
-There is one known limitation. The fence trips when the holder's heartbeat notices the loss, not at the instant it happens. After a lease expires and a new writer takes over, the old holder can still write for a short, bounded window. This matters most when many writers contend on one session. It is tracked in [issue #1](https://github.com/nrynss/lambo/issues/1).
+There is one known limitation. The fence trips when the holder notices the loss, at its next heartbeat or at the first flush the store refuses for its stale token, not at the instant it happens. After a lease expires and a new writer takes over, the old holder can still write for a short, bounded window. This matters most when many writers contend on one session. It is tracked in [issue #1](https://github.com/nrynss/lambo/issues/1).
 </Note>
 
 See [MCP tools](/mcp) and [Configuration](/config).
@@ -673,6 +677,18 @@ now)` lost its `evidence` argument: the evaluator only asks it about a node
 whose stage verdict passed, and asks it first when building the Stage 2 and
 Stage 3 windows, so under Solo a node whose band cannot admit the hop is
 never probed. `canon::solo_breakdown` returns the Solo score's terms.
+`PromotionScorer::candidates_with` and `admits_hop_with` (0.15.0, #300)
+take a `canon::Writers`, the graph's writer attribution that Solo's
+dependents term reads; the evaluator lends its own, cached by graph epoch,
+so a cycle resolves it once, and only for a scorer whose `reads_writers()`
+is true (default `false`; Solo overrides it). Any other scorer gets
+`Writers::unresolved()`, and Solo, handed unresolved ones, resolves its
+own. `Writers` is opaque outside the crate: external code can build one
+(`Writers::of(&graph)`, `Writers::unresolved()`) and pass it along but
+cannot read it, and `PromotionPolicy::scorer()` dispatches only the two
+built-in scorers, so only Solo reads writers. Their defaults call
+`candidates` and `admits_hop`, and `canon::solo_dependent_interactions`
+resolves its own.
 `EvalParams::min_peer_count` and `Config::canonization_min_peer_count` are
 `#[deprecated]` and inert.
 

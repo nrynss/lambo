@@ -1,16 +1,16 @@
-//! In-memory inverted index over concept content + BM25 scoring (T2.6).
+//! In-memory inverted index over concept content + BM25 scoring.
 //!
 //! Recall phase 1's keyword source (spec §8): concepts are tokenized once at
 //! [`InvertedIndex::add`] time and the postings are maintained **incrementally** —
 //! add / update / remove never rebuild the index. The only bulk path,
 //! [`InvertedIndex::from_snapshot`], is repeated `add` under the hood.
 //!
-//! Per-session `df`: the index is a per-session structure (the owner, T2.3+,
+//! Per-session `df`: the index is a per-session structure (the owner
 //! keeps one [`InvertedIndex`] per session); document frequency is computed over
 //! the documents currently indexed in it.
 //!
 //! Concepts only — interactions are not searchable (spec §8 phase 1 searches
-//! concept content). [`InvertedIndex`] owns no lock; callers (`Memory`, T2.3+)
+//! concept content). [`InvertedIndex`] owns no lock; callers (`Memory`)
 //! serialize access.
 
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ const BM25_B: f64 = 0.75;
 
 /// Inverted index over concept content.
 ///
-/// Terms are produced by [`normalize_tokens`] (the T2.2 canonical-normalizer contract);
+/// Terms are produced by [`normalize_tokens`] (the canonical-normalizer contract);
 /// each term maps to a posting list of `(concept id -> in-document frequency)`.
 /// Document lengths (token counts) are kept per concept for BM25's length
 /// normalization; totals are maintained for `avgdl`.
@@ -118,8 +118,8 @@ impl InvertedIndex {
     /// truncated to `limit`. Only concepts with a strictly positive score are
     /// returned; there is no zero-score padding.
     ///
-    /// Duplicate query tokens count ONCE (query-term frequency is 1 for scoring,
-    /// grok G1) — `search("user user")` scores identically to `search("user")`;
+    /// Duplicate query tokens count ONCE (query-term frequency is 1 for
+    /// scoring) — `search("user user")` scores identically to `search("user")`;
     /// document-side duplicates still matter via tf.
     pub fn search(&self, query: &str, limit: usize) -> Vec<Scored<NodeId>> {
         let mut results = self.search_ranked(query);
@@ -143,7 +143,7 @@ impl InvertedIndex {
             return Vec::new();
         }
         let n = self.total_docs as f64;
-        // Guard (grok G2): a corpus of zero-token documents (stopword-only or
+        // Guard: a corpus of zero-token documents (stopword-only or
         // empty content) would otherwise make avg_dl = 0 and tf_component NaN.
         // No postings exist in that case so results stay empty either way, but
         // keep the math sound for future callers.
@@ -192,11 +192,12 @@ impl InvertedIndex {
 }
 
 /// Tokenizer for indexing and querying: the shared canonical normalizer
-/// (T2.2, `src/graph/canonical.rs::normalize_tokens`) — lowercase, split on
-/// `[-_ ]` + camelCase boundaries, drop stopwords, Porter-stem. Duplicate
+/// (`src/graph/canonical.rs::normalize_tokens`) — split camelCase
+/// boundaries on the original case, split on `-`, `_` and whitespace,
+/// lowercase, drop stopwords, stem with Snowball English (Porter2) except
+/// identifier tokens (#148), drop empty stems (#301). Duplicate
 /// tokens are retained so in-document term frequency counts occurrences.
-/// Imported, never forked (T2.6 phase-doc contract; the local seam copy was
-/// removed at integration).
+/// Imported, never forked (the local seam copy was removed at integration).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,7 +354,7 @@ mod tests {
 
     #[test]
     fn duplicate_query_terms_count_once() {
-        // grok G1: query-term frequency is 1 — "user user" must score exactly
+        // Query-term frequency is 1 — "user user" must score exactly
         // like "user" (same scores, not k-times).
         let mut idx = InvertedIndex::new();
         idx.add(&concept(1, "user schema"));
@@ -364,7 +365,7 @@ mod tests {
 
     #[test]
     fn zero_token_corpus_stays_empty_and_sane() {
-        // grok G2: a corpus of stopword-only documents has no postings; results
+        // A corpus of stopword-only documents has no postings; results
         // must stay empty with no NaN leakage (avg_dl guarded).
         let mut idx = InvertedIndex::new();
         idx.add(&concept(1, "the and of is"));

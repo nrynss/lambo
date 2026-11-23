@@ -34,7 +34,7 @@ pub(crate) fn contract_hash(contract: &EmbeddingContract) -> String {
 /// Deletes and counts address every data index through the wildcard
 /// `{prefix}-v-*`. A prefix that contains `-v-` or ends in `-v` would let
 /// that pattern match another deployment's indices on a shared cluster
-/// (#18 review L2: prefix `lambo` reaches `lambo-v-prod-v-<hash>`), so both
+/// (#18: prefix `lambo` reaches `lambo-v-prod-v-<hash>`), so both
 /// are refused. With them refused, `{q}-v-{hash}` starts with `{p}-v-` only
 /// when `p == q`.
 pub(crate) fn validate_index_prefix(prefix: &str) -> Result<(), StoreError> {
@@ -84,6 +84,20 @@ pub(crate) struct Projection {
     pub contracts: Vec<EmbeddingContract>,
     /// The session's contract after the batch.
     pub contract_after: Option<EmbeddingContract>,
+    /// The batch moves the contract where `ops` cannot say what the new
+    /// contract's index must hold (#319): a `SetEmbedding` that changes the
+    /// contract in force when a contract was already in force (the session's
+    /// other vectors are now the new contract's: the
+    /// `--allow-embedding-mismatch` relabel, or a migration), or when an
+    /// upsert carrying a vector came earlier in the batch (vectors written
+    /// before a first stamp are quarantined durably by that stamp; since
+    /// #322 `Graph::reembed_all` stamps a contract-less session first, so
+    /// this guards raw writers). The
+    /// mirror does not trust `ops` then and repairs from the durable store.
+    /// A first stamp before any vector, or a `SetEmbedding` that keeps the
+    /// contract, is not a switch. Lean: `switches` in
+    /// `formal/LamboProofs/Tiered/Pure.lean`.
+    pub switched: bool,
 }
 
 /// Project `mutations` for `session`, starting from the session's durable
@@ -94,7 +108,7 @@ pub(crate) struct Projection {
 /// | `UpsertNode(Concept)` with a vector of the contract's width | index the document |
 /// | `UpsertNode(Concept)` without one | delete it (the vector was cleared) |
 /// | `DeleteNode` | delete it |
-/// | `SetEmbedding` | switch the contract for what follows |
+/// | `SetEmbedding` | switch the contract for what follows; one that moves the contract sets [`Projection::switched`] |
 /// | everything else | nothing (graph structure and canonization stay durable-only) |
 ///
 /// With no contract in force nothing is written: there is no index to write
@@ -109,6 +123,8 @@ pub(crate) fn project(
     version: Option<u64>,
 ) -> Projection {
     let mut current = contract_before;
+    let mut switched = false;
+    let mut vector_upserted = false;
     let mut ops: Vec<DocOp> = Vec::new();
     let mut contracts: Vec<EmbeddingContract> = Vec::new();
     let mut push = |op: DocOp, ops: &mut Vec<DocOp>| {
@@ -123,10 +139,16 @@ pub(crate) fn project(
             Mutation::SetEmbedding {
                 session_id,
                 embedding,
-            } if session_id == session => current.clone_from(embedding),
+            } if session_id == session => {
+                if *embedding != current && (current.is_some() || vector_upserted) {
+                    switched = true;
+                }
+                current.clone_from(embedding);
+            }
             Mutation::UpsertNode {
                 node: Node::Concept(c),
             } if &c.session_id == session => {
+                vector_upserted |= c.embedding.is_some();
                 let Some(contract) = current.clone() else {
                     continue;
                 };
@@ -164,6 +186,7 @@ pub(crate) fn project(
         ops,
         contracts,
         contract_after: current,
+        switched,
     }
 }
 
@@ -336,6 +359,60 @@ mod tests {
         );
     }
 
+    /// #319: `switched`, as the Lean model's `switches` (its `decide`
+    /// examples on the issue's batch, the relabel, the seed and the in-place
+    /// rewrite).
+    #[test]
+    fn a_contract_switch_is_flagged() {
+        let sid = SessionId::new("s");
+        let (k1, k2) = (contract(None), contract(Some("m2")));
+        let set = |k: Option<EmbeddingContract>| Mutation::SetEmbedding {
+            session_id: sid.clone(),
+            embedding: k,
+        };
+        let v = |id| concept(&sid, id, Some(vec![1.0, 0.0]));
+        let (a, b) = (NodeId::new(), NodeId::new());
+        let switched = |muts: &[Mutation], before: Option<EmbeddingContract>| {
+            project(&sid, muts, before, None).switched
+        };
+        // Vectors then a `SetEmbedding`: `reembed_all`'s order from a
+        // contract; from none, the order before #322 (now a raw writer's).
+        let reembed = [v(a), v(b), set(Some(k2.clone()))];
+        assert!(switched(&reembed, Some(k1.clone())));
+        assert!(switched(&reembed, None));
+        // The relabel, and a switch first from an existing contract.
+        assert!(switched(&[set(Some(k2.clone()))], Some(k1.clone())));
+        assert!(switched(&[set(Some(k2.clone())), v(a)], Some(k1.clone())));
+        // A cleared contract.
+        assert!(switched(&[set(None)], Some(k1.clone())));
+        // Several SetEmbeddings: a move that a later one undoes still
+        // switched (the batch is not trusted), and a first stamp followed
+        // by a move switches at the move.
+        assert!(switched(
+            &[set(Some(k2.clone())), set(Some(k1.clone()))],
+            Some(k1.clone())
+        ));
+        assert!(switched(
+            &[set(Some(k1.clone())), set(Some(k2.clone()))],
+            None
+        ));
+        // Not switches: a first stamp first, a vectorless upsert before a
+        // first stamp, the same contract again, no SetEmbedding at all.
+        assert!(!switched(&[set(Some(k1.clone())), v(a)], None));
+        assert!(!switched(
+            &[concept(&sid, a, None), set(Some(k1.clone())), v(b)],
+            None
+        ));
+        assert!(!switched(&[v(a), set(Some(k1.clone()))], Some(k1.clone())));
+        assert!(!switched(&[v(a), v(b)], Some(k1.clone())));
+        // Another session's SetEmbedding is not this session's switch.
+        let other = Mutation::SetEmbedding {
+            session_id: SessionId::new("t"),
+            embedding: Some(k2.clone()),
+        };
+        assert!(!switched(&[v(a), other], Some(k1)));
+    }
+
     #[test]
     fn a_cleared_contract_stops_writes() {
         let sid = SessionId::new("s");
@@ -362,7 +439,7 @@ mod tests {
         }
     }
 
-    /// L2: deletes reach `{prefix}-v-*`. A prefix that holds `-v-`, or ends
+    /// Deletes reach `{prefix}-v-*`. A prefix that holds `-v-`, or ends
     /// in `-v`, would make another deployment's data indices match that
     /// pattern (`lambo-v-*` matches `lambo-v-prod-v-<hash>` and
     /// `lambo-v-v-<hash>`), so such prefixes are refused: then

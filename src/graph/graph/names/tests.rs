@@ -96,7 +96,32 @@ fn snapshot_refuses_duplicate_normalized_names_and_cross_session_records() {
     assert!(Graph::from_snapshot(duplicate).is_err());
     let mut wrong = g.snapshot();
     wrong.names[0].session_id = "other".into();
-    assert!(Graph::from_snapshot(wrong).is_err());
+    // The refusal names the row, so an operator can find it.
+    let err = Graph::from_snapshot(wrong).unwrap_err().to_string();
+    assert!(
+        err.contains("\"writer rule\"") && err.contains("session other"),
+        "{err}"
+    );
+}
+
+/// #301: a stored name whose key held an empty stem refuses the load, and the
+/// error names the name, its session and its target, so the operator can
+/// find the row to repair.
+#[test]
+fn a_stored_name_with_an_empty_stem_names_itself_in_the_load_error() {
+    let (mut g, i) = graph("name-empty-stem");
+    let target = concept(&mut g, i, "a durable ruling", ConceptType::Logic);
+    g.declare_name("writer rule", target).unwrap();
+    // As a build before #301 stored them.
+    for (name, key) in [("''s-lease", " leas"), ("''s ''s", " ")] {
+        let mut snap = g.snapshot();
+        snap.names[0].name = name.into();
+        snap.names[0].name_key = key.into();
+        let err = Graph::from_snapshot(snap).unwrap_err().to_string();
+        assert!(err.contains(&format!("{name:?}")), "{err}");
+        assert!(err.contains("name-empty-stem"), "{err}");
+        assert!(err.contains(&target.to_string()), "{err}");
+    }
 }
 
 #[test]
@@ -242,6 +267,22 @@ fn reviewed_repair_preserves_history_moves_support_and_releases_namespace() {
     assert!(g.insert_concept(archived, origin).is_err());
 }
 
+/// #325: the citer is the target's `parent_of` child. Moving its citation
+/// onto the target closes a cycle that mixes `Hierarchical` and
+/// `Dependency`, which the write gates and the load check allow, so the
+/// repair applies and the result loads.
+#[test]
+fn repair_moves_a_citation_from_the_targets_child() {
+    let (mut g, alias, target, citer, _) = repair_graph();
+    related(&mut g, target, citer, EdgeType::Hierarchical);
+    let report = upgrade(&mut g, &[(alias, target)]).unwrap();
+    assert_eq!(report.citations_moved, 1);
+    assert!(g
+        .edge_between(citer, target, EdgeType::Dependency)
+        .is_some());
+    Graph::from_snapshot(g.snapshot()).unwrap();
+}
+
 fn archived_concept(s: &GraphSnapshot, id: NodeId) -> crate::types::Concept {
     s.retired_aliases
         .iter()
@@ -273,8 +314,10 @@ fn repair_deduplicates_existing_citations_and_refuses_substantive_relations() {
 
 #[test]
 fn repair_refuses_cycle_and_rolls_back_all_prior_changes() {
+    // The target depends on the citer: moving the citation onto the target
+    // would close a Dependency cycle.
     let (mut g, alias, target, citer, _) = repair_graph();
-    related(&mut g, target, citer, EdgeType::Hierarchical);
+    related(&mut g, target, citer, EdgeType::Dependency);
     let before = g.snapshot();
     assert!(upgrade(&mut g, &[(alias, target)]).is_err());
     assert_eq!(g.snapshot(), before);

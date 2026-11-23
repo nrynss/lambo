@@ -197,7 +197,7 @@ CREATE TABLE IF NOT EXISTS session_leases (
     endpoint    TEXT
 );
 
--- J4 lease refusals (dev-diary/lambo-for-mooshik/J-multi-client.md §J4): a
+-- J4 lease refusals: a
 -- writer that was refused the single-writer lease records the refusal here so
 -- the incumbent holder can learn it turned away a takeover ("from both sides").
 -- refused_at is the STORE clock (F18 — never a caller instant). The incumbent
@@ -228,7 +228,7 @@ CREATE TABLE IF NOT EXISTS session_stats (
     updated_at   TEXT NOT NULL
 );
 
--- J3 durable write intents (dev-diary/lambo-for-mooshik/J3-durability-redesign.md):
+-- J3 durable write intents:
 -- a validated, acked background write that has not yet been applied. Written
 -- at ack time through the write-behind log, so the close-time final flush
 -- carries it — at a clean close every acked write is either applied or here.

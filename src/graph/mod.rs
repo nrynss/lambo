@@ -51,7 +51,7 @@
 //! tested in `tests/p2_integration.rs::inverted_index_manual_sync_contract`.
 //!
 //! The exact v0.6.0 constants are not in-repo; the bump/cap below are the v0.1
-//! decision (see Handoff Log T2.1).
+//! decision (T2.1).
 
 // The inner module shares the parent's name (`graph::graph`) by design — T2.1
 // owns `src/graph/graph.rs` and phase docs reference that path.

@@ -17,7 +17,8 @@
 //! every concept a leg scored, before phase-2 expansion and before
 //! phase-3's `top_k` cut. So the maximum is over what the leg scored,
 //! returned or not. The keyword leg contributes the top `top_k x 4` BM25
-//! matches of the session's inverted index, but its best is read off the
+//! matches of the session's inverted index (plus an exact-name match,
+//! wherever it ranks), but its best is read off the
 //! one index search phase 1 makes before that cut (`KeywordLeg`), so `bm25`
 //! is the same at every `top_k`, 0 included. The vector leg contributes the
 //! `top_k` nearest stored vectors, a best-first read, so its maximum is
@@ -29,10 +30,10 @@
 //! `"keyword-only-v0"` where `top_k = 1` would report `"noisy-or-v0"`.
 //! The recent leg's flat score and expansion members are not counted (#174).
 //!
-//! An exact-name match ranks its concept with a keyword score of `1.0` in
-//! place of its BM25 (the per-hit `legs.keyword` says so, unchanged). That
-//! `1.0` is a sentinel, not a BM25: `bm25` is the index's own best, read
-//! before the substitution, and `exact_name_match` reports the match.
+//! An exact-name match raises its concept's keyword score to at least `1.0`
+//! (the per-hit `legs.keyword` is the higher of its BM25 and `1.0`, #288).
+//! That floor is not a BM25: `bm25` is the index's own best, read before the
+//! name step, and `exact_name_match` reports the match.
 //!
 //! Both maxima count only concepts of the graph the recall answers from.
 //! A reader (`lambo recall`, the web portal) loads a snapshot and then reads
@@ -71,7 +72,10 @@
 //! the two-leg value with `b = 0`, a lower quantity than the two-leg value
 //! would have been for the same store, which is why it has its own name
 //! (#256's acceptance: a recall with no vector leg still reports a
-//! confidence).
+//! confidence). "Lower" is exact in real arithmetic (Lean
+//! `Confidence.keywordOnly_le_noisyOr`); in `f64` it holds only up to an
+//! ulp: `noisy_or(1.0, 0.10, 0.36)` rounds to an ulp below
+//! `keyword_term(1.0)`.
 //!
 //! A vector leg that ran but left nothing to count counts as one that did
 //! not run: when every cosine it returned is non-finite, or every concept it
@@ -140,7 +144,8 @@ pub(crate) const KEYWORD_HALF_SCORE: f64 = 5.0;
 
 /// The best keyword and vector scores of a recall's phase 1 over the
 /// concepts of `graph`. The keyword leg's comes from `keyword` (the index's
-/// own best, before the exact-name substitution); the vector leg's is the
+/// own best, read before the exact-name step raises the named concept's
+/// keyword leg); the vector leg's is the
 /// best finite cosine in `legs` (phase 1's own leg ranking ignores a
 /// non-finite one too).
 pub(crate) fn top_legs(graph: &Graph, legs: &LegProvenance, keyword: KeywordLeg) -> TopLegs {
@@ -311,7 +316,7 @@ mod tests {
             (None, None, Some(f64::NAN)),
         ]);
         // The keyword best is the leg's own report, not a fold over `legs`
-        // (whose keyword slot an exact-name match overwrites).
+        // (whose keyword slot an exact-name match raises to at least 1.0).
         assert_eq!(
             top_legs(&g, &map, ran(Some(7.25))),
             top(Some(7.25), Some(0.66))

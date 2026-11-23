@@ -1,6 +1,6 @@
-//! J3 durable-intent proof obligations, at the shipped binary
-//! (`dev-diary/lambo-for-mooshik/J3-durability-redesign.md`, §Proof
-//! obligations).
+//! J3 durable-intent proof obligations, at the shipped binary:
+//! the obligations a unit test cannot reach, because they need
+//! a store that outlives the process.
 //!
 //! Two of the design's obligations can only be observed through a store that
 //! outlives a process, driven through the real `lambo serve` binary over

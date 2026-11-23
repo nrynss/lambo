@@ -1,14 +1,17 @@
-//! Daemon hot list — spec §9, P4 T4.2.
+//! Daemon hot list — spec §9.
 //!
 //! A bounded priority queue of graph nodes whose conditions need surfacing in
 //! `recall()` (force-inclusion, spec §8). Entry conditions retained:
 //! **conflict detected**, **high-risk modification**, **drift detected**,
-//! **stale session**, plus #19(c)'s **contradiction**. The daemon loop (T4.6) keeps the list equal to the
-//! current cycle's fresh detector hits ([`HotList::retain_conditions`]); the
+//! **stale session**, plus #19(c)'s **contradiction**. The daemon loop keeps the list equal to the
+//! current cycle's fresh detector hits, up to the bound and the contradiction
+//! budget (`HotList::sync_cycle`: the cycle's inserts evict nothing, entries
+//! it no longer detects are dropped, then the limits are enforced once, so a
+//! lapsed entry never evicts a fresh hit, #298); the
 //! per-entry predicate ([`ConditionCheck`]) remains available for
-//! recall-time re-validation (T5.3).
+//! recall-time re-validation.
 //!
-//! ## Priority rule (T4.2 design decision)
+//! ## Priority rule
 //!
 //! Entries are ranked by `(severity desc, recency desc, node id asc)`:
 //!
@@ -54,28 +57,28 @@
 //!
 //! Each entry carries the predicate that decides whether its condition still
 //! holds, as a closure over the current graph **and the caller's `now`**
-//! ([`ConditionCheck`]). The detector modules (T4.3 conflict, T4.4 drift,
-//! T4.6 stale/high-risk) build the predicate at insert time from the same
+//! ([`ConditionCheck`]). The detector modules (conflict, drift,
+//! stale/high-risk) build the predicate at insert time from the same
 //! per-node graph logic they used to detect; the hot list only evaluates it.
 //!
 //! The predicate takes `now` as a **parameter** and returns the recomputed
-//! payload (XP-3). A predicate that captured `now` by move re-derived its
+//! payload. A predicate that captured `now` by move re-derived its
 //! recency window from a frozen instant, so a `Conflict`/`HighRisk` entry
 //! re-validated `true` forever against an unchanged graph and served a frozen
-//! `seconds_ago` — the exact API T5.3 is told to call, rendering "wrote to it
+//! `seconds_ago` — the exact API recall is told to call, rendering "wrote to it
 //! eleven seconds ago" five minutes later. Handing `now` in and taking the
 //! payload out makes both halves impossible to get wrong.
 //!
-//! Predicates are **per-node** (CONC-5): each re-check costs one node's
+//! Predicates are **per-node**: each re-check costs one node's
 //! neighborhood, not a whole-graph detection pass. Recall force-including ten
 //! hot nodes therefore costs ten neighborhood walks under the graph lock, not
 //! ten full scans.
 //!
-//! Since T4.6 the daemon loop *does not* evaluate these predicates each cycle —
+//! The daemon loop *does not* evaluate these predicates each cycle —
 //! it diffs the list against the fresh detection pass
-//! ([`HotList::retain_conditions`]), which replaces the old
-//! O(hot_len × graph) per-cycle re-validation scan (T4.6 finding 2).
-//! [`HotList::revalidate`] is recall's (T5.3) read-time path, run through
+//! ([`HotList::retain_conditions`], inside `HotList::sync_cycle`), which
+//! replaces the old O(hot_len × graph) per-cycle re-validation scan.
+//! [`HotList::revalidate`] is recall's read-time path, run through
 //! [`HotList::revalidate_members`] by the daemon's recall entry before
 //! assembly.
 //! It takes `&Graph` explicitly — rather than stashing a graph handle inside
@@ -109,11 +112,11 @@ pub fn default_contradiction_max(max: usize) -> usize {
 /// [`Condition::severity`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Condition {
-    /// ≥2 active agents with edges to the node and a recent write (T4.3).
+    /// ≥2 active agents with edges to the node and a recent write.
     Conflict,
     /// A high-risk modification touched the node.
     HighRiskModification,
-    /// The node drifted from every root goal (T4.4).
+    /// The node drifted from every root goal.
     Drift,
     /// The node's session has gone stale.
     StaleSession,
@@ -154,7 +157,7 @@ pub use crate::types::HotListPayload;
 /// from read-time state; `None` — it has lapsed and the entry is dropped.
 ///
 /// Taking `now` as a parameter rather than capturing it at detection is the
-/// whole point (XP-3): a closure that froze `now` re-derived its recency window
+/// whole point: a closure that froze `now` re-derived its recency window
 /// from a fixed instant, so a `Conflict` or `HighRisk` entry re-validated `true`
 /// forever against an unchanged graph and rendered a frozen `seconds_ago` — the
 /// demo's "wrote to it eleven seconds ago" would still say eleven seconds five
@@ -259,10 +262,17 @@ pub struct HotList {
     /// At most this many `Contradiction` entries (#196); `>= max` means no
     /// budget beyond the bound.
     contradiction_max: usize,
-    /// Priority-descending (`entries[0]` = highest priority).
+    /// Priority-descending (`entries[0]` = highest priority), except during
+    /// a [`HotList::sync_cycle`]: then they are the pre-cycle entries in
+    /// priority order, refreshed in place, with the cycle's new pairs
+    /// appended in insertion order (sorted when the cycle ends).
     entries: Vec<HotListEntry>,
     /// Monotonic insertion sequence — recency rank.
     next_seq: u64,
+    /// `Some` only during a [`HotList::sync_cycle`]: each live pair's position
+    /// in `entries`. Inserts then refresh or push through it and defer the
+    /// sort, the contradiction budget and the bound to the cycle's end (#298).
+    deferred: Option<HashMap<(NodeId, Condition), usize>>,
 }
 
 impl HotList {
@@ -287,6 +297,7 @@ impl HotList {
             contradiction_max,
             entries: Vec::new(),
             next_seq: 0,
+            deferred: None,
         }
     }
 
@@ -338,11 +349,19 @@ impl HotList {
     /// silently drops the evicted entry, so the compiler enforces it as
     /// `#[must_use]`: bind or `let _ =` the value explicitly if you don't
     /// need it.
+    ///
+    /// Inside a daemon cycle (`HotList::sync_cycle`) nothing is evicted
+    /// (`None`): the budget and the bound are enforced once, when the cycle
+    /// ends.
     #[must_use]
     pub fn insert(&mut self, entry: HotListEntry) -> Option<HotListEntry> {
         let mut entry = entry;
         entry.seq = self.next_seq;
         self.next_seq += 1;
+        if self.deferred.is_some() {
+            self.upsert_deferred(entry);
+            return None;
+        }
 
         match self
             .entries
@@ -372,10 +391,22 @@ impl HotList {
     /// #179 made every contradiction an entry, so a daemon cycle can insert
     /// hundreds; per-entry insertion re-sorted the whole list each time,
     /// under the hot-list write lock recall also takes.
+    ///
+    /// Inside a daemon cycle (`HotList::sync_cycle`) nothing is evicted (an
+    /// empty `Vec`): the budget and the bound are enforced once, when the
+    /// cycle ends.
     pub fn insert_many(
         &mut self,
         entries: impl IntoIterator<Item = HotListEntry>,
     ) -> Vec<HotListEntry> {
+        if self.deferred.is_some() {
+            for mut entry in entries {
+                entry.seq = self.next_seq;
+                self.next_seq += 1;
+                self.upsert_deferred(entry);
+            }
+            return Vec::new();
+        }
         let mut at: std::collections::HashMap<(NodeId, Condition), usize> = self
             .entries
             .iter()
@@ -396,16 +427,45 @@ impl HotList {
         self.enforce()
     }
 
+    /// Refresh `entry`'s pair in place or push it, through the
+    /// [`HotList::sync_cycle`] index: no scan, no sort, no eviction.
+    fn upsert_deferred(&mut self, entry: HotListEntry) {
+        let Some(at) = self.deferred.as_mut() else {
+            unreachable!("upsert_deferred runs only inside sync_cycle");
+        };
+        match at.get(&(entry.node, entry.condition)) {
+            Some(&i) => self.entries[i] = entry,
+            None => {
+                at.insert((entry.node, entry.condition), self.entries.len());
+                self.entries.push(entry);
+            }
+        }
+    }
+
+    /// Rebuild the [`HotList::sync_cycle`] index after entries were removed
+    /// (a no-op outside a cycle).
+    fn reindex(&mut self) {
+        if let Some(at) = self.deferred.as_mut() {
+            at.clear();
+            at.extend(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| ((e.node, e.condition), i)),
+            );
+        }
+    }
+
     /// Re-validate every entry for `node` against the current graph **at
     /// `now`**, dropping those whose condition no longer holds and refreshing
     /// the payload of those that do (spec §9: conditions re-validated on each
     /// `recall()` — stale entries drop out then, not on a timer).
     ///
     /// Returns `true` iff the node is still on the hot list (≥1 entry
-    /// survived). Recall (T5.3) uses this to decide force-inclusion and then
+    /// survived). Recall uses this to decide force-inclusion and then
     /// renders [`HotListEntry::payload`], which this call has just rebuilt
     /// against `now` — so a rendered `seconds_ago` is the age at *read* time,
-    /// not at detection time (XP-3).
+    /// not at detection time.
     ///
     /// `now` is the caller's clock: recall passes its own, so an entry whose
     /// recency window elapsed between detection and this read is dropped here
@@ -425,12 +485,12 @@ impl HotList {
                 None => false,
             }
         });
+        self.reindex();
         any_valid
     }
 
     /// Re-validate the hot entries of every node in `members` **at `now`** and
-    /// return the surviving payloads per node, freshly rebuilt (T5.3
-    /// force-inclusion, XP-3).
+    /// return the surviving payloads per node, freshly rebuilt (force-inclusion).
     ///
     /// This is recall's read-time maintenance of the hot list, run by
     /// `Daemon::recall_detailed` over the recall's expanded
@@ -468,15 +528,49 @@ impl HotList {
         payloads
     }
 
-    /// Drop every entry whose `(node, condition)` is not in `fresh` (T4.6
-    /// finding 2). The daemon loop calls this once per cycle with the
-    /// current detection pass's hits, so the hot list always equals the
+    /// Drop every entry whose `(node, condition)` is not in `fresh`. The
+    /// daemon loop calls this once per cycle with the
+    /// current detection pass's hits, through `HotList::sync_cycle` and
+    /// before the bound applies, so the hot list always equals the
     /// *current* condition set: a HighRisk entry whose 30s window elapsed —
     /// or any condition that stopped being detected — is evicted here,
     /// deterministically, without evaluating captured-`now` predicates.
     pub fn retain_conditions(&mut self, fresh: &HashSet<(Condition, NodeId)>) {
         self.entries
             .retain(|e| fresh.contains(&(e.condition, e.node)));
+        self.reindex();
+    }
+
+    /// One detection cycle's refresh (#298): run `detect`, which inserts the
+    /// cycle's hits and returns the cycle's condition set with its own result;
+    /// keep only the entries whose `(condition, node)` is in that set
+    /// ([`HotList::retain_conditions`]); then enforce the contradiction budget
+    /// and the bound, once.
+    ///
+    /// While `detect` runs, inserts refresh their pair in place or push it
+    /// (each with the next recency) through an index, and nothing is sorted
+    /// or evicted, so a cycle costs one sort however many hits it inserts. An
+    /// entry
+    /// the cycle no longer detects is therefore gone before the limits apply,
+    /// and can never push one of the cycle's fresh hits off a full list: the
+    /// list ends as the cycle's hits, cut to the budget and the bound by the
+    /// usual priority. Had each insert enforced the limits, as the daemon
+    /// cycle did before #298, such an entry could evict a fresh hit of a lower
+    /// tier and then be dropped itself, leaving the list below its bound.
+    ///
+    /// The list is sorted and the limits enforced even if `detect` panics.
+    /// Inside `detect` the list is in insertion order and may exceed its
+    /// limits, so [`HotList::iter`] and [`HotList::peek`] are not in priority
+    /// order there. Not reentrant.
+    pub(crate) fn sync_cycle<T>(
+        &mut self,
+        detect: impl FnOnce(&mut HotList) -> (HashSet<(Condition, NodeId)>, T),
+    ) -> T {
+        let cycle = Deferred::new(self);
+        let (held, out) = detect(&mut *cycle.list);
+        cycle.list.deferred = None;
+        cycle.list.retain_conditions(&held);
+        out
     }
 
     /// Is `node` on the hot list (without re-validating)?
@@ -515,6 +609,37 @@ impl HotList {
 impl Default for HotList {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A hot list inside one [`HotList::sync_cycle`]: inserts are deferred.
+/// Dropping it ends the deferral, sorts the list and enforces the budget and
+/// the bound, so the list is back in order and within its limits however the
+/// cycle ends.
+struct Deferred<'a> {
+    list: &'a mut HotList,
+}
+
+impl<'a> Deferred<'a> {
+    fn new(list: &'a mut HotList) -> Self {
+        // A nested cycle would end the outer one's deferral early and bring
+        // back per-insert eviction (#298), so refuse it in every build.
+        assert!(list.deferred.is_none(), "sync_cycle is not reentrant");
+        list.deferred = Some(
+            list.entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| ((e.node, e.condition), i))
+                .collect(),
+        );
+        Self { list }
+    }
+}
+
+impl Drop for Deferred<'_> {
+    fn drop(&mut self) {
+        self.list.deferred = None;
+        let _ = self.list.enforce();
     }
 }
 
@@ -576,7 +701,7 @@ mod tests {
     }
 
     /// An entry whose predicate re-derives `seconds_ago` from the `now` it is
-    /// handed — the shape every real detector uses (XP-3).
+    /// handed — the shape every real detector uses.
     fn clock_reading_entry(node: NodeId, written_at: DateTime<Utc>, window: i64) -> HotListEntry {
         HotListEntry::new(
             node,
@@ -785,7 +910,7 @@ mod tests {
         assert!(list.contains(nid(2)));
     }
 
-    /// XP-3: `revalidate` consults the `now` it is handed, and the surviving
+    /// `revalidate` consults the `now` it is handed, and the surviving
     /// entry's payload is rebuilt from it.
     ///
     /// Pre-fix the predicate was `Fn(&Graph) -> bool` over a captured `now`, so
@@ -829,7 +954,7 @@ mod tests {
         assert_eq!(list.len(), 1);
     }
 
-    /// T5.3 force-include, the hot-list half (moved from
+    /// Force-include, the hot-list half (moved from
     /// `recall::assemble::tests::hot_force_include_keeps_live_and_drops_lapsed`
     /// when #25 moved re-validation out of `assemble`): over recall's expanded
     /// members, a live entry survives with its payload rebuilt at the caller's
@@ -957,9 +1082,9 @@ mod tests {
 
     #[test]
     fn fixture_conflict_payload_survives_roundtrip_for_rendering() {
-        // The demo sentence T5.3 renders — "Agent A wrote to it eleven
+        // The demo sentence recall renders — "Agent A wrote to it eleven
         // seconds ago" — must be derivable from the payload alone: the
-        // `writer` names the subject (ALGO-2), `seconds_ago` the age.
+        // `writer` names the subject, `seconds_ago` the age.
         use crate::types::AgentId;
         let payload = HotListPayload::Conflict {
             agents: vec![AgentId::from("agent-a"), AgentId::from("agent-b")],
@@ -988,6 +1113,331 @@ mod tests {
             other => panic!("unexpected payload {other:?}"),
         }
         assert_eq!(e.node, nid(9));
+    }
+
+    // ------------------------------------------------------------------
+    // One detection cycle (#298)
+    // ------------------------------------------------------------------
+
+    /// An always-holding entry whose payload tells refreshes apart.
+    fn hit(n: u64, c: Condition, seconds_ago: u64) -> HotListEntry {
+        let payload = conflict_payload(seconds_ago);
+        let echo = payload.clone();
+        HotListEntry::new(nid(n), c, payload, move |_, _| Some(echo.clone()))
+    }
+
+    /// Run `ops` inside one cycle that holds `held`, and on its own followed by
+    /// `retain_conditions(held)` (the per-insert path), from the same seed and
+    /// with limits nothing reaches; the two lists must be identical (entries,
+    /// payloads, recency, order).
+    fn assert_deferred_matches_per_insert(
+        seed: impl Fn(&mut HotList),
+        ops: impl Fn(&mut HotList),
+        held: &HashSet<(Condition, NodeId)>,
+    ) -> HotList {
+        let mut deferred = HotList::with_budget(50, 25);
+        seed(&mut deferred);
+        deferred.sync_cycle(|h| {
+            ops(h);
+            (held.clone(), ())
+        });
+        let mut per_insert = HotList::with_budget(50, 25);
+        seed(&mut per_insert);
+        ops(&mut per_insert);
+        per_insert.retain_conditions(held);
+        assert_eq!(format!("{deferred:?}"), format!("{per_insert:?}"));
+        deferred
+    }
+
+    fn pairs(list: &HotList) -> Vec<(Condition, NodeId)> {
+        list.iter().map(|e| (e.condition, e.node)).collect()
+    }
+
+    /// One cycle through [`HotList::sync_cycle`]: insert `hits` and hold
+    /// exactly their pairs, as the daemon's condition set does.
+    fn cycle(list: &mut HotList, hits: &[(u64, Condition)]) {
+        list.sync_cycle(|h| {
+            for &(n, c) in hits {
+                let _ = h.insert(entry(nid(n), c));
+            }
+            (hits.iter().map(|&(n, c)| (c, nid(n))).collect(), ())
+        });
+    }
+
+    /// The issue's bound-2 scenario: cycle 1 holds conflicts on n1 and n2;
+    /// cycle 2 detects conflict n2 and drift n3. The lapsed conflict on n1 is
+    /// cut before the bound applies, so both fresh hits stay. Mirrors the
+    /// Lean theorem `Hotlist.cycleFixed_keeps_fresh_hit`.
+    #[test]
+    fn sync_cycle_cuts_before_it_enforces() {
+        let mut list = HotList::with_max(2);
+        cycle(
+            &mut list,
+            &[(1, Condition::Conflict), (2, Condition::Conflict)],
+        );
+        assert_eq!(
+            pairs(&list),
+            vec![(Condition::Conflict, nid(2)), (Condition::Conflict, nid(1))]
+        );
+        cycle(
+            &mut list,
+            &[(2, Condition::Conflict), (3, Condition::Drift)],
+        );
+        assert_eq!(
+            pairs(&list),
+            vec![(Condition::Conflict, nid(2)), (Condition::Drift, nid(3))],
+            "the lapsed conflict on n1 must not evict the fresh drift on n3"
+        );
+        assert_eq!(list.max(), 2);
+        assert_eq!(list.contradiction_max(), 1);
+    }
+
+    /// When the fresh hits themselves overflow, the bound and the budget cut
+    /// them by the usual priority, and never for a lapsed entry. The two
+    /// overflow examples beside `Hotlist.cycleFixed_keeps_fresh_hit`.
+    #[test]
+    fn sync_cycle_enforces_the_limits_on_the_fresh_hits() {
+        // Bound 2: an old high-risk entry lapses; of three fresh hits the
+        // stale one goes.
+        let mut list = HotList::with_max(2);
+        cycle(&mut list, &[(9, Condition::HighRiskModification)]);
+        cycle(
+            &mut list,
+            &[
+                (1, Condition::Conflict),
+                (2, Condition::Drift),
+                (3, Condition::StaleSession),
+            ],
+        );
+        assert_eq!(
+            pairs(&list),
+            vec![(Condition::Conflict, nid(1)), (Condition::Drift, nid(2))]
+        );
+
+        // Bound 3, budget 1: an old conflict lapses; of two fresh
+        // contradictions the later inserted stays, beside the drift.
+        let mut list = HotList::with_budget(3, 1);
+        cycle(&mut list, &[(9, Condition::Conflict)]);
+        cycle(
+            &mut list,
+            &[
+                (1, Condition::Contradiction),
+                (2, Condition::Contradiction),
+                (3, Condition::Drift),
+            ],
+        );
+        assert_eq!(
+            pairs(&list),
+            vec![
+                (Condition::Contradiction, nid(2)),
+                (Condition::Drift, nid(3))
+            ]
+        );
+    }
+
+    /// Inside the cycle nothing is evicted; when it ends the deferral is
+    /// over, the list is sorted and within its limits, and inserts evict
+    /// again, even when the cycle panics.
+    #[test]
+    fn sync_cycle_sorts_and_enforces_even_on_a_panic() {
+        let mut list = HotList::with_budget(2, 1);
+        let inside = list.sync_cycle(|h| {
+            let evicted: Vec<_> = (1..=4)
+                .filter_map(|n| h.insert(entry(nid(n), Condition::Contradiction)))
+                .collect();
+            assert!(evicted.is_empty(), "no insert evicts inside the cycle");
+            let held = (1..=4)
+                .map(|n| (Condition::Contradiction, nid(n)))
+                .collect();
+            (held, h.len())
+        });
+        assert_eq!(inside, 4);
+        assert_eq!(pairs(&list), vec![(Condition::Contradiction, nid(4))]);
+        assert!(list.deferred.is_none(), "the deferral ends with the cycle");
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            list.sync_cycle(|h| -> (HashSet<(Condition, NodeId)>, ()) {
+                for n in 10..15 {
+                    let _ = h.insert(entry(nid(n), Condition::Drift));
+                }
+                panic!("a detector panicked");
+            })
+        }));
+        assert!(caught.is_err());
+        assert!(list.deferred.is_none(), "the deferral ends on a panic too");
+        assert_eq!(list.len(), 2, "the bound holds again");
+        assert_eq!(
+            pairs(&list),
+            vec![
+                (Condition::Contradiction, nid(4)),
+                (Condition::Drift, nid(14))
+            ],
+            "sorted again"
+        );
+        assert!(
+            list.insert(entry(nid(20), Condition::Drift)).is_some(),
+            "inserts enforce the bound again after the cycle"
+        );
+    }
+
+    /// A cycle's deferred inserts end in exactly the list the per-insert path
+    /// (every `insert` and `insert_many` enforcing, then `retain_conditions`)
+    /// leaves when nothing is evicted: the same entries, payloads, recency
+    /// and order. Mirrors the Lean theorem
+    /// `Hotlist.cycleFixed_perm_cycle_of_no_evict`.
+    #[test]
+    fn sync_cycle_matches_the_per_insert_path_when_nothing_is_evicted() {
+        use Condition::*;
+        fn seed(list: &mut HotList) {
+            for (n, c) in [
+                (1, Conflict),
+                (2, Drift),
+                (3, StaleSession),
+                (4, Contradiction),
+            ] {
+                let _ = list.insert(hit(n, c, 30));
+            }
+        }
+        // Refreshes n4's contradiction, n2's drift and n1's conflict with new
+        // payloads; adds n5, n6, n7, n8; n3's staleness lapses.
+        fn hits(list: &mut HotList) {
+            let _ = list.insert_many([4u64, 5, 6].map(|n| hit(n, Contradiction, n)));
+            for (n, c) in [
+                (2, Drift),
+                (7, Conflict),
+                (1, Conflict),
+                (8, HighRiskModification),
+            ] {
+                let _ = list.insert(hit(n, c, n));
+            }
+        }
+        let held: HashSet<(Condition, NodeId)> = [
+            (Contradiction, 4),
+            (Contradiction, 5),
+            (Contradiction, 6),
+            (Drift, 2),
+            (Conflict, 7),
+            (Conflict, 1),
+            (HighRiskModification, 8),
+        ]
+        .into_iter()
+        .map(|(c, n)| (c, nid(n)))
+        .collect();
+
+        let mut deferred = HotList::with_budget(20, 10);
+        seed(&mut deferred);
+        deferred.sync_cycle(|h| {
+            hits(h);
+            (held.clone(), ())
+        });
+        let mut per_insert = HotList::with_budget(20, 10);
+        seed(&mut per_insert);
+        hits(&mut per_insert);
+        per_insert.retain_conditions(&held);
+
+        assert_eq!(deferred.len(), 7);
+        assert_eq!(format!("{deferred:?}"), format!("{per_insert:?}"));
+    }
+
+    /// A deferred `insert_many` batch that repeats a pair refreshes it in
+    /// place each time, as the non-deferred batch does: the last payload and
+    /// recency win, and the pair is held once.
+    #[test]
+    fn a_deferred_batch_with_repeated_pairs_matches_the_per_insert_path() {
+        use Condition::*;
+        let held: HashSet<(Condition, NodeId)> =
+            [(Contradiction, 1), (Contradiction, 2), (Drift, 3)]
+                .into_iter()
+                .map(|(c, n)| (c, nid(n)))
+                .collect();
+        let list = assert_deferred_matches_per_insert(
+            |l| {
+                let _ = l.insert(hit(2, Contradiction, 30));
+                let _ = l.insert(hit(3, Drift, 30));
+            },
+            |l| {
+                let _ = l.insert_many([
+                    hit(1, Contradiction, 1),
+                    hit(2, Contradiction, 2),
+                    hit(1, Contradiction, 3),
+                    hit(2, Contradiction, 4),
+                    hit(1, Contradiction, 5),
+                ]);
+            },
+            &held,
+        );
+        assert_eq!(list.len(), 3);
+        let payload_of = |n| {
+            list.iter()
+                .find(|e| e.node == nid(n))
+                .map(|e| e.payload.clone())
+        };
+        assert_eq!(payload_of(1), Some(conflict_payload(5)));
+        assert_eq!(payload_of(2), Some(conflict_payload(4)));
+    }
+
+    /// `retain_conditions` and `revalidate` called inside a cycle remove
+    /// entries and shift positions; the index is rebuilt, so later refreshes
+    /// still land on their pair and the cycle ends in the list the
+    /// non-deferred path leaves.
+    #[test]
+    fn removals_inside_a_cycle_keep_the_deferred_index_right() {
+        use Condition::*;
+        let g = Graph::new(sid());
+        let held: HashSet<(Condition, NodeId)> = [
+            (Drift, 2),
+            (Contradiction, 4),
+            (Contradiction, 5),
+            (Contradiction, 6),
+            (Conflict, 8),
+            (StaleSession, 9),
+        ]
+        .into_iter()
+        .map(|(c, n)| (c, nid(n)))
+        .collect();
+        let list = assert_deferred_matches_per_insert(
+            |l| {
+                for (n, c) in [
+                    (1, Conflict),
+                    (2, Drift),
+                    (3, StaleSession),
+                    (4, Contradiction),
+                ] {
+                    let _ = l.insert(hit(n, c, 30));
+                }
+            },
+            |l| {
+                let _ = l.insert_many([hit(5, Contradiction, 5), hit(6, Contradiction, 6)]);
+                let _ = l.insert(HotListEntry::new(
+                    nid(7),
+                    Drift,
+                    conflict_payload(7),
+                    |_, _| None,
+                ));
+                let _ = l.insert(hit(8, Conflict, 8));
+                // Drops n1's conflict and n3's staleness, shifting the rest.
+                let mut keep = held.clone();
+                keep.insert((Drift, nid(7)));
+                l.retain_conditions(&keep);
+                let _ = l.insert(hit(2, Drift, 92));
+                // n7's predicate fails: dropped, shifting the rest again.
+                assert!(!l.revalidate(&g, nid(7), t(0)));
+                let _ = l.insert(hit(8, Conflict, 98));
+                let _ = l.insert(hit(9, StaleSession, 9));
+                let _ = l.insert_many([hit(6, Contradiction, 96), hit(4, Contradiction, 94)]);
+            },
+            &held,
+        );
+        assert_eq!(list.len(), 6);
+        let payload_of = |n| {
+            list.iter()
+                .find(|e| e.node == nid(n))
+                .map(|e| e.payload.clone())
+        };
+        assert_eq!(payload_of(2), Some(conflict_payload(92)));
+        assert_eq!(payload_of(8), Some(conflict_payload(98)));
+        assert_eq!(payload_of(6), Some(conflict_payload(96)));
+        assert_eq!(payload_of(4), Some(conflict_payload(94)));
     }
 
     /// `insert_many` leaves exactly the list one-by-one `insert` would:

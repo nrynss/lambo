@@ -15,7 +15,8 @@ impl Graph {
     /// Verify every §5.7 invariant, collecting all violations into one error:
     /// session consistency, edge endpoints, natural-key uniqueness, finite
     /// non-negative weights, the temporal chain, Derives coverage, and
-    /// Causal/Dependency acyclicity. `Ok(())` when the graph is well-formed.
+    /// acyclicity of `Causal ∪ Dependency` and, separately, of `Hierarchical`.
+    /// `Ok(())` when the graph is well-formed.
     pub fn assert_invariants(&self) -> Result<(), LamboError> {
         let mut v: Vec<String> = Vec::new();
         for (key, name) in &self.names {
@@ -201,18 +202,22 @@ impl Graph {
             }
         }
 
-        // Causal/Dependency/Hierarchical acyclicity (safety net; write-time
-        // rejection of Causal/Dependency cycles is T2.4's BFS; Hierarchical is a
-        // DAG constraint by definition).
-        let mut color: HashMap<NodeId, u8> = HashMap::new();
-        for n in self.nodes.keys() {
-            if color.get(n).copied().unwrap_or(0) == 0
-                && let Some(back) = self.dfs_cycle(*n, &mut color)
-            {
-                v.push(format!(
-                    "Causal/Dependency/Hierarchical cycle detected through {back}"
-                ));
-                break;
+        // Acyclicity, as two separate conditions (#325): `Causal ∪ Dependency`
+        // (write-time rejection is `closing_edge`'s BFS) and `Hierarchical`
+        // (`reject_closing_edge`). A cycle mixing the kinds is allowed, as the
+        // write gates allow it.
+        for (kinds, label) in [
+            (super::CAUSAL_DEPENDENCY, "Causal/Dependency"),
+            (super::HIERARCHICAL, "Hierarchical"),
+        ] {
+            let mut color: HashMap<NodeId, u8> = HashMap::new();
+            for n in self.nodes.keys() {
+                if color.get(n).copied().unwrap_or(0) == 0
+                    && let Some(back) = self.dfs_cycle(*n, &mut color, kinds)
+                {
+                    v.push(format!("{label} cycle detected through {back}"));
+                    break;
+                }
             }
         }
 

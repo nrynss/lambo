@@ -58,7 +58,7 @@ fn edge_cleanup_removes_stale_low_weight_edges_only() {
     assert!(outcome.epoch_after > outcome.epoch_before);
 }
 
-/// ALGO-9: step 1 only cuts **decaying** edge types (spec §5 table). A
+/// Step 1 only cuts **decaying** edge types (spec §5 table). A
 /// structural edge that is stale and under the weight bar must survive —
 /// its weight is a property of its kind, not a decayed signal, and §5.7
 /// depends on it.
@@ -82,7 +82,7 @@ fn edge_cleanup_spares_non_decaying_edge_types() {
         g.insert_concept(c, iid).unwrap();
     }
     // Stale + under weight, but structural or explicit opposition (#19):
-    // must survive (ALGO-9).
+    // must survive.
     for (id, ty) in [
         (200u64, EdgeType::Dependency),
         (201, EdgeType::Causal),
@@ -167,7 +167,7 @@ fn orphan_and_subthreshold_collected_protected_survive() {
     }
 
     // Sanity: the Resource really is sub-threshold under the cut GC
-    // applies — live-dimension score vs. its own type's bar (ALGO-1/11).
+    // applies — live-dimension score vs. its own type's bar.
     // Aged past the recency window: GC's recency is time-anchored (#29).
     // A Resource carries no type modifier, so against the default 0.12 bar
     // this fixture's leaf (density 1/4, derived by half the interactions)
@@ -220,10 +220,10 @@ fn orphan_and_subthreshold_collected_protected_survive() {
 }
 
 // ------------------------------------------------------------------
-// Step 2 — calibration (ALGO-1 / ALGO-4 / ALGO-11)
+// Step 2 — calibration
 // ------------------------------------------------------------------
 
-/// ALGO-1: the shipped demo session must survive a sweep.
+/// The shipped demo session must survive a sweep.
 ///
 /// Pre-fix (flat `MIN_CONCEPT_SCORE = 0.3` against the full spec §9
 /// composite) this collected **15 of the 22** concepts on the first run —
@@ -291,7 +291,7 @@ fn rest_api_demo_session_survives_a_gc_sweep() {
 // Step 3 — disconnected-component cleanup
 // ------------------------------------------------------------------
 
-/// ALGO-6: an **array** root goal must protect every concept it names.
+/// An **array** root goal must protect every concept it names.
 ///
 /// GC's exclusion list read only the string and object shapes, so an array
 /// goal — spec §6.1's own example — protected nothing: the session's goal
@@ -428,7 +428,7 @@ fn protected_classes_survive_disconnected_component() {
 #[test]
 fn disconnected_bfs_is_cycle_safe() {
     // A Hierarchical cycle in a component with no path to the temporal
-    // chain (G6: multi-hop Hierarchical cycles were writable before derive
+    // chain (multi-hop Hierarchical cycles were writable before derive
     // refused them, so a loaded store can hold one; the BFS must terminate
     // and collect the whole component).
     let mut g = Graph::new(sid());
@@ -509,10 +509,14 @@ fn canonical_budget_records_over_budget_without_demotion() {
     assert!(outcome.canonical_over_budget);
     assert_eq!(outcome.max_canonical_nodes, 1);
     assert!(
-        outcome.warnings.iter().any(|w| w.contains("T6.4")),
-        "over-budget must be recorded for T6.4"
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.contains("canonical demotion sweep")),
+        "over-budget must be recorded for the canonical demotion sweep"
     );
-    // No demotion happened here (T6.4's job): both remain Canonical.
+    // No demotion happened here (the demotion sweep's job): both remain
+    // Canonical.
     for id in [10u64, 11] {
         let c = match g.node(nid(id)).unwrap() {
             Node::Concept(c) => c,
@@ -552,7 +556,7 @@ fn max_concept_nodes_warns_without_evicting() {
 }
 
 // ------------------------------------------------------------------
-// Step 4 — T2.6 index maintenance hook
+// Step 4 — index maintenance hook
 // ------------------------------------------------------------------
 
 #[cfg(feature = "fixtures")]
