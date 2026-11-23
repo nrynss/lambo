@@ -645,8 +645,9 @@ pub(super) struct Lanes {
     /// (#295, the replay's rule): below `REPLAY_LOOKUP_TIMEOUT_LIMIT` one
     /// settles its write `failed`; at it the store is slow for everyone and
     /// the write is held like an embedder outage. Only a write's first
-    /// attempt counts. Reset when a write applies, at its commit (the
-    /// worker's `Ok` arm, under this lock), not in its later settle block
+    /// attempt counts. Reset when a write applies, inside its commit's
+    /// critical section (`execution::StreakReset`, this lock taken under the
+    /// graph write lock), not later in the worker's `Ok` arm or settle block
     /// (#346), so a timeout another lane meets after that commit starts a new
     /// run.
     pub(super) lookup_streak: usize,
