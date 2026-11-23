@@ -117,7 +117,15 @@ have named the dependents and, where the change is still needed, said why:
 6. **Writes apply in the background.** `lambo_derive` and `lambo_record_action`
    return a receipt. When your next read or citation must see the write, call
    `lambo_stats` with that `receipt` and a `wait_ms`, and go on only when the
-   receipt's state is `applied` or `applied_after_restart`.
+   receipt's state is `applied` or `applied_after_restart`. `pending` and
+   `pending_replay` mean ask again: `pending_replay` is a write held because
+   the embedder did not answer or vector lookups kept timing out (it is kept
+   and retried, and your later writes wait behind it), or one owed from an
+   earlier server. `failed` and `dropped` mean this server wrote nothing; read
+   `detail` before retrying. `intent_durable` means the session closed first
+   and the next server re-attempts the write; ask that server about the same
+   receipt. After `close_unflushed`, `restart_lost` or `expired`, recall
+   before you write the same thing again, because it may or may not be there.
 
 ---
 
