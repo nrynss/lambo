@@ -170,3 +170,43 @@ fn a_consumed_write_leaves_the_dead_lettered_intents() {
         "an unconsumed dead-lettered intent stays"
     );
 }
+
+/// #345 review: a put whose write was consumed before the dead letter (its
+/// consume in the dropped batch, or still in the log behind it) is never
+/// noted, so the set does not keep a receipt no close will set aside.
+#[test]
+fn a_put_consumed_before_the_dead_letter_is_not_noted() {
+    let (mut g, iid, _cid) = small_graph();
+    let intent = |receipt: &str| crate::types::WriteIntent {
+        session_id: sid(),
+        receipt: receipt.into(),
+        agent: crate::types::AgentId::from("agent-a"),
+        interaction: iid,
+        lane_seq: 1,
+        issued_ms: 0,
+        payload: crate::types::WriteIntentPayload::Derive {
+            concepts: vec![],
+            pairs: vec![],
+            receipt_destination: None,
+        },
+        created_at: ts(0),
+        outcome: None,
+    };
+    let applied = || crate::types::WriteIntentOutcome {
+        tag: "applied".into(),
+        summary: "applied".into(),
+        consumed_at: ts(1),
+    };
+    g.record_write_intent(intent("lwr1.2.1.1"));
+    g.record_write_intent(intent("lwr1.2.1.2"));
+    g.record_write_intent(intent("lwr1.2.1.3"));
+    // Consumed inside the batch the dead letter drops.
+    g.consume_write_intent("lwr1.2.1.1".into(), applied());
+    let dropped = g.drain_log();
+    // Consumed after the drain, before the dead letter: still in the log.
+    g.consume_write_intent("lwr1.2.1.2".into(), applied());
+    g.note_dead_lettered_intents(&dropped.mutations);
+    assert!(!g.intent_dead_lettered("lwr1.2.1.1"));
+    assert!(!g.intent_dead_lettered("lwr1.2.1.2"));
+    assert!(g.intent_dead_lettered("lwr1.2.1.3"));
+}

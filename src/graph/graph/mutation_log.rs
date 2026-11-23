@@ -184,7 +184,13 @@ impl Graph {
     /// already durable — the double-apply.
     ///
     /// Epoch not bumped, for [`Graph::record_write_intent`]'s reason.
+    ///
+    /// A consumed write is settled and never set aside by a close, so a
+    /// dead-lettered receipt it had is forgotten here (#345): the set holds
+    /// only dead-lettered intents whose write is still unconsumed (Lean:
+    /// `Drain.closeD_keptDropped`).
     pub fn consume_write_intent(&mut self, receipt: String, outcome: WriteIntentOutcome) {
+        self.dead_lettered_intents.remove(&receipt);
         self.mutation_log.push(Mutation::ConsumeWriteIntent {
             session_id: self.session_id.clone(),
             receipt,

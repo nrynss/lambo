@@ -44,8 +44,14 @@
 //! completed settles, been committed: the background flushes and the final
 //! one carry the whole log, and a degraded or fenced session's drops make the
 //! close answer `close_unflushed` anyway. So the set is exact, not a
-//! conservative bound (Lean: `Drain.closeD_durable_iff`). It only grows, by
-//! one receipt per put in a dead-lettered batch.
+//! conservative bound (Lean: `Drain.closeD_durable_iff`). It holds only the
+//! receipts whose write is still unconsumed: [`Graph::consume_write_intent`]
+//! forgets a receipt, and a put whose consume was appended before the dead
+//! letter (in the dropped batch or still in the log) is never noted. A
+//! consumed write is settled, never set aside, so this changes no close
+//! answer (Lean: `Drain.closeD_keptDropped`); what stays is one receipt per
+//! dead-lettered write still held, queued or running, or refused after a
+//! lost lease (whose close answers `close_unflushed` anyway).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -121,12 +127,32 @@ impl Graph {
     /// write intents they put, which therefore never reached the store
     /// (#345). Call it with the batch the dead letter drops, before or with
     /// [`Self::pin_unflushed`].
+    ///
+    /// A put whose write was already consumed is not noted: its consume is
+    /// in `mutations` or still in the log (a put precedes its consume in
+    /// log order, and the dropped batch is the flush's only pending one), and
+    /// a consumed write is never set aside.
     pub(crate) fn note_dead_lettered_intents(&mut self, mutations: &[Mutation]) {
-        for m in mutations {
-            if let Mutation::PutWriteIntent { intent } = m {
-                self.dead_lettered_intents.insert(intent.receipt.clone());
-            }
-        }
+        let consumed: std::collections::HashSet<&str> = mutations
+            .iter()
+            .chain(self.mutation_log.iter())
+            .filter_map(|m| match m {
+                Mutation::ConsumeWriteIntent { receipt, .. } => Some(receipt.as_str()),
+                _ => None,
+            })
+            .collect();
+        let puts: Vec<String> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::PutWriteIntent { intent }
+                    if !consumed.contains(intent.receipt.as_str()) =>
+                {
+                    Some(intent.receipt.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        self.dead_lettered_intents.extend(puts);
     }
 
     /// Whether the put of the write intent `receipt` was in a batch the
