@@ -63,7 +63,9 @@ daemon's routing around it in `Daemon::recall_routed` (`src/daemon/mod.rs`):
 * **Weights** are `Nat` (fixed point, as elsewhere): `f64` maximum and
   `total_cmp` agree with `Nat` order on finite non-negative weights; NaN,
   negative zero and rounding are outside the model.
-* **Sorting.** The comparator is `Order.rankMembers` itself, lawful and
+* **Sorting.** The Rust's `sort_by` is a stable merge sort; the model uses an
+  insertion sort (`isort`), which the kernel can evaluate for the `decide`
+  examples. The comparator is `Order.rankMembers` itself, lawful and
   separating, and the dependents are distinct, so any correct sort returns the
   same list (`ranked_unique`, from `Order.sorted_unique`); the `?` in
   `graph.node(s.item)?` never fires, every dependent being a concept
