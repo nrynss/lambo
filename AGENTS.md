@@ -47,7 +47,8 @@
   - Example config: `lambo.example.toml`.
 - **Vector width belongs to the store** (`GraphStore::vector_dimensions()`), not the
   embedder factory. `embedder.dim` is the expected width (default 1024 for every kind).
-  The width is checked in layers, and each layer fails closed before a session is served:
+  The width is checked in layers. Every check before serving fails closed, and the later
+  ones refuse the read or write they guard:
   - At resolve, two checks can refuse: a `[store] vector_dim` pin that differs from the
     embedder's width (every store kind), and an embedder whose width differs from
     Cockroach's `VECTOR(n)`, parsed from the shipped DDL. For SQLite and Postgres,
@@ -57,8 +58,9 @@
   - Postgres: the live `vector(n)` column is probed against that width at init
     (`provision`) and at attach (the schema preflight).
   - Every store: the session's durable embedding contract (kind, model, width) is checked
-    against the embedder at writer attach and on vector reads, and SQLite's write gate
-    refuses a vector whose width differs from it.
+    against the embedder at writer attach, before serving. While serving, a vector read
+    refuses a contract mismatch, and SQLite's write gate refuses a vector whose width
+    differs from the contract.
 - **Embeddings are portable** (see `docs/reference/config.mdx`, "Embedder" and "Features"):
   - Default: `bge_m3` (`embed-bge`), reference setup a BGE-M3 GGUF from Hugging Face
     in llama.cpp's `llama-server` (`scripts/fetch-bge-m3.sh`, `scripts/run-llama-embed.sh`).
