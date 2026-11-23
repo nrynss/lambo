@@ -8,10 +8,13 @@ Models `ServePlan`, `serve_preflight`, `stdio_session` and
 `pin_sessions` (`src/mcp/serve/pinned.rs`), `plan_layers`,
 `resolve_auth_token`, `SecretToken::new` / `check_configured_token`
 (`src/surface/bearer.rs`, `secretNew`, `maxBearer`) and `check_credential_set`
-(`src/config/credential.rs`, `credsOk`); what `lambo::mcp::serve` refuses
-after the backends are built and before any lease (`authorize_bind`,
-`authorize_ledger`: `serveStartRefused`); and `fn main` from the parsed
-command on (`main`): the `canon` route, the serve and serve-web pre-reads, the
+(`src/config/credential.rs`, `credsOk`), the ledger flags (`check_ledger`,
+`ledgerStep`) and the bind (`check_bind`, `bindStep`), which `serve_preflight`
+refuses before any backend is built (#316); what `lambo::mcp::serve` refuses
+again for library callers, after the backends are built and before any lease
+(`authorize_bind`, `authorize_ledger`: `serveStartRefused`); and `fn main` from
+the parsed command on (`main`): the `canon` route, the serve and serve-web
+pre-reads (serve-web's bind check, `plan_bind`, is `webBindStep`), the
 resolve over `Construction.lean`, the
 `unreachable!("writer override requires full backends")`, the final
 `match (cmd, resolved)` and its `_` arm ("internal resolve mismatch"). Session
@@ -36,17 +39,19 @@ with two sessions exits 2 before the file is read and ignores tokens
 invalid variable is never a fallback to the flag, and a valid variable wins
 (`preflight_bad_flag`, `preflight_bad_env`, `preflight_env_wins`); every plan
 satisfies `preflight_ok_stdio` / `preflight_ok_http`, and a preflight refusal
-costs no backend build (`serve_preflight_refusal_builds_nothing`). About the
-current code: a non-loopback HTTP bind with no credential is not a preflight
-refusal but `authorize_bind`'s after the backends are built, exit 1
-(`bind_refused_after_build`), and `--ledger-heartbeat`'s "Requires --ledger" is
-not enforced by clap but by `authorize_ledger`, likewise after the build
-(`heartbeat_without_ledger_after_build`).
+costs no backend build (`serve_preflight_refusal_builds_nothing`). Since #316
+a plan preflight passes is never refused by `serve`'s own start checks
+(`preflight_ok_start_allowed`), so a non-loopback bind with no credential and
+`--ledger-heartbeat` without `--ledger` (or zero) exit 2 before any backend is
+built, and `serve-web` refuses the same bind with the same code, also before
+the build (`exposed_bind_refused_before_build`,
+`heartbeat_without_ledger_refused_before_build`).
 
 Boundary: exit codes are modelled only where `main` and `serve_preflight`
 choose them; a command body's own exit codes (`CliError::exit_code`,
-`canon_exit`), `run_canon`, `serve-web`'s planning (an input,
-`MainIn.webPlan`), tracing setup, `[serve]`'s unenforced-key notice and
+`canon_exit`), `run_canon`, `serve-web`'s session, host and credential
+planning (an input, `MainIn.webPlan`; its bind check is modelled, with
+"has a credential" an input, `MainIn.webCredential`), tracing setup, `[serve]`'s unenforced-key notice and
 `session verify`'s `ServeConfig::validate` are not. Path matching, `~` and
 symlinks in stdio session selection are not modelled. Tokens are byte lists
 with a UTF-8 flag and ASCII whitespace; Rust's `str::trim` also trims non-ASCII
@@ -215,6 +220,27 @@ def credStep (t : Transport) (c : Config) (token : Option (List Nat)) :
     | none => .error 2
     | some cs => if credsOk token cs then .ok cs else .error 2
 
+/-- `check_ledger`: `--ledger-heartbeat` without `--ledger`, or a zero
+interval. -/
+def ledgerRefused (s : ServeIn) : Bool :=
+  (s.heartbeat.isSome && !s.ledger) || s.heartbeat == some 0
+
+/-- The ledger flags, checked before the file is read (exit 2). -/
+def ledgerStep (s : ServeIn) : Except Nat Unit :=
+  if ledgerRefused s then .error 2 else .ok ()
+
+/-- `check_bind` (`authorize_bind` over the plan's legacy token and
+credentials): an HTTP bind beyond loopback with no credential. -/
+def bindRefused (t : Transport) (loopback : Bool) (token : Option (List Nat))
+    (creds : List (Nat × List Nat)) : Bool :=
+  t == .http && !loopback && token.isNone && creds.isEmpty
+
+/-- The bind, checked once the token and credentials are resolved (exit
+2). -/
+def bindStep (t : Transport) (loopback : Bool) (token : Option (List Nat))
+    (creds : List (Nat × List Nat)) : Except Nat Unit :=
+  if bindRefused t loopback token creds then .error 2 else .ok ()
+
 def transportStep (t : Option Transport) : Except Nat Transport :=
   match t with
   | none => .error 2
@@ -226,12 +252,14 @@ def preflight (addr : Nat → Bool) (raw : Raw) (s : ServeIn) : Except Nat Plan 
   let t ← transportStep s.transport
   let flagTok ← flagStep t s.authFlag
   countStep t s.sessions
+  ledgerStep s
   let c ← loadStep raw
   let ss ← selStep t s.sessions c
   let dp ← pinStep addr ss c t
   layerStep t c
   let token ← tokStep t s.authEnv flagTok
   let cs ← credStep t c token
+  bindStep t s.loopback token cs
   pure ⟨t, dp.1, dp.2, token, cs, c⟩
 
 /-! ## `main` -/
@@ -259,6 +287,11 @@ structure MainIn where
   /-- `serve-web`'s session, host and credential planning: `some n` is a
   refusal with exit code `n`. -/
   webPlan : Option Nat := none
+  /-- `serve-web --bind` is a loopback address. -/
+  webLoopback : Bool := true
+  /-- `serve-web` has a credential: `LAMBO_AUTH_TOKEN` or `--auth-token`, or
+  a configured or inherited credential. -/
+  webCredential : Bool := false
   deriving DecidableEq, Repr
 
 /-- The arms of `main`'s final `match (cmd, resolved)`. -/
@@ -278,10 +311,17 @@ def armMatches : Cmd → Resolved → Bool
 /-- `lambo::mcp::serve`'s refusals before any lease, which run after the
 backends are built: `authorize_bind` (an HTTP bind beyond loopback with no
 credential) and `authorize_ledger` (`--ledger-heartbeat` without `--ledger`,
-or zero). Exit 1. -/
+or zero). Exit 1. They stay in `serve` for library callers; `main` reaches
+them only with a plan `serve_preflight` passed, which they never refuse
+(`preflight_ok_start_allowed`). -/
 def serveStartRefused (p : Plan) (s : ServeIn) : Bool :=
-  (p.transport == .http && !s.loopback && p.token.isNone && p.creds.isEmpty) ||
-    (s.heartbeat.isSome && !s.ledger) || s.heartbeat == some 0
+  bindRefused p.transport s.loopback p.token p.creds || ledgerRefused s
+
+/-- `serve-web`'s bind check in `main`'s planning (`plan_bind`, the rule of
+`authorize_bind_web`, which `run` applies again for library callers): a
+non-loopback bind with no credential is a usage error, exit 2. -/
+def webBindStep (loopback credential : Bool) : Except Nat Unit :=
+  if !loopback && !credential then .error 2 else .ok ()
 
 /-- `fn main`, from the parsed command on. Returns what was built and the
 outcome. -/
@@ -302,7 +342,10 @@ def main (f : Features) (addr : Nat → Bool) (file : Nat → Raw) (m : MainIn) 
         | .ok c =>
           match m.webPlan with
           | some n => .error n
-          | none => .ok (some c, none)
+          | none =>
+            match webBindStep m.webLoopback m.webCredential with
+            | .error n => .error n
+            | .ok () => .ok (some c, none)
       | _ => .ok (none, none)
     match pre with
     | .error n => ([], .exit n)
@@ -473,6 +516,11 @@ theorem tokStep_code (t : Transport) (ev : Option TokenRaw) (ft : Option (List N
 theorem credStep_code (t : Transport) (c : Config) (tok : Option (List Nat)) :
     CodeOk (credStep t c tok) := by
   unfold credStep; code_tac
+theorem ledgerStep_code (s : ServeIn) : CodeOk (ledgerStep s) := by
+  unfold ledgerStep; code_tac
+theorem bindStep_code (t : Transport) (lb : Bool) (tok : Option (List Nat))
+    (cs : List (Nat × List Nat)) : CodeOk (bindStep t lb tok cs) := by
+  unfold bindStep; code_tac
 
 /-- `serve_preflight`'s refusals are usage errors (exit 2) except an
 unreadable file and an undecidable `[[serve.projects]]` map (exit 1). -/
@@ -482,12 +530,14 @@ theorem preflight_exit_codes (addr : Nat → Bool) (raw : Raw) (s : ServeIn) :
   refine codeOk_bind (transportStep_code _) fun t => ?_
   refine codeOk_bind (flagStep_code _ _) fun ft => ?_
   refine codeOk_bind (countStep_code _ _) fun _ => ?_
+  refine codeOk_bind (ledgerStep_code _) fun _ => ?_
   refine codeOk_bind (loadStep_code _) fun c => ?_
   refine codeOk_bind (selStep_code _ _ _) fun ss => ?_
   refine codeOk_bind (pinStep_code _ _ _ _) fun dp => ?_
   refine codeOk_bind (layerStep_code _ _) fun _ => ?_
   refine codeOk_bind (tokStep_code _ _ _) fun tok => ?_
   refine codeOk_bind (credStep_code _ _ _) fun cs => ?_
+  refine codeOk_bind (bindStep_code _ _ _ _) fun _ => ?_
   intro n h; cases h
 
 theorem bind_error {α β : Type} {x : Except Nat α} {g : α → Except Nat β} {n : Nat}
@@ -533,6 +583,8 @@ theorem preflight_exit1 {addr : Nat → Bool} {raw : Raw} {s : ServeIn}
   · unfold flagStep at h1; no1_tac h1
   rcases bind_error h with h1 | ⟨u, -, h⟩
   · unfold countStep at h1; no1_tac h1
+  rcases bind_error h with h1 | ⟨u1, -, h⟩
+  · unfold ledgerStep at h1; no1_tac h1
   rcases bind_error h with h1 | ⟨c, hl, h⟩
   · left; unfold loadStep at h1; split at h1
     · rename_i e he; exact ⟨e, he⟩
@@ -554,8 +606,10 @@ theorem preflight_exit1 {addr : Nat → Bool} {raw : Raw} {s : ServeIn}
   · unfold layerStep at h1; no1_tac h1
   rcases bind_error h with h1 | ⟨tok, -, h⟩
   · unfold tokStep at h1; no1_tac h1
+  rcases bind_error h with h1 | ⟨cs, -, h⟩
+  · unfold credStep at h1; no1_tac h1
   have h1 := map_error h
-  unfold credStep at h1; no1_tac h1
+  unfold bindStep at h1; no1_tac h1
 
 /-- An unknown `--transport` is a usage error (exit 2). -/
 theorem preflight_bad_transport (addr : Nat → Bool) (raw : Raw) (s : ServeIn)
@@ -576,7 +630,8 @@ can refuse or change its start (#32; the test
 theorem preflight_stdio_ignores_tokens (addr : Nat → Bool) (raw : Raw) (s : ServeIn)
     (ht : s.transport = some .stdio) (fl ev : Option TokenRaw) :
     preflight addr raw { s with authFlag := fl, authEnv := ev } = preflight addr raw s := by
-  simp [preflight, transportStep, flagStep, tokStep, ht, bind, Except.bind]
+  simp [preflight, transportStep, flagStep, tokStep, ledgerStep, ledgerRefused, ht, bind,
+    Except.bind]
 
 /-- An invalid `--auth-token` refuses an HTTP serve (exit 2) before the
 file is read, even when `LAMBO_AUTH_TOKEN`, which wins, is set and valid:
@@ -604,19 +659,22 @@ theorem preflight_steps {addr : Nat → Bool} {raw : Raw} {s : ServeIn} {p : Pla
         pinStep addr ss p.file p.transport = .ok (p.default, p.sessions) ∧
         layerStep p.transport p.file = .ok () ∧
         tokStep p.transport s.authEnv ft = .ok p.token ∧
-        credStep p.transport p.file p.token = .ok p.creds := by
+        credStep p.transport p.file p.token = .ok p.creds ∧
+        ledgerStep s = .ok () ∧ bindStep p.transport s.loopback p.token p.creds = .ok () := by
   unfold preflight at h
   obtain ⟨t, ht, h⟩ := bind_ok h
   obtain ⟨ft, hft, h⟩ := bind_ok h
   obtain ⟨u, hc, h⟩ := bind_ok h
+  obtain ⟨u1, hlg, h⟩ := bind_ok h
   obtain ⟨c, hl, h⟩ := bind_ok h
   obtain ⟨ss, hss, h⟩ := bind_ok h
   obtain ⟨dp, hdp, h⟩ := bind_ok h
   obtain ⟨u2, hly, h⟩ := bind_ok h
   obtain ⟨tok, htk, h⟩ := bind_ok h
-  obtain ⟨cs, hcs, h⟩ := map_ok h
+  obtain ⟨cs, hcs, h⟩ := bind_ok h
+  obtain ⟨u3, hbd, h⟩ := map_ok h
   subst h
-  exact ⟨ht, hl, hc, ft, ss, hft, hss, hdp, hly, htk, hcs⟩
+  exact ⟨ht, hl, hc, ft, ss, hft, hss, hdp, hly, htk, hcs, hlg, hbd⟩
 
 /-- A set `LAMBO_AUTH_TOKEN` that is not a valid token (an exported empty
 one included) never lets an HTTP serve start: no silent fall back to the
@@ -625,7 +683,7 @@ theorem preflight_bad_env (addr : Nat → Bool) (raw : Raw) (s : ServeIn)
     (ht : s.transport = some .http) (r : TokenRaw) (he : s.authEnv = some r) (w : Why)
     (hw : secretNew r = .error w) (p : Plan) : preflight addr raw s ≠ .ok p := by
   intro h
-  obtain ⟨htr, -, -, ft, -, -, -, -, -, htk, -⟩ := preflight_steps h
+  obtain ⟨htr, -, -, ft, -, -, -, -, -, htk, -, -, -⟩ := preflight_steps h
   simp [transportStep, ht] at htr
   rw [← htr, he] at htk
   obtain ⟨k, hk, -⟩ := tokStep_http_some htk
@@ -636,7 +694,7 @@ token is the environment's. -/
 theorem preflight_env_wins {addr : Nat → Bool} {raw : Raw} {s : ServeIn} {p : Plan}
     (ht : s.transport = some .http) (r : TokenRaw) (he : s.authEnv = some r) {k : List Nat}
     (hk : secretNew r = .ok k) (h : preflight addr raw s = .ok p) : p.token = some k := by
-  obtain ⟨htr, -, -, ft, -, -, -, -, -, htk, -⟩ := preflight_steps h
+  obtain ⟨htr, -, -, ft, -, -, -, -, -, htk, -, -, -⟩ := preflight_steps h
   simp [transportStep, ht] at htr
   rw [← htr, he] at htk
   obtain ⟨k', hk', h2⟩ := tokStep_http_some htk
@@ -674,7 +732,7 @@ credential. -/
 theorem preflight_ok_stdio {addr : Nat → Bool} {raw : Raw} {s : ServeIn} {p : Plan}
     (h : preflight addr raw s = .ok p) (ht : p.transport = .stdio) :
     s.sessions.length ≤ 1 ∧ p.sessions = [p.default] ∧ p.token = none ∧ p.creds = [] := by
-  obtain ⟨-, -, hc, ft, ss, -, hss, hdp, -, htk, hcs⟩ := preflight_steps h
+  obtain ⟨-, -, hc, ft, ss, -, hss, hdp, -, htk, hcs, -, -⟩ := preflight_steps h
   rw [ht] at hc hss hdp htk hcs
   refine ⟨?_, ?_, ?_, ?_⟩
   · unfold countStep at hc; split at hc
@@ -699,7 +757,7 @@ theorem preflight_ok_http {addr : Nat → Bool} {raw : Raw} {s : ServeIn} {p : P
       p.sessions.length ≤ p.file.serve.maxAttached ∧
       (1 < p.sessions.length → p.sessions.all addr = true) ∧
       p.file.serve.layersOk = true ∧ credsOk p.token p.creds = true := by
-  obtain ⟨-, -, -, ft, ss, -, hss, hdp, hly, -, hcs⟩ := preflight_steps h
+  obtain ⟨-, -, -, ft, ss, -, hss, hdp, hly, -, hcs, -, -⟩ := preflight_steps h
   rw [ht] at hss hdp hly hcs
   simp only [selStep, Except.ok.injEq] at hss
   subst hss
@@ -717,30 +775,45 @@ theorem preflight_ok_http {addr : Nat → Bool} {raw : Raw} {s : ServeIn} {p : P
 
 /-! ## Results: what preflight leaves to `serve` -/
 
-/-- Shown about the Rust: a non-loopback HTTP bind with no credential is
-not a preflight refusal. `serve_preflight` passes it, the backends are
-resolved, and `lambo::mcp::serve`'s `authorize_bind` refuses it with exit 1
-(not 2), after the store and embedder were built. The refusal still comes
-before any lease. -/
+/-- `serve`'s own start checks (`authorize_bind`, `authorize_ledger`) never
+refuse a plan `serve_preflight` passed, so for `lambo serve` an HTTP bind
+beyond loopback without a credential, and `--ledger-heartbeat` without
+`--ledger` or zero, are refused only in preflight, before any backend is
+built (#316). -/
+theorem preflight_ok_start_allowed {addr : Nat → Bool} {raw : Raw} {s : ServeIn} {p : Plan}
+    (h : preflight addr raw s = .ok p) : serveStartRefused p s = false := by
+  obtain ⟨-, -, -, -, -, -, -, -, -, -, -, hlg, hbd⟩ := preflight_steps h
+  unfold ledgerStep at hlg
+  unfold bindStep at hbd
+  split at hlg
+  · simp at hlg
+  · split at hbd
+    · simp at hbd
+    · simp_all [serveStartRefused]
+
+/-- `lambo serve --transport http` on a non-loopback bind with no credential. -/
 def exposedServe : MainIn :=
   { cmd := .serve, serve := { transport := some .http, sessions := [3], loopback := false } }
 
-/-- An exposed HTTP bind with no token passes `serve_preflight` and is refused
-only after `resolve_backends` has built the store and the embedder, exit 1
-(`authorize_bind`). -/
-theorem bind_refused_after_build :
-    preflight (fun _ => true) {} exposedServe.serve ≠ .error 2 ∧
-      main Features.dflt (fun _ => true) (fun _ => {}) exposedServe =
-        ([(.backends, .store .memory false), (.backends, .embedder .bgeM3)], .exit 1) := by
+/-- `lambo serve-web` on a non-loopback bind with no credential. -/
+def exposedWeb : MainIn :=
+  { cmd := .serveWeb, webLoopback := false }
+
+/-- `lambo serve` and `lambo serve-web` refuse a non-loopback bind with no
+credential with the same exit code, 2, before any store or embedder is built
+(#316; the tests `an_exposed_bind_without_a_credential_is_refused_before_any_backend`
+and `an_exposed_serve_web_bind_is_refused_before_any_backend`). -/
+theorem exposed_bind_refused_before_build :
+    main Features.dflt (fun _ => true) (fun _ => {}) exposedServe = ([], .exit 2) ∧
+      main Features.dflt (fun _ => true) (fun _ => {}) exposedWeb = ([], .exit 2) := by
   decide
 
-/-- Shown about the Rust: `--ledger-heartbeat`'s help says "Requires
---ledger", but clap does not enforce it (no `requires`). The serve resolves
-its backends and `authorize_ledger` refuses with exit 1. -/
-theorem heartbeat_without_ledger_after_build :
+/-- `--ledger-heartbeat` without `--ledger` is refused by `serve_preflight`
+with exit 2, before any store or embedder is built (#316; the test
+`ledger_heartbeat_misuse_is_refused_before_any_backend`). -/
+theorem heartbeat_without_ledger_refused_before_build :
     main Features.dflt (fun _ => true) (fun _ => {})
-        { cmd := .serve, serve := { sessions := [3], heartbeat := some 30 } } =
-      ([(.backends, .store .memory false), (.backends, .embedder .bgeM3)], .exit 1) := by
+        { cmd := .serve, serve := { sessions := [3], heartbeat := some 30 } } = ([], .exit 2) := by
   decide
 
 /-- A preflight refusal builds nothing and exits with its code. -/

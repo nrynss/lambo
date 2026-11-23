@@ -121,8 +121,8 @@ theorem embedValid_iff :
   decide
 
 /-- `--ledger-heartbeat` without `--ledger` parses (`serve` declares no
-clap rule): the refusal comes after the backends are built
-(`heartbeat_without_ledger_after_build`). -/
+clap rule): `serve_preflight` refuses it, exit 2, before any backend is
+built (`heartbeat_without_ledger_refused_before_build`). -/
 theorem serve_has_no_clap_rules : rules .serve = [] := rfl
 
 /-- The canon alias-preview rules of the test
