@@ -3,7 +3,7 @@
 //! Speaks llama.cpp's OpenAI-compatible `POST /v1/embeddings` endpoint, which is the
 //! most version-stable surface across llama.cpp releases. Returns dense vectors that are
 //! L2-normalized before returning so Cockroach `<->` (L2) rankings stay coherent with
-//! cosine similarity (see `notes/embeddings-portable.md`).
+//! cosine similarity.
 //!
 //! This backend is selected when `LAMBO_EMBEDDER=bge_m3` (the default).
 //!

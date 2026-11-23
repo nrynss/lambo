@@ -108,9 +108,8 @@ impl From<crate::types::LamboError> for CliError {
 /// becomes an identity, while `--agent` is the trusted local operator naming
 /// themselves, and tightening it would change `AgentId`'s semantics for every
 /// library caller. So this is an operator poisoning their own graph — P3 — but
-/// it is the one residual that outlives the process, and it is recorded under
-/// §J2 in `dev-diary/lambo-for-mooshik/J-multi-client.md` rather than only here,
-/// because J2 is where clients stop being local.
+/// it is the one residual that outlives the process, and it stays open
+/// because shared HTTP serving (J2) is where clients stop being local.
 pub fn check_size_cli(field: &str, value: &str) -> Result<(), CliError> {
     check_size(field, value).map_err(CliError::Usage)
 }

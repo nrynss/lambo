@@ -56,7 +56,7 @@ class PathClassification(unittest.TestCase):
 
     def test_unrelated_docs_and_evidence_stay_lightweight(self):
         self.assertEqual(classifier.classify_paths([
-            "README.md", "dev-diary/handoff.md", "site/src/components/MdxNote.astro",
+            "README.md", "docs/operations/dogfood-rig.md", "site/src/components/MdxNote.astro",
             "evidence/issue-221/README.md", "scripts/loadtest/mcp_load.py",
             # formal/ outside the models the Rust tests read (#291).
             "formal/README.md", "formal/lakefile.toml", "formal/lean-toolchain",

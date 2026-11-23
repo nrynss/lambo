@@ -25,8 +25,7 @@
 //! under `[store]`. `StoreConfig` is a public struct with public fields that
 //! dozens of call sites (and library consumers) build literally, so a new field
 //! there breaks every one of them; a top-level `LamboFile` section does not, and
-//! it reads the same to an operator. Recorded in
-//! `dev-diary/notes/feature-18-elastic-tier.md`.
+//! it reads the same to an operator. Decided in #18.
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -203,7 +202,7 @@ pub struct RecallBackfillReport {
 fn missing_feature(kind: RecallKind) -> StoreError {
     StoreError::Backend(format!(
         "recall tier kind `{kind}` is not compiled into this binary; rebuild with \
-         `--features {}` (see dev-diary/notes/level-b-pluggability.md)",
+         `--features {}` (see Features in docs/reference/config.mdx)",
         kind.feature_name()
     ))
 }

@@ -8,10 +8,8 @@ use serde::{Deserialize, Serialize};
 /// Emitted so H1 (this file: SQLite + memory oracle), H2 (live
 /// Cockroach) and H3 (pgvector, once B3 lands) all produce ONE shape,
 /// diffable across runs and across whichever adapters happened to be
-/// reachable in a given run. See `dev-diary/lambo-for-mooshik/
-/// H-cross-store-parity.md`, "What parity means here, precisely", for
-/// what each measure is and why exact-scan vs ANN adapters are
-/// attributed differently.
+/// reachable in a given run. Exact-scan and ANN adapters are attributed
+/// differently.
 ///
 /// **Why this shape survives a third adapter untouched.** Nothing
 /// here names a specific backend in a field: `adapters` and every
@@ -80,8 +78,7 @@ struct AdapterRun {
     /// Whether an index served the answer for this adapter in this
     /// run (vs. a full/forced-exact scan). Always `false` for H1:
     /// SQLite and the memory oracle are both linear scans by
-    /// construction (see F-sqlite-vectors.md, "Exact scan, not an
-    /// index").
+    /// construction: SQLite has no vector index.
     index_present: bool,
 }
 
@@ -405,8 +402,8 @@ const H3_SCORE_SKEW_EPSILON: f64 = 1e-4;
 #[cfg_attr(not(feature = "store-postgres"), allow(dead_code))]
 enum IndexEvidence {
     /// Linear scan by construction: SQLite and the memory oracle have
-    /// no vector index to use, so there is no plan to read (see
-    /// F-sqlite-vectors.md, "Exact scan, not an index"). This is the
+    /// no vector index to use, so there is no plan to read (an exact
+    /// scan, not an index). This is the
     /// one honest constant here.
     LinearByConstruction,
     /// A live Postgres lane: EXPLAIN the production recall SQL, after

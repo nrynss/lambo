@@ -19,11 +19,11 @@ use crate::store::vector_source::VectorCandidateSource;
 use crate::store::{validate_vector_candidate_limit, GraphStore};
 use crate::types::{EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 
-// DECISION D1 (PHASE-7-embeddings.md T7.3): the vector query is GLOBAL
+// DECISION D1 (T7.3): the vector query is GLOBAL
 // (`ORDER BY embedding <-> $1::VECTOR LIMIT $k`, no session predicate) so the
 // planner uses `concepts@concepts_embedding_idx` (the session-filtered shape scans
 // `concepts_session_id_canonical_key_key` and bypasses the index — evidence in
-// `dev-diary/evidence/t0.3-vector-spike.txt`). Session filtering happens in Rust.
+// `evidence/vector-spike.txt`). Session filtering happens in Rust.
 // Because the trait passes only `limit`, the global fetch `$k` must be sized
 // generously enough that the caller's in-session top candidates are not crowded out
 // of the global top-k by foreign-session concepts. The sizing is a documented,

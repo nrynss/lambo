@@ -5,9 +5,8 @@ DOGFOOD question, each printing a small human-readable report (`--json` for
 piping). No dashboards: `serve-web` already renders *state*, and these answer
 questions about *flow*.
 
-See [`dev-diary/lambo-for-mooshik/I-observability.md`](../../dev-diary/lambo-for-mooshik/I-observability.md)
-for why the ledger exists, and [`DOGFOOD.md`](../../dev-diary/lambo-for-mooshik/DOGFOOD.md)
-for the metrics these close.
+The ledger these read is written by `lambo serve --ledger`; see the `--ledger` row in
+[the CLI reference](../../docs/reference/cli.mdx) for its line kinds.
 
 ---
 
@@ -52,7 +51,7 @@ LAMBO_GIT_SHA=$(git rev-parse --short HEAD) cargo build --release
 
 Without it the field is `"unknown"`, and two builds of the same crate version are
 indistinguishable. The rig's build step is the place that must set it —
-[`DOGFOOD-SETUP.md`](../../dev-diary/lambo-for-mooshik/DOGFOOD-SETUP.md) §2, which
+[the dogfood rig runbook](../../docs/operations/dogfood-rig.md), which
 does.
 
 ---
@@ -476,8 +475,8 @@ that is the distinction metric 2 turns on.
 
 **Since J3, `derive` lines carry no `created` / `matched` counts, and since J4
 those counts come back through a join.** `lambo_derive` is acknowledged before
-the write is applied (writes acknowledged before the embedder,
-`dev-diary/lambo-for-mooshik/J-multi-client.md` §J3), so the call line is
+the write is applied (writes acknowledged before the embedder; see
+`lambo_derive` in [the MCP reference](../../docs/reference/mcp.mdx)), so the call line is
 written at a moment when no outcome exists. J4 added a `kind:"completion"` line
 carrying the receipt id, the settle state, and the true `created_count` /
 `matched_count`, and **`dedup_rate.py` and `duplicates.py` join on it** — so an

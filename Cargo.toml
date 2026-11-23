@@ -10,7 +10,7 @@ repository = "https://github.com/nrynss/lambo"
 keywords = ["memory", "agents", "mcp", "graph"]
 categories = ["asynchronous"]
 # crates.io tarball whitelist (v020-R1-P2-1): ONLY these paths ship. Internal
-# trees (dev-diary/, evidence/, scripts/, docs/, site/, demo/, .grok/,
+# trees (evidence/, scripts/, docs/, site/, demo/, .grok/,
 # .github/, AGENTS.md, .env.example) and tests/ (consumer builds don't need
 # our integration suite) stay out. Cargo.toml, Cargo.lock (bin crate),
 # Cargo.toml.orig and .cargo_vcs_info.json are auto-added by cargo.
@@ -85,7 +85,7 @@ hf-hub = { version = "0.4", optional = true }
 tokenizers = { version = "0.21", optional = true, default-features = false, features = ["onig"] }
 sha2 = "0.10"
 
-# --- optional: Level B adapters (see dev-diary/notes/level-b-pluggability.md) ---
+# --- optional: Level B adapters (see docs/reference/config.mdx, "Features") ---
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8", optional = true, default-features = false, features = [
     "runtime-tokio",
@@ -167,7 +167,7 @@ fixtures = ["store-memory"]
 # Ship profile (T8.9): the FULL adapter set carried by released prebuilt
 # binaries. One `lambo` binary holds every adapter; `[store] kind` /
 # `[embedder] kind` pick one at runtime. `embed-bedrock` is deliberately
-# omitted until the account is AUTHORIZED (notes/bedrock-authorization-blocker.md).
+# omitted until the AWS account is authorized for Bedrock.
 #
 # `store-postgres` and `embed-gemini` joined 2026-08-24, when workstreams A and
 # B landed and were live-verified. Before that a released binary could not run

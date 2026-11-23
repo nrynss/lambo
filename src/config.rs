@@ -1,7 +1,7 @@
 //! Runtime configuration — named defaults from the v0.1 hackathon spec,
 //! plus Level B process file (`lambo.toml`) for store/embedder selection.
 //!
-//! See `dev-diary/notes/level-b-pluggability.md`.
+//! See `docs/reference/config.mdx` ("Features").
 
 use serde::{Deserialize, Serialize};
 use std::fs;

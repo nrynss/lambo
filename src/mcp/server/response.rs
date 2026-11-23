@@ -99,8 +99,7 @@ pub(super) fn tool_err(what: &str, err: LamboError) -> CallToolResult {
 /// block through `format::reservation_warning`. Redacting this one path would
 /// advertise a neutralisation the read side does not have. Whether a
 /// caller-chosen id should be neutralised on render at all is still open —
-/// recorded as a §J2 residual in `dev-diary/lambo-for-mooshik/J-multi-client.md`
-/// rather than only here, since J2 is where it comes due.
+/// an open J2 residual, since shared HTTP serving (J2) is where it comes due.
 pub(super) fn conflict_err(what: &str, msg: &str, nothing: &str) -> CallToolResult {
     tracing::warn!(
         tool = what,

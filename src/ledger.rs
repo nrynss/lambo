@@ -5,8 +5,7 @@
 //! post-hoc SQL question) and was blind to **flow**: nothing recorded the calls
 //! agents actually make, so "agent X recalled, then derived, and a blast-radius
 //! warning rendered" existed only in the conversation that received it. This
-//! module is the serve-side record of that. See
-//! `dev-diary/lambo-for-mooshik/I-observability.md`.
+//! module is the serve-side record of that.
 //!
 //! # The two rules that shape every line of this file
 //!
@@ -120,8 +119,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// — and note the consequence of *not* setting it: two builds of the same crate
 /// version both report `"unknown"`, so a dogfood upgrade event shows as a sha
 /// change only if the rig sets the variable when it builds the pinned binary.
-/// `dev-diary/lambo-for-mooshik/DOGFOOD-SETUP.md` **§2 "The pinned binary"** owns
-/// the rig's build step and is the place that sets it.
+/// The dogfood rig runbook (`docs/operations/dogfood-rig.md`) owns the rig's
+/// build step and is the place that sets it.
 pub const GIT_SHA: &str = match option_env!("LAMBO_GIT_SHA") {
     Some(sha) => sha,
     None => "unknown",
@@ -343,7 +342,7 @@ impl Ledger {
     /// Before I-R1-3 the block was real, and — the handler then being armed
     /// only below this call — it lost the *tail* instead, the signal hitting
     /// its default disposition and killing the process outright
-    /// (`I-observability.md` narrates it). Every version of this is
+    /// (workstream I's design narrated it). Every version of this is
     /// observability taking down memory through the flag that turns
     /// observability on, which is why the probe stays on the writer thread.
     ///

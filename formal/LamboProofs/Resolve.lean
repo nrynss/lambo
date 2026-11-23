@@ -105,7 +105,7 @@ Loading (Level B rule 2):
   environment's, else the file's, else (nothing spelled) the default.
 
 What each command needs, and the single construction site (Level B rule 4,
-`level-b-pluggability.md` invariant 7, #273's second Track 1 constraint):
+Level B's single construction site, #273's second Track 1 constraint):
 * `needsEmbedder_table`, `mismatchFlag_writer`, `readers_no_mismatch_flag`
   (the tests `saints_stats_inspect_provision_resolve_store_only` and
   `h1_embedding_mismatch_override_is_explicit_and_writer_only`).
@@ -936,7 +936,7 @@ theorem load_refuses_unknown (r : Raw)
     · rw [h, pick_unknown_file] at he; cases he
     · rw [h, pick_unknown_env] at he; cases he
 
-/-- No silent fallback (`level-b-pluggability.md`): a loaded store kind is
+/-- No silent fallback (Level B): a loaded store kind is
 the environment's, else the file's, else (neither spells one) `memory`. -/
 theorem load_store_no_fallback {r : Raw} {c : Config} (h : load r = .ok c) :
     r.storeEnv = .known c.store ∨

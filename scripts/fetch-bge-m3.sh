@@ -2,8 +2,9 @@
 # fetch-bge-m3.sh — download BGE-M3 GGUF weights for llama.cpp (P7 T7.0).
 #
 # Weights are large and gitignored (`models/`). Never commit them.
-# Record the exact repo + revision you download in the Handoff Log so the demo is
-# reproducible (see dev-diary/notes/embeddings-portable.md).
+# The repo, file, revision and SHA-256 below are pinned so a download is
+# reproducible. LAMBO_BGE_M3_DIR changes where it goes; switching to another
+# file also means updating EXPECTED_SHA256, or the checksum check fails.
 #
 # Usage:
 #   ./scripts/fetch-bge-m3.sh              # default repo/file below
@@ -26,7 +27,7 @@ MODEL_DIR="${LAMBO_BGE_M3_DIR:-$ROOT/models/bge-m3}"
 # Repo + file on Hugging Face. Override for another build.
 REPO="${LAMBO_BGE_M3_HF_REPO:-gpustack/bge-m3-GGUF}"
 FILE="${LAMBO_BGE_M3_GGUF:-bge-m3-FP16.gguf}"
-# Pinned revision (sha) for reproducibility - see dev-diary notes. Override to track another.
+# Pinned revision (sha) for reproducibility. Override to track another.
 REVISION="${LAMBO_BGE_M3_REVISION:-2d48f1737679ad900d5c26c5aad5410e9c70fdca}"
 
 # Pinned sha256 of $FILE at $REVISION (run `sha256sum` on the downloaded file

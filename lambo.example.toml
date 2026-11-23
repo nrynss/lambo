@@ -1,7 +1,7 @@
 # Example Lambo process config (Level B pluggability).
 # Copy to lambo.toml and adjust. Secrets stay in .env / the environment — not here.
 #
-# Selection rules: see dev-diary/notes/level-b-pluggability.md
+# Selection rules: see docs/reference/config.mdx, "Features"
 # - Cargo features decide what is compiled in.
 # - This file (or env) selects among compiled backends.
 # - Unknown or uncompiled `kind` => hard startup error.

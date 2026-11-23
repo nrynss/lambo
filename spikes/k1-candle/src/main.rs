@@ -16,7 +16,7 @@ use tokenizers::Tokenizer;
 
 const MODEL_ID: &str = "BAAI/bge-m3";
 const LLAMA_URL: &str = "http://127.0.0.1:8080/v1/embeddings";
-/// Canonical artifact only (same-artifact rule, DOGFOOD-SETUP §1): BAAI ships no
+/// Canonical artifact only (same-artifact rule): BAAI ships no
 /// safetensors, so weights come from pytorch_model.bin via VarBuilder::from_pth.
 const WEIGHTS_FILE_DEFAULT: &str = "pytorch_model.bin";
 /// Position embeddings cap minus headroom; BGE-M3 config says 8144.

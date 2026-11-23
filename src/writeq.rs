@@ -56,8 +56,7 @@
 //! | `replay` | the durable-intent replay spawned at attach |
 //!
 //! The review chronology behind these rules (three review rounds, the
-//! estimator redesign) is in `dev-diary/notes/refactor-27-writeq-memory.md` and
-//! `dev-diary/lambo-for-mooshik/J3-durability-redesign.md`.
+//! estimator redesign) is in #27 and the J3 durability redesign.
 
 use std::collections::HashMap;
 use std::fmt;

@@ -240,9 +240,8 @@ pub const GC_IDLE_FLOOR: u64 = 100;
 /// once recall records accesses (issue #30) a concept that is still being used
 /// keeps resetting its own clock.
 ///
-/// The window started at 90 days (measured on the rig snapshot, see the
-/// dev-diary note `gc-time-bound-29.md`, whose sensitivity table is the
-/// 90-day-era measurement) and was widened to a year by operator decision once
+/// The window started at 90 days (measured on the rig snapshot in #29,
+/// whose sensitivity table is the 90-day-era measurement) and was widened to a year by operator decision once
 /// Observations left the cut.
 pub const GC_RECENCY_WINDOW: ChronoDuration = ChronoDuration::days(365);
 

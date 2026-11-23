@@ -2,7 +2,7 @@
 //!
 //! Packaging: Cargo features gate adapters (`store-memory`, `store-cockroach`,
 //! `store-postgres`, `store-sqlite`); `lambo.toml` / env select among compiled
-//! kinds. See `dev-diary/notes/level-b-pluggability.md`.
+//! kinds. See `docs/reference/config.mdx` ("Features").
 
 #[cfg(feature = "store-memory")]
 mod memory;
@@ -1431,7 +1431,7 @@ impl StoreConfig {
 fn missing_feature(kind: StoreKind) -> StoreError {
     StoreError::Backend(format!(
         "store kind `{kind}` is not compiled into this binary; rebuild with \
-         `--features {}` (see dev-diary/notes/level-b-pluggability.md)",
+         `--features {}` (see Features in docs/reference/config.mdx)",
         kind.feature_name()
     ))
 }
