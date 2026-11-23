@@ -27,8 +27,10 @@ The rules:
   Status.rank` inside `namespace Lambo.Canon`, and `Canon.rank` does not.
   A model split into a directory (`formal/LamboProofs/Drain/*.lean`, one
   namespace `Lambo.Drain`) resolves across its files, except its
-  `History.lean`: the history layer describes no current Rust, so a page
-  may not cite it.
+  `History.lean` and `Examples.lean`: the history layer describes no current
+  Rust, and every theorem in the examples file is a finding about the Rust
+  before a fix, so a page citing either would present superseded behaviour
+  as current.
 * `const:` a comma-separated list of names, each pinned by
   `src/formal_constants_tests.rs`: every identifier in the name (split at
   `::`, `.` and `()`) must appear there as a whole word in code, not in a
@@ -114,8 +116,10 @@ REQUIRED: dict[str, tuple[str, ...]] = {
 
 CONSTANTS_FILE = "src/formal_constants_tests.rs"
 LEAN_DIR = "formal/LamboProofs"
-# In a model split into a directory, the file a docs anchor may not cite.
-LEAN_HISTORY = "History.lean"
+# In a model split into a directory, the files a docs anchor may not cite:
+# the history layer, and the worked examples, whose theorems are all findings
+# about the Rust before a fix.
+LEAN_NOT_CITABLE = ("History.lean", "Examples.lean")
 
 LEAN_DECL = re.compile(
     r"^\s*(?:@\[[^\]]*\]\s*)*"
@@ -246,7 +250,7 @@ class Sources:
             elif folder.is_dir():
                 names: set[str] = set()
                 for path in sorted(folder.glob("*.lean")):
-                    if path.name != LEAN_HISTORY:
+                    if path.name not in LEAN_NOT_CITABLE:
                         part = self.text(f"{LEAN_DIR}/{model}/{path.name}")
                         names |= lean_names(part or "")
                 self._lean[model] = names
@@ -355,7 +359,7 @@ def check_lean(body: str, sources: Sources) -> list[str]:
             errors.append(f"lean: {ref}: no file {LEAN_DIR}/{model}.lean")
         elif name not in {lean_short(n, model) for n in names}:
             where = (f"{LEAN_DIR}/{model}.lean" if (sources.root / LEAN_DIR / f"{model}.lean").is_file()
-                     else f"{LEAN_DIR}/{model}/ (outside {LEAN_HISTORY})")
+                     else f"{LEAN_DIR}/{model}/ (outside {' and '.join(LEAN_NOT_CITABLE)})")
             errors.append(f"lean: {ref}: {where} declares no {name}")
     return errors
 

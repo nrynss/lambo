@@ -5,6 +5,13 @@ Concrete cases, checked by `decide`, over every layer of the drain model,
 the history layer included: what the model shows about the Rust, and the
 fixes on the issues' scenarios.
 
+**Every theorem in this file is a finding about the Rust before a fix**
+(#294, #295, #345); the current behaviour on the same scenarios is in its
+`example`s. So a docs page may not cite this file: the anchor check
+(`scripts/docs/check-doc-anchors.py`) refuses it, as it refuses
+`History.lean`, and a page cites the current theorems in the other drain
+files instead.
+
 ## Results
 
 `transient_skip_reorders` and `outage_then_replay_reorders` (a transient

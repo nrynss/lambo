@@ -135,8 +135,9 @@ subsystem into `formal/LamboProofs/Drain/`: `Base.lean`, `Replay.lean`,
 namespace `Lambo.Drain`, so every theorem keeps its name and the `lean:
 Drain.<name>` anchors still resolve. The rows name the file that now holds
 each theorem. The old layer (the worker before #295 and the replay before
-#294) is in `Drain/History.lean`, which the anchor check refuses to resolve,
-so no anchor can cite it; the narrative paragraphs above keep the file name
+#294) is in `Drain/History.lean`, and the findings about the Rust before a
+fix in `Drain/Examples.lean`; the anchor check refuses to resolve either, so
+no anchor can cite them; the narrative paragraphs above keep the file name
 as it was when they were written.
 
 ## Summary
