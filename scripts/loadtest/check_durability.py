@@ -25,7 +25,7 @@ to settled receipts. Wording matched (see `src/mcp/server.rs` `derive_impl`,
                      `applied — recorded action: C concept(s) created[ (M embedded)], E edge(s)`
                      and the same sentences after `applied after a restart — `
 
-Accounting (successful tool calls only, per concurrency-capture.md C3):
+Accounting (successful tool calls only, as the C3 capture defines it):
 
 * interactions — one per acknowledged write call, whether the ack admitted
   the write or refused it at the queue: the interaction that pins the write's
@@ -140,7 +140,7 @@ ANSWER_PREFIXES = (
     ("pending", "pending"),
     ("FAILED, nothing was written", "failed"),
     ("not applied before this session closed", "intent_durable"),
-    ("close did not finish its final flush", "close_unflushed"),
+    ("close could not confirm this write was saved", "close_unflushed"),
     ("DROPPED before it was attempted", "dropped"),
     ("expired", "expired"),
     ("restart-lost", "restart_lost"),

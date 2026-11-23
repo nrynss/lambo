@@ -1,5 +1,4 @@
-//! Dependency-question dispatch (T9) — route by query kind, not by blending
-//! arms.
+//! Dependency-question dispatch — route by query kind, not by blending arms.
 //!
 //! The recall pipeline (`candidates` → `expand` → `assemble`) answers every
 //! query by *ranking*: a structural dependent that is reachable by traversal
@@ -9,27 +8,27 @@
 //! has an exact answer reachable by traversal, so ranking it is wrong.
 //!
 //! `try_structural` recognizes a dependency question, resolves the entity it
-//! names, and answers it **by traversal** over the structural edge types
-//! (`Dependency` / `Hierarchical` / `Causal`), returning the anchor's
-//! dependents ranked by how strongly the graph binds each one to it. It is a
-//! *dispatch*: when it fires it produces the whole `RecallResult` and the
-//! blended pipeline never runs. When it cannot (a general query, or a
+//! names, and answers it **by traversal** over the edge types that declare a
+//! dependence (`Dependency` / `Hierarchical`; see [`dependents`]), returning
+//! the anchor's dependents ranked by how strongly the graph binds each one to
+//! it. It is a *dispatch*: when it fires it produces the whole `RecallResult`
+//! and the blended pipeline never runs. When it cannot (a general query, or a
 //! structural phrasing with no resolvable anchor / no dependents) it returns
 //! `None` and the caller falls through to the normal word/blend path — the
 //! refusal is as important as the dispatch.
 //!
-//! The traversal is **one hop by design** (T9-R1-6): it returns the anchor's
-//! DIRECT structural dependents, which is exactly the §4.1 blast-radius
-//! predicate. `RecallQuery::traversal_depth` is intentionally not honored —
-//! multi-hop expansion would turn a "depends on" answer into a transitive
-//! reachability question, which belongs to the blended pipeline's `expand`,
-//! not to blast-radius traversal. Ordering, however, matches the blend: spec
-//! §10 canonical-first promotion is applied ([`dependents`]).
+//! The traversal is **one hop by design**: it returns the anchor's DIRECT
+//! structural dependents, which is exactly the §4.1 blast-radius predicate.
+//! `RecallQuery::traversal_depth` is intentionally not honored — multi-hop
+//! expansion would turn a "depends on" answer into a transitive reachability
+//! question, which belongs to the blended pipeline's `expand`, not to
+//! blast-radius traversal. Ordering, however, matches the blend: spec §10
+//! canonical-first promotion is applied ([`dependents`]).
 //!
 //! Every step logs at `tracing::trace!` (`target: "lambo::recall"`): which
 //! arm a question is classified into, the resolved anchor, and each dependent
 //! collected. This is default-invisible (no subscriber enables trace on the
-//! CLI/daemon path) and is the T9 instrumentation for the structural arm.
+//! CLI/daemon path) and is the instrumentation for the structural arm.
 
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
@@ -38,7 +37,7 @@ use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRec
 use crate::recall::format;
 use crate::types::{tie_break_by_key, CanonizationStatus, Node, NodeId, RecallHit, Scored};
 
-/// What kind of question a recall query is, for routing (T9).
+/// What kind of question a recall query is, for routing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecallKind {
     /// A general / word-match question — the blended pipeline answers it.
@@ -47,12 +46,13 @@ pub enum RecallKind {
     Structural,
 }
 
-/// The traversal answers a dependency question with the #36 dependents
-/// relation ([`format::dependents_of`]): the concepts that declare a
-/// dependence on the anchor (`Dependency` sources into it, its `Hierarchical`
-/// children). `Causal`, provenance and association edges never carry
-/// dependency. The returned set and the `blast_radius` field stamped on each
-/// hit are the same relation, so they always agree.
+/// Phrasings that mark a question as structural / dependency rather than
+/// plain word recall. Kept deliberately small and EXPLICIT: every marker is a
+/// dependency/structural phrasing. In particular bare `"depend"` is NOT a
+/// marker: on its own it is too generic ("it may depend on the load"), and
+/// bare `"references"` / `"is it safe"` are ordinary prose, so they are
+/// dropped. A marker counts
+/// only where it stands on word boundaries ([`classify`]).
 const STRUCTURAL_MARKERS: [&str; 7] = [
     "depends on",
     "depend on",
@@ -63,19 +63,29 @@ const STRUCTURAL_MARKERS: [&str; 7] = [
     "what uses",
 ];
 
-/// Phrasings that mark a question as structural / dependency rather than
-/// plain word recall. Kept deliberately small and EXPLICIT (T9-R1-1): every
-/// marker is a dependency/structural phrasing, never an ordinary substring.
-/// In particular bare `"depend"` is NOT a marker — it would match inside
-/// `"independent"` — and bare `"references"` / `"is it safe"` are ordinary
-/// prose, so they are dropped. A marker-bearing but non-dependency question
-/// ("is the system independent of a single region", "the report references
-/// the changelog") stays `General`.
-///
+/// Test-only alias of [`STRUCTURAL_MARKERS`], for
+/// `crate::formal_constants_tests` (#291): `formal/LamboProofs/Dispatch.lean`
+/// hard-codes the list.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    pub(crate) const STRUCTURAL_MARKERS: [&str; 7] = super::STRUCTURAL_MARKERS;
+}
+
 /// Classify a query into a recall arm (lexical/vector vs structural).
+///
+/// A query is `Structural` when one of `STRUCTURAL_MARKERS` occurs in its
+/// lowercase text on word boundaries, by the rule anchor names follow
+/// (`word_bounded_spans`): a marker glued to the end of a longer word or
+/// running into the next one does not count (#299). So "the answer depends
+/// only on the score", "who are the independents of the senate" and "the
+/// team somewhat uses the old schema" stay `General`, as do questions with
+/// no marker at all ("is the system independent of a single region", "the
+/// report references the changelog").
 pub fn classify(query: &str) -> RecallKind {
     let lower = query.to_lowercase();
-    let structural = STRUCTURAL_MARKERS.iter().any(|m| lower.contains(m));
+    let structural = STRUCTURAL_MARKERS
+        .iter()
+        .any(|m| word_bounded_occurrences(&lower, m).next().is_some());
     tracing::trace!(
         target: "lambo::recall",
         query = %query,
@@ -150,55 +160,61 @@ fn word_at(hay: &str, at: usize) -> bool {
             && hay[at + 1..].chars().next().is_some_and(is_word_char))
 }
 
-/// Byte spans of every occurrence of `needle` in `hay` that sits on word
-/// boundaries. Both strings are expected lowercased already. A side of the
-/// needle that ends in a word character must meet the start/end of `hay` or a
-/// non-word character; a side that ends in punctuation (`.env`, `/etc/`) is
-/// its own delimiter and needs nothing more. Overlapping occurrences are all
-/// tried, so a first embedded hit cannot hide a later whole-word one.
-fn word_bounded_spans(hay: &str, needle: &str) -> Vec<(usize, usize)> {
-    let (Some(first), Some(last)) = (needle.chars().next(), needle.chars().next_back()) else {
-        return Vec::new();
-    };
-    let mut spans = Vec::new();
+/// Byte spans of the occurrences of `needle` in `hay` that sit on word
+/// boundaries, in order, found lazily. Both strings are expected lowercased
+/// already; an empty needle has none. A side of the needle that ends in a
+/// word character must meet the start/end of `hay` or a non-word character; a
+/// side that ends in punctuation (`.env`, `/etc/`) is its own delimiter and
+/// needs nothing more. Overlapping occurrences are all tried, so a first
+/// embedded hit cannot hide a later whole-word one.
+fn word_bounded_occurrences<'a>(
+    hay: &'a str,
+    needle: &'a str,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let ends = needle.chars().next().zip(needle.chars().next_back());
     let mut from = 0;
-    while let Some(i) = hay[from..].find(needle) {
-        let start = from + i;
-        let end = start + needle.len();
-        let left_ok = !is_word_char(first)
-            || hay[..start]
-                .chars()
-                .next_back()
-                .is_none_or(|c| !word_at(hay, start - c.len_utf8()));
-        let right_ok =
-            !is_word_char(last) || hay[end..].chars().next().is_none_or(|_| !word_at(hay, end));
-        if left_ok && right_ok {
-            spans.push((start, end));
-            if spans.len() > MAX_ANCHOR_SPANS {
-                break;
+    std::iter::from_fn(move || {
+        let (first, last) = ends?;
+        while let Some(i) = hay[from..].find(needle) {
+            let start = from + i;
+            let end = start + needle.len();
+            // Step one char, not one match, so overlapping occurrences are seen.
+            from = start + hay[start..].chars().next().map_or(1, char::len_utf8);
+            let left_ok = !is_word_char(first)
+                || hay[..start]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !word_at(hay, start - c.len_utf8()));
+            let right_ok =
+                !is_word_char(last) || hay[end..].chars().next().is_none_or(|_| !word_at(hay, end));
+            if left_ok && right_ok {
+                return Some((start, end));
             }
         }
-        // Step one char, not one match, so overlapping occurrences are seen.
-        from = start + hay[start..].chars().next().map_or(1, char::len_utf8);
-    }
-    spans
+        from = hay.len();
+        None
+    })
 }
 
-/// Byte spans of every structural-marker occurrence in the lowercased query.
-/// A concept match that lies wholly inside one of these is the question's
-/// own wording (a concept literally named `"blast radius"`), not the thing
-/// it names, so it does not anchor.
+/// [`word_bounded_occurrences`], stopping one past [`MAX_ANCHOR_SPANS`] so a
+/// caller can tell an over-budget candidate.
+fn word_bounded_spans(hay: &str, needle: &str) -> Vec<(usize, usize)> {
+    word_bounded_occurrences(hay, needle)
+        .take(MAX_ANCHOR_SPANS + 1)
+        .collect()
+}
+
+/// Byte spans of every structural-marker occurrence in the lowercased query,
+/// on word boundaries: exactly the occurrences [`classify`] counts (#299), so
+/// a marker glued into a longer word places no subject. A concept match that
+/// lies wholly inside one of these is the question's own wording (a concept
+/// literally named `"blast radius"`), not the thing it names, so it does not
+/// anchor.
 fn marker_spans(lower_q: &str) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-    for m in STRUCTURAL_MARKERS {
-        let mut from = 0;
-        while let Some(i) = lower_q[from..].find(m) {
-            let start = from + i;
-            spans.push((start, start + m.len()));
-            from = start + lower_q[start..].chars().next().map_or(1, char::len_utf8);
-        }
-    }
-    spans
+    STRUCTURAL_MARKERS
+        .iter()
+        .flat_map(|m| word_bounded_occurrences(lower_q, m))
+        .collect()
 }
 
 /// Whether every word of `lower_content` is an [`ANCHOR_STOP_WORDS`] entry.
@@ -571,16 +587,18 @@ impl ResolvedAnchor {
 }
 
 /// Cheap in-memory predicate: would a structural dispatch fire for `query` on
-/// `graph`? True iff the query classifies `Structural` AND an anchor resolves
-/// WITH at least one structural dependent. The daemon routing (T9-R1-3) uses
-/// this to decide whether the async store-gather can be skipped — it skips the
-/// gather only when the dispatch is actually about to fire, so a structural
-/// phrasing that cannot dispatch falls through to the FULL blend (never a
-/// degraded keyword-only answer). The dispatch itself re-validates under the
-/// final graph lock inside `try_structural`, so this is a gather-skip
-/// decision, not a short-circuit of correctness. It answers for a positive
-/// `top_k`; the daemon asks [`fits_structural_with`], which also takes the
-/// recall's `top_k`.
+/// `graph`? True iff the query classifies `Structural` AND its subject
+/// resolves either to one anchor WITH at least one structural dependent or to
+/// an ambiguous subject (#129: a tie between concepts of different
+/// repositories, answered with a warning and no dependents). The daemon
+/// routing uses this to decide whether the async store-gather can be skipped —
+/// it skips the gather only when the dispatch is actually about to fire, so a
+/// structural phrasing that cannot dispatch falls through to the FULL blend
+/// (never a degraded keyword-only answer). The dispatch itself re-validates
+/// under the final graph lock inside `try_structural`, so this is a
+/// gather-skip decision, not a short-circuit of correctness. It answers for a
+/// positive `top_k`; the daemon asks `fits_structural_with`, which also takes
+/// the recall's `top_k`.
 pub fn fits_structural(graph: &Graph, query: &str) -> bool {
     if !matches!(classify(query), RecallKind::Structural) {
         return false;
@@ -741,17 +759,17 @@ pub(crate) fn try_structural_with(
             },
             repo_scope: crate::graph::resource::repo_scope_of_key(&c.canonical_key),
         };
-        // H3: status from the same graph snapshot, typed annotation attached
-        // where its producer is known (mirrors assemble). Status `None` is
-        // carried as absent (the wire contract).
+        // Status from the same graph snapshot, typed annotation attached where
+        // its producer is known (mirrors assemble). Status `None` is carried
+        // as absent (the wire contract).
         let mut detailed_hit = DetailedHit::new(
             &hit,
             (c.canonization_status != CanonizationStatus::None).then_some(c.canonization_status),
         );
         detailed_hit.names = graph.display_names(c.id);
-        // T9-R1-5: canonical structural hits render the §13 load-bearing-pillar
-        // warning exactly as the blended pipeline does (assemble), so the
-        // structural and blend surfaces look identical.
+        // Canonical structural hits render the §13 load-bearing-pillar warning
+        // exactly as the blended pipeline does (assemble), so the structural
+        // and blend surfaces look identical.
         let mut lines: Vec<String> = Vec::new();
         if canonical {
             let text = format::blast_radius_warning(hit.blast_radius.unwrap_or_default());
@@ -782,15 +800,15 @@ pub(crate) fn try_structural_with(
         hits = hits.len(),
         "recall dispatched dependency question to structural traversal"
     );
-    // T9-R1-N4: headline names only the dependents the context actually
-    // renders (kept whole blocks, plus a truncated first block, which the
-    // context does show), not the pre-truncation hit set.
+    // The headline names only the dependents the context actually renders
+    // (kept whole blocks, plus a truncated first block, which the context
+    // does show), not the pre-truncation hit set.
     let count = fitted.rendered();
     let mut warnings = Vec::new();
     let traversal = traversal_headline(count);
     warnings.push(traversal.clone());
-    // H3: included_in_context at the cut; the traversal explanation is
-    // response-global — one annotation, never attached to a hit.
+    // `included_in_context` is recorded at the cut; the traversal explanation
+    // is response-global — one annotation, never attached to a hit.
     let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
     Some(DetailedRecall {
         concept_count: Some(graph.concept_count()),
@@ -803,8 +821,8 @@ pub(crate) fn try_structural_with(
         truncation,
         warnings,
         // A dispatched structural query answers by traversal and skips the
-        // phase-1 blend entirely (T9-R1-3), so there are no leg scores to
-        // report. Empty here means "no leg ran", not "the legs were dropped".
+        // phase-1 blend entirely, so there are no leg scores to report. Empty
+        // here means "no leg ran", not "the legs were dropped".
         legs: Default::default(),
         // No blend ran, so there is no daemon share to withhold.
         cold_start: false,
@@ -816,9 +834,9 @@ pub(crate) fn try_structural_with(
     })
 }
 
-/// The structural-dispatch headline (the `traversal` response annotation
-/// and its warning line) for `count` rendered dependents (T9-R1-N4). The
-/// layered merge recomputes it after its own budget cut (#33 PR 2).
+/// The structural-dispatch headline (the `traversal` response annotation and
+/// its warning line) for `count` rendered dependents. The layered merge
+/// recomputes it after its own budget cut (#33 PR 2).
 pub(crate) fn traversal_headline(count: usize) -> String {
     format!("recall: dependency question answered by graph traversal ({count} dependents)")
 }
@@ -1006,8 +1024,8 @@ mod tests {
 
     #[test]
     fn marker_bearing_non_dependency_questions_stay_general() {
-        // T9-R1-1: a marker-bearing but genuinely lexical/vector question must
-        // NOT route to the traversal. "independent" embeds the bare "depend"
+        // A marker-bearing but genuinely lexical/vector question must NOT
+        // route to the traversal. "independent" embeds the bare "depend"
         // substring and "references" is ordinary prose — both must stay
         // General, and must not dispatch.
         assert_eq!(
@@ -1023,6 +1041,87 @@ mod tests {
             try_structural(&g, "is the system independent of a single region", 5, 500),
             None,
             "a non-dependency marker-bearing question must not dispatch"
+        );
+    }
+
+    /// #299: a marker counts only on word boundaries, so one glued to the end
+    /// of a longer word or running into the next stays `General`, and does
+    /// not dispatch even when the named subject has dependents. Mirrors
+    /// `Dispatch.issue_queries_general`, `Dispatch.wb_inside_word`,
+    /// `Dispatch.wb_into_word` and `Dispatch.general_blends_wb`
+    /// (`formal/LamboProofs/Dispatch.lean`); the substring test these replace
+    /// is pinned by `Dispatch.depends_only_structural` and
+    /// `Dispatch.independents_of_structural`.
+    #[test]
+    fn markers_glued_into_longer_words_stay_general() {
+        for q in [
+            "the answer depends only on the score",
+            "who are the independents of the senate",
+            "the team somewhat uses the old schema",
+            "is it unsafe to delete it",
+            "co-dependents of the senate",
+        ] {
+            assert_eq!(classify(q), RecallKind::General, "{q}");
+        }
+        let g = exhibit();
+        for q in [
+            "who are the independents of SG-Base-VPC",
+            "the answer depends only on SG-Base-VPC",
+        ] {
+            assert!(!fits_structural(&g, q), "{q}");
+            assert_eq!(try_structural(&g, q, 5, 500), None, "{q}");
+        }
+    }
+
+    /// #299: every marker standing alone or as whole words, in any case,
+    /// still classifies `Structural`, and so do the docs' dependency
+    /// questions. Mirrors `Dispatch.classifyWB_each_marker` and
+    /// `Dispatch.classifyWB_marker`.
+    #[test]
+    fn every_marker_as_whole_words_classifies_structural() {
+        for m in STRUCTURAL_MARKERS {
+            for q in [
+                m.to_string(),
+                m.to_uppercase(),
+                format!("is it {m} SG-Base-VPC?"),
+                format!("({m}) db"),
+                format!("x {m}: y"),
+            ] {
+                assert_eq!(classify(&q), RecallKind::Structural, "{q}");
+            }
+        }
+        for q in [
+            "what depends on X",
+            "dependents of X",
+            "blast radius of X",
+            "is it safe to delete X",
+            "what uses X",
+            "does anything depend on this",
+            "x depends-on y",
+        ] {
+            assert_eq!(classify(q), RecallKind::Structural, "{q}");
+        }
+    }
+
+    /// #299: anchor resolution measures a subject's distance from the
+    /// marker occurrences the classifier counts, so a marker glued into a
+    /// longer word no longer pulls the subject after it ahead of the one the
+    /// real marker names.
+    #[test]
+    fn a_glued_marker_does_not_place_the_subject() {
+        assert_eq!(marker_spans("is it unsafe to delete db"), vec![]);
+        assert_eq!(marker_spans("what depends on db"), vec![(5, 15)]);
+        let g = anchors(&[
+            (10, "payments-queue", ConceptType::Entity),
+            (11, "orders-queue", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(
+                &g,
+                "what depends on the payments-queue, not the unsafe to delete orders-queue"
+            )
+            .as_deref(),
+            Some("payments-queue")
         );
     }
 
@@ -1583,8 +1682,8 @@ mod tests {
         let (logs, _guard) = capture_logs(tracing::Level::TRACE);
 
         // Drive the REAL general pipeline over the same graph to expose the
-        // per-hit d/r/final contributions (the T9 instrumentation in
-        // `assemble`), plus the dispatch classification trace.
+        // per-hit d/r/final contributions (the instrumentation in `assemble`),
+        // plus the dispatch classification trace.
         let mut index = crate::graph::index::InvertedIndex::new();
         for c in g.concepts() {
             index.add(c);
@@ -1813,7 +1912,7 @@ mod tests {
         g
     }
 
-    /// The H3 structural golden — a dispatched dependency question carries
+    /// The structural payload golden — a dispatched dependency question carries
     /// one hit with a `load_bearing` annotation (its Canonical status from
     /// the same graph snapshot), one annotation-free hit, and the traversal
     /// explanation as a single response-global annotation.
@@ -1940,8 +2039,8 @@ mod tests {
             "{}",
             result.context
         );
-        // The label survives the cut (M1): content head, `…`, then the
-        // block's own label line.
+        // The label survives the cut: content head, `…`, then the block's own
+        // label line.
         assert!(
             result.context.contains("… [Entity] (score "),
             "{}",

@@ -322,8 +322,8 @@ pub fn null_median_cosine(mode: CalibrationMode, contract: &EmbeddingContract) -
 /// The size of the layer the BGE-M3 reference's layer floor
 /// ([`DEFAULT_LAYER_MIN_SIMILARITY`](crate::recall::layered::DEFAULT_LAYER_MIN_SIMILARITY),
 /// 0.50) was chosen on: #157's sweep ran against a `general` layer of 12
-/// concepts (`dev-diary/notes/feat-157-layer-tuning.md`, "The general layer
-/// contains 12 concepts", aggregates in `evidence/157-layer-tuning/`).
+/// concepts (`evidence/157-layer-tuning/README.md`, "The general layer
+/// contains 12 concepts").
 /// Recorded for the same reason as
 /// [`ContractCalibration::measured_corpus_concepts`] (#254). It describes
 /// the floor only: the reference's recent score and merge threshold were set

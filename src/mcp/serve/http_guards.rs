@@ -1,4 +1,4 @@
-//! T8.7, the HTTP surface's hardening: the bearer token, the fail-closed
+//! The HTTP surface's hardening: the bearer token, the fail-closed
 //! bind rule, the request-rate bucket, the concurrent-session cap and the
 //! body-size ceiling, applied by [`guard_request`] in front of rmcp.
 //!
@@ -24,7 +24,7 @@ use crate::types::LamboError;
 /// appearing in a command line (where `ps` and shell history would expose it).
 pub const AUTH_TOKEN_ENV: &str = crate::config::secret_env::SERVE_AUTH_TOKEN_ENV;
 
-/// Default ceiling on concurrently live MCP sessions (T82-16).
+/// Default ceiling on concurrently live MCP sessions.
 ///
 /// The HTTP transport mints one session per `initialize`, and before this
 /// nothing bounded that: a client that reconnects in a loop grows
@@ -67,13 +67,13 @@ impl SecretToken {
     /// `Authorization: Bearer `.
     ///
     /// Also reject a token longer than
-    /// [`MAX_BEARER_CREDENTIAL_BYTES`](crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES)
-    /// (#32 PR 5 review L2): every presented credential over that length is
+    /// `MAX_BEARER_CREDENTIAL_BYTES`
+    /// (#32 PR 5 review): every presented credential over that length is
     /// refused unread, so such a token could never authenticate anything.
     pub fn new(raw: impl Into<String>) -> Result<Self, String> {
         let raw = raw.into();
-        // The rule is shared with serve-web's `AuthToken` (#4 PR 2 review
-        // M2), so the two cannot drift.
+        // The rule is shared with serve-web's `AuthToken` (#4 PR 2 review),
+        // so the two cannot drift.
         crate::surface::bearer::check_configured_token(&raw)?;
         Ok(Self(raw))
     }
@@ -90,6 +90,10 @@ impl std::fmt::Debug for SecretToken {
     }
 }
 
+/// The rule, for `lambo`'s own `--auth-token` parsers, which build their
+/// refusal from this error (it never quotes the value). Never a clap
+/// `value_parser` on its own: clap's error for a refused value quotes the
+/// value, which here is the secret (#315).
 impl std::str::FromStr for SecretToken {
     type Err = String;
 
@@ -110,10 +114,10 @@ impl std::str::FromStr for SecretToken {
 /// expanded to nothing, and resolving it to "whatever the flag said" would make
 /// a typo look like it worked.
 ///
-/// A set variable that is not valid UTF-8 is an error too (#32 PR 5 review
-/// S2), never "unset": read as unset, a loopback serve with no other
-/// credential would start unauthenticated while the operator believes a
-/// token is required. The error names the variable, never its value.
+/// A set variable that is not valid UTF-8 is an error too (#32 PR 5 review),
+/// never "unset": read as unset, a loopback serve with no other credential
+/// would start unauthenticated while the operator believes a token is
+/// required. The error names the variable, never its value.
 pub fn resolve_auth_token(flag: Option<SecretToken>) -> Result<Option<SecretToken>, LamboError> {
     resolve_auth_token_from(flag, std::env::var_os(AUTH_TOKEN_ENV))
 }
@@ -135,7 +139,7 @@ pub(super) fn resolve_auth_token_from(
     }
 }
 
-/// Fail closed when a non-loopback bind has no token (T82-16).
+/// Fail closed when a non-loopback bind has no token.
 ///
 /// The rule, and why it is a *startup* check rather than a warning:
 ///
@@ -150,16 +154,16 @@ pub(super) fn resolve_auth_token_from(
 ///   credential is not a configuration worth starting, so `serve` refuses
 ///   rather than coming up and hoping a proxy is in front of it.
 ///
-/// ## What J2 changed, and what it deliberately did not
+/// ## What the session endpoint changed, and what it deliberately did not
 ///
-/// J2 made every holder bind a **second** listener — the session endpoint, a
-/// unix socket, bound even under `--transport stdio` so a refused serve can
-/// proxy to it. That threatened this function's ordering argument, which is that
-/// running before the lease-taking attach means *"refusing here means no lease
-/// is taken"*, so a misconfigured start leaves nothing behind and the operator's
+/// The session endpoint made every holder bind a **second** listener — a unix
+/// socket, bound even under `--transport stdio` so a refused serve can proxy to
+/// it. That threatened this function's ordering argument, which is that running
+/// before the lease-taking attach means *"refusing here means no lease is
+/// taken"*, so a misconfigured start leaves nothing behind and the operator's
 /// retry is not blocked by a lease their own refused start is holding. (That
-/// attach was `build_memory` before J2 and is `resolve_role` after it — see
-/// J2-R1-7; `serve` does not call `build_memory` at all any more.)
+/// attach was `build_memory` before the session endpoint and is `resolve_role`
+/// after it; `serve` does not call `build_memory` at all any more.)
 ///
 /// **That sentence is still literally true, by construction rather than by
 /// luck.** The endpoint's *address* is derived (a function of session and store
@@ -169,48 +173,49 @@ pub(super) fn resolve_auth_token_from(
 /// therefore binds nothing, creates nothing and unlinks nothing — exactly the
 /// property this ordering exists to give.
 ///
-/// **And J2 adds no new pre-lease refusal at all.** The round-1 review found
-/// that the endpoint's `sun_path` length check made an over-long base directory
-/// a hard startup failure while a *failed bind* deliberately degraded, so the
-/// harsher outcome sat on the cheaper problem (J2-R1-5). It now degrades too:
-/// `SessionEndpoint::for_store` logs at ERROR and yields `None`, and this
+/// **And the session endpoint adds no new pre-lease refusal at all.** A review
+/// found that the endpoint's `sun_path` length check made an over-long base
+/// directory a hard startup failure while a *failed bind* deliberately
+/// degraded, so the harsher outcome sat on the cheaper problem. It now degrades
+/// too: `SessionEndpoint::for_store` logs at ERROR and yields `None`, and this
 /// function is still the only pre-lease *refusal* on the serve path besides
 /// `authorize_ledger`. The endpoint derivation is still in the pre-lease group,
 /// for the reason that group exists — it creates nothing and binds nothing. Its
-/// one filesystem access is a read-only `canonicalize` of the store path
-/// (J2-R1-2), which leaves nothing behind and so cannot block an operator's
-/// retry.
+/// one filesystem access is a read-only `canonicalize` of the store path, which
+/// leaves nothing behind and so cannot block an operator's retry.
 ///
-/// ## What J4 changed, found by JE2E-6's sweep
+/// ## What the call ledger changed, found by an end-to-end review
 ///
-/// J4 put a **third** member in the pre-lease group: `Ledger::open` and the
-/// `startup` line it appends, moved above `resolve_role` so a serve that is
-/// about to *lose* the lease has already left an artifact recording that it
-/// tried. That member is the first one in this group that does leave something
-/// behind — a ledger file, and a line in it — so the group's shorthand
-/// ("nothing is created before the lease") stops being literally true and the
-/// real claim has to be stated instead.
+/// The call ledger put a **third** member in the pre-lease group:
+/// `Ledger::open` and the `startup` line it appends, moved above `resolve_role`
+/// so a serve that is about to *lose* the lease has already left an artifact
+/// recording that it tried. That member is the first one in this group that
+/// does leave something behind — a ledger file, and a line in it — so the
+/// group's shorthand ("nothing is created before the lease") stops being
+/// literally true and the real claim has to be stated instead.
 ///
 /// The real claim is unchanged, and it is about **retries, not about traces**:
 /// refusing here takes no lease, so an operator who fixes the token and starts
 /// again is not blocked by a lease their own refused start is holding. An
-/// append-only observability file blocks nothing, is the artifact J4 exists to
-/// leave, and is written only when the operator asked for it with `--ledger`.
+/// append-only observability file blocks nothing, is the artifact the ledger
+/// exists to leave, and is written only when the operator asked for it with
+/// `--ledger`.
 /// The ordering between the two is also deliberate: `authorize_ledger` runs
 /// *above* the open, so the misconfigured `--ledger-heartbeat`-without-`--ledger`
 /// pairing is still refused before any file is touched.
 ///
-/// ## What J6 changed: nothing here, and that is the claim
+/// ## What early shutdown changed: nothing here, and that is the claim
 ///
-/// J6 added a signal registration at the **acquire** — see [`EarlyShutdown`](super::EarlyShutdown) —
+/// Early shutdown added a signal registration at the **acquire** — see [`EarlyShutdown`](super::EarlyShutdown) —
 /// so "the arming" is no longer one point on the far side of `resolve_role`.
 /// This group is unaffected: it runs above the acquire, so it is now the
 /// **pre-arm** group as well as the pre-lease one, and every member of it still
 /// runs under the default signal disposition. That is deliberate rather than
 /// incidental. A start that is about to refuse here, or that is about to sit in
 /// the election for up to `ELECTION_BUDGET`, must stay killable by a plain
-/// SIGTERM (J2-R1-7), and it holds nothing — no lease, no tail, no graph — that
-/// a handler could save. J6 adds no member to this group and takes none away.
+/// SIGTERM, and it holds nothing — no lease, no tail, no graph — that a
+/// handler could save. Early shutdown adds no member to this group and takes
+/// none away.
 ///
 /// ## What #32 PR 5 changed
 ///
@@ -243,7 +248,7 @@ pub(super) fn authorize_bind(
 /// its own POST, so a request-rate bound *is* a call-rate bound plus a few
 /// cheap handshake requests. The wider net is the cheaper and safer cut.
 ///
-/// The limit is **per credential** (#32 PR 5 review M2, see
+/// The limit is **per credential** (#32 PR 5 review, see
 /// [`CredentialRates`]), not per connection: per-connection state would be
 /// trivially defeated by opening more connections, which is exactly the abuse
 /// shape the session cap and this bound exist to bound together.
@@ -291,7 +296,7 @@ impl RateLimiter {
     }
 }
 
-/// One request-rate bucket per credential (#32 PR 5 review M2).
+/// One request-rate bucket per credential (#32 PR 5 review).
 ///
 /// Before credentials the serve had one caller, so one global bucket was one
 /// caller's bucket. With several, a global bucket let one credential (a
@@ -348,7 +353,7 @@ impl CredentialRates {
     }
 }
 
-/// Each credential's share of `--max-sessions` (#32 PR 5 review M2): the
+/// Each credential's share of `--max-sessions` (#32 PR 5 review): the
 /// cap divided evenly among the credentials a request can arrive as,
 /// rounded down, and at least 1.
 ///
@@ -365,12 +370,12 @@ pub(super) fn credential_share(max_sessions: usize, credentials: usize) -> usize
     (max_sessions / credentials.max(1)).max(1)
 }
 
-/// How often the guard logs a refused bearer token at WARN (#32 PR 5 review
-/// L2): once per window, with the count of refusals it held back.
+/// How often the guard logs a refused bearer token at WARN (#32 PR 5
+/// review): once per window, with the count of refusals it held back.
 pub(super) const REFUSAL_WARN_WINDOW: Duration = Duration::from_secs(10);
 
 /// One WARN line per [`REFUSAL_WARN_WINDOW`] for unauthenticated requests
-/// (#32 PR 5 review L2).
+/// (#32 PR 5 review).
 ///
 /// A 401 is answered before the rate limit (an unauthenticated caller must
 /// not spend anyone's budget), so nothing bounded how many of them a caller
@@ -425,7 +430,7 @@ impl RefusalLog {
 pub(crate) trait LiveSessions: Send + Sync + 'static {
     async fn live(&self) -> usize;
 
-    /// How many of them `credential` opened (#32 PR 5 review M2). The
+    /// How many of them `credential` opened (#32 PR 5 review). The
     /// default counts every live one, the conservative answer for a source
     /// that does not know who opened what.
     async fn live_opened_by(&self, _credential: &str) -> usize {
@@ -459,7 +464,7 @@ pub(crate) struct HttpGuard {
     /// The throttle on the 401's WARN line.
     pub(super) refusals: Arc<RefusalLog>,
     /// Session-opening requests admitted but not yet counted by
-    /// [`Self::live`] (#32 PR 5 review S4).
+    /// [`Self::live`] (#32 PR 5 review).
     pub(super) openings: Arc<Openings>,
     /// How long a request's body may take to arrive
     /// ([`REQUEST_BODY_TIMEOUT`]; the tests shorten it).
@@ -491,7 +496,7 @@ impl HttpGuard {
 }
 
 /// The session-opening requests the cap has admitted and that may not yet
-/// show in [`LiveSessions`] (#32 PR 5 review S4).
+/// show in [`LiveSessions`] (#32 PR 5 review).
 ///
 /// The cap and the share are a check, then an act: the guard reads the live
 /// count, and the MCP session appears in it (and is attributed to its
@@ -575,7 +580,7 @@ pub(crate) struct OpeningReservation {
     _opening: Arc<Opening>,
 }
 
-/// Ceiling on the size of a single HTTP request body (T82-16 remainder).
+/// Ceiling on the size of a single HTTP request body.
 ///
 /// The tool layer already bounds every client string (16 KiB) and the per-call
 /// concept count (64 ≈ ~1 MiB of content), and the rate limit bounds request
@@ -583,12 +588,12 @@ pub(crate) struct OpeningReservation {
 /// rejected or oversized fields still incurred parse + validation cost before
 /// the tool layer refused it. This caps the *declared* body of a request before
 /// any of it is parsed, and the guard's read of the body (#32 PR 5 second
-/// review L2) caps what actually arrives, so a chunked body is held to it too.
+/// review) caps what actually arrives, so a chunked body is held to it too.
 pub(super) const MAX_HTTP_BODY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 
 /// How long [`guard_request`] waits for the whole body of a session-opening
 /// request ([`opens_a_new_session`]; no other body is read by the guard),
-/// counted from when it starts reading it (#32 PR 5 second review L2).
+/// counted from when it starts reading it (#32 PR 5 second review).
 ///
 /// The guard reads the body before the session cap reserves a slot, so a
 /// client that dribbles its body holds no slot while it does; this bounds
@@ -636,7 +641,7 @@ pub(super) const MCP_SESSION_ID: &str = "mcp-session-id";
 /// present but not readable that way names no session to rmcp, so it names
 /// none here either.
 ///
-/// The one reading of the header (#32 PR 5 review S1). The session cap
+/// The one reading of the header (#32 PR 5 review). The session cap
 /// ([`opens_a_new_session`]) and the MCP-session binding
 /// (`transport::serve_live`) both use it, so "this request opens a new
 /// MCP session" means what rmcp will do with it, in both places. Reading
@@ -657,7 +662,7 @@ pub(super) fn usable_session_id(headers: &axum::http::HeaderMap) -> Option<&str>
 ///
 /// `Last-Event-ID` plays no part: rmcp reads it only on a GET (resuming a
 /// stream), never on a POST, so a POST carrying it with no usable session id
-/// mints a session like any other (#32 PR 5 review S1).
+/// mints a session like any other (#32 PR 5 review).
 ///
 /// The operator surface (`/admin/...`, #32 PR 7) mints no MCP session, so
 /// its requests are never openers: an erase posted while the cap is full
@@ -675,7 +680,7 @@ pub(super) const ADMIN_PATH_PREFIX: &str = "/admin/";
 
 /// Can rmcp mint an MCP session for a session-opening request
 /// ([`opens_a_new_session`]) whose whole body is `body`? (#32 PR 5 third
-/// review L2.)
+/// review.)
 ///
 /// rmcp 3.1.2 (`StreamableHttpService::handle_post`) mints a session for a
 /// POST with no usable session id only when the body is a JSON-RPC
@@ -707,7 +712,7 @@ pub(super) fn can_mint_a_session(body: &[u8]) -> bool {
 }
 
 /// How the cap refusal tells a client to free an MCP session, for a request
-/// on `path` (#32 review L4): an MCP session is closed on the route it was
+/// on `path` (#32 review): an MCP session is closed on the route it was
 /// opened at, `/mcp` for the default session or `/mcp/s/{session}`. At
 /// `/mcp` the text is the one a single-session serve has always sent. The
 /// path is echoed only when it is one of those routes, never as the caller
@@ -760,16 +765,16 @@ pub(super) async fn guard_request(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    // Exactly one `Authorization` header, or none (#32 PR 5 review I2). A
+    // Exactly one `Authorization` header, or none (#32 PR 5 review). A
     // request carrying two is refused like a wrong token: reading only the
     // first would let a proxy that appends its own header, or one that
     // keeps the last, disagree with this guard about who is calling. The
-    // extraction is shared with the portal (#4 PR 2 review L3).
+    // extraction is shared with the portal (#4 PR 2 review).
     let presented = crate::surface::bearer::presented_authorization(req.headers());
     let Some(grant) = guard.authority.authenticate(presented) else {
         // Deliberately terse and identical for "no header" and "wrong
         // token": the difference is not the caller's business, and the
-        // token itself is never echoed. Throttled (#32 PR 5 review L2).
+        // token itself is never echoed. Throttled (#32 PR 5 review).
         match guard.refusals.note_at(Instant::now()) {
             Some(held_back) => tracing::warn!(
                 had_header = presented.is_some(),
@@ -791,8 +796,8 @@ pub(super) async fn guard_request(
     };
     let credential = Arc::clone(&grant);
     let mut req = req;
-    // A configured credential's name, for the call ledger (#32 PR 5 review
-    // I6); the legacy `default` and the implicit `local` leave no mark.
+    // A configured credential's name, for the call ledger (#32 PR 5
+    // review); the legacy `default` and the implicit `local` leave no mark.
     if credential.name() != crate::surface::session::LEGACY_CREDENTIAL_NAME
         && credential.name() != crate::surface::session::LOCAL_CREDENTIAL_NAME
     {
@@ -818,7 +823,7 @@ pub(super) async fn guard_request(
             .into_response();
     }
 
-    // T8.7 body-size ceiling — checked before the body is streamed to rmcp.
+    // Body-size ceiling — checked before the body is streamed to rmcp.
     // A declared body over the cap is refused up front: parse and validation
     // never see it, so amplification through an oversized body is bounded.
     if let Some(cl) = req.headers().get(axum::http::header::CONTENT_LENGTH)
@@ -838,7 +843,7 @@ pub(super) async fn guard_request(
     }
 
     // Only a request that would open an MCP session goes on to the cap,
-    // and only it is buffered here (#32 PR 5 third review L1). Every other
+    // and only it is buffered here (#32 PR 5 third review). Every other
     // request streams to rmcp as it always did: its body is read by rmcp,
     // after routing, so a request the router refuses (an unknown path, a
     // session out of scope or not hosted) is answered without a byte of
@@ -848,7 +853,7 @@ pub(super) async fn guard_request(
     }
 
     // The whole body of an opener, read here within `body_timeout` (#32 PR
-    // 5 second review L2) and before the cap reserves anything: a client
+    // 5 second review) and before the cap reserves anything: a client
     // that dribbles its body holds no slot of the session cap while it
     // does, and holds its connection for at most the timeout. rmcp reads
     // the whole body before it acts anyway (and to the same 4 MiB), so
@@ -857,7 +862,7 @@ pub(super) async fn guard_request(
     let body = match tokio::time::timeout(guard.body_timeout, read_body(body)).await {
         Ok(Ok(body)) => body,
         // The refusals below answer with the rest of the body unread, so
-        // they close the connection (#32 PR 5 third review L3), as the 408
+        // they close the connection (#32 PR 5 third review), as the 408
         // does: nothing is left to drain, however much the client meant to
         // send.
         Ok(Err(BodyRead::TooLarge)) => {
@@ -898,7 +903,7 @@ pub(super) async fn guard_request(
     };
     // A sessionless call rmcp answers without a session (a per-request
     // `tools/call`, `server/discover`) holds no reservation for its
-    // duration (#32 PR 5 third review L2): only a body rmcp can mint a
+    // duration (#32 PR 5 third review): only a body rmcp can mint a
     // session for goes on to the cap.
     if !can_mint_a_session(&body) {
         let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(body));
@@ -928,7 +933,7 @@ pub(super) async fn guard_request(
         )
             .into_response();
     }
-    // This credential's share (#32 PR 5 review M2). Counted only when
+    // This credential's share (#32 PR 5 review). Counted only when
     // it is smaller than the cap: with one credential it is the cap,
     // and the check above already decided.
     if guard.credential_sessions < guard.max_sessions {

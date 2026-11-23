@@ -21,16 +21,17 @@
 //! | interaction `i6` | `i6 -Derives-> X`, `i6 -Temporal-> i5` | no: provenance |
 //! | `X` | `X -Dependency-> X` (store-only self-loop) | no |
 //! | `F` (session `other`) | `F -Dependency-> X` in session `deps` | no: foreign concept |
-//! | `V` (`i3`) | `V -Dependency-> X` and `X -Hierarchical-> V` (store-only 2-cycle) | yes, counted once |
+//! | `V` (`i3`) | `V -Dependency-> X` and `X -Hierarchical-> V` (a 2-cycle mixing the kinds, legal since #325) | yes, counted once |
 //! | `E` (`ie`) | `E -Dependency-> X`; edge and interaction flushed now but carrying an old `event_time` | yes, aged by its event time |
 //! | `Q` (`i6`) | `Q -Contradicts-> X`, `X -Contradicts-> Q` | no in either direction: opposition is not support |
 //!
 //! [`store_batch`] carries everything above (stores accept the self-loop,
-//! the 2-cycle, the foreign concept and the foreign origin); [`graph`] drops
-//! the rows a legal in-RAM graph cannot hold (the self-loop, `V`'s
-//! `Hierarchical` edge, `G` with its foreign origin, and the edge from `F`),
-//! so the graph-side answers differ from the stores' only by `G` and by
-//! having no age floor.
+//! the foreign concept and the foreign origin); [`graph`] drops the rows a
+//! legal in-RAM graph cannot hold (the self-loop, `G` with its foreign
+//! origin, and the edge from `F`), so the graph-side answers differ from the
+//! stores' only by `G` and by having no age floor. `V`'s 2-cycle mixes
+//! `Dependency` and `Hierarchical`, which the graph's invariant allows
+//! (#325), so both sides hold it.
 //!
 //! `ie` and `E`'s edge are flushed at [`now`] but carry an `event_time` 100
 //! minutes back, so an adapter that ages on `created_at` instead of
@@ -213,7 +214,7 @@ fn edges() -> Vec<(Edge, bool)> {
         (edge(16, c("X"), c("X"), EdgeType::Dependency, 120), false),
         (edge(17, c("F"), c("X"), EdgeType::Dependency, 100), false),
         (edge(18, c("V"), c("X"), EdgeType::Dependency, 100), true),
-        (edge(19, c("X"), c("V"), EdgeType::Hierarchical, 100), false),
+        (edge(19, c("X"), c("V"), EdgeType::Hierarchical, 100), true),
         (
             Edge {
                 event_time: Some(at(EVENT_TIMED)),

@@ -23,7 +23,7 @@ fn image_ids_are_lowercase_alphanumeric_and_bounded() {
     }
 }
 
-/// Design R8: the suffix must reach the canonical key whole, so the id alone
+/// The image id: the suffix must reach the canonical key whole, so the id alone
 /// separates two images with one caption, and no text phrase or id spelling
 /// can collide with it.
 #[test]
@@ -63,7 +63,7 @@ fn image_content_appends_one_suffix_after_the_trimmed_caption() {
     assert!(check_caption("render [image:x] 17").is_err());
 }
 
-/// Review M1 (PR 4): a caption allowed because it holds no suffix token
+/// #22: a caption allowed because it holds no suffix token
 /// still yields exactly one, the appended one, so its id alone decides the
 /// key.
 #[test]
@@ -82,7 +82,7 @@ fn an_allowed_caption_that_mentions_the_suffix_keeps_one_suffix_token() {
     }
 }
 
-/// Review M2: the caption check runs on the canonical tokens, so a suffix
+/// The caption check runs on the canonical tokens, so a suffix
 /// spelled in another case or split by an invisible character is refused
 /// as surely as the plain one.
 #[test]
@@ -93,13 +93,13 @@ fn a_caption_suffix_in_any_case_or_with_invisible_characters_is_refused() {
         "red [ima\u{200B}ge:zzz]",
         "red [image\u{2060}:zzz]",
         "\u{FEFF}[IMAGE:zzz] red",
-        // Review M1 (PR 4): Porter's `s` rule turns these into `[image:zzz]`.
+        // The stemmer's `s` rule turns these into `[image:zzz]`.
         "red [image:zzz]s",
         "red [IMAGE:ZZZ]S",
     ] {
         assert!(check_caption(caption).is_err(), "{caption:?}");
     }
-    // Review M1 (PR 4): only a token that canonicalizes to `[image:<id>]`
+    // #22: only a token that canonicalizes to `[image:<id>]`
     // with a valid id can collide; a caption that only mentions the suffix
     // is allowed.
     for caption in [
@@ -116,7 +116,7 @@ fn a_caption_suffix_in_any_case_or_with_invisible_characters_is_refused() {
     }
 }
 
-/// Review M2, the collision itself: two different images whose captions
+/// The collision itself: two different images whose captions
 /// smuggle each other's id share one canonical key, so the caption check is
 /// what keeps them two concepts.
 #[test]

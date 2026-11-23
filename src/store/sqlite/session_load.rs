@@ -19,9 +19,12 @@ use crate::types::{
     Interaction, SessionId, StoreError,
 };
 
-/// Load a session's write intents (J3), in replay order — (`issued_ms`,
-/// `lane_seq`), which is exact admission order within one issuing process and
-/// wall-clock order across processes.
+/// Load a session's write intents, sorted by (`issued_ms`, `lane_seq`):
+/// wall-clock order, which interleaves different processes' intents. The
+/// replay then puts each process's own intents in `lane_seq` (admission)
+/// order (`writeq::replay::replay_order`, #295), since a clock that stepped
+/// back between two admissions sorts them the wrong way round here; the rows
+/// carry no epoch column to sort by in SQL.
 pub(super) async fn load_write_intents(
     tx: &mut sqlx::SqliteConnection,
     session: &SessionId,
@@ -165,7 +168,7 @@ pub(super) async fn load_concepts(
         let blast_radius: Option<i32> = row.try_get(12).map_err(|e| db_err("load concepts", e))?;
         let last_demotion: Option<String> =
             row.try_get(13).map_err(|e| db_err("load concepts", e))?;
-        // CON-8: decode the packed-f32 BLOB (#55). A corrupt blob (not whole
+        // Decode the packed-f32 BLOB (#55). A corrupt blob (not whole
         // f32s) is a backend error, not a panic.
         let embedding: Option<Vec<u8>> = row.try_get(14).map_err(|e| db_err("load concepts", e))?;
         let embedding = embedding
@@ -346,7 +349,7 @@ pub(super) async fn load_canonization_events(
             .try_get(9)
             .map_err(|e| db_err("load canonization events", e))?;
         // A `superseded_by` that is not an id makes the pair unreadable: the
-        // reason loads as unknown (review M3) instead of failing the load.
+        // reason loads as unknown instead of failing the load.
         let (reason, superseded_by, unreadable_by) = match superseded_by.as_deref() {
             None => (reason, None, false),
             Some(by) => match node_id(by, "canonization superseded_by") {
@@ -372,8 +375,8 @@ pub(super) async fn load_canonization_events(
             last_demotion_time: last_demotion.as_deref().map(text_to_ts).transpose()?,
             occurred_at: text_to_ts(&occurred)?,
             // #20: (NULL, NULL) is a historical row. A malformed pair or a
-            // reason on a promotion loads as an unknown reason with a warning
-            // (review M3), never as Budget, and never stops the load.
+            // reason on a promotion loads as an unknown reason with a warning,
+            // never as Budget, and never stops the load.
             reason,
         };
         out.push(event.loaded());
@@ -404,7 +407,7 @@ impl SqliteStore {
 
 /// Materialize one session on the caller's transaction, `None` when it has no
 /// `sessions` row. `load_snapshot` and the split import's in-transaction
-/// verification (#33 D2) both read through here, so a verified import is
+/// verification (#33) both read through here, so a verified import is
 /// compared with exactly what a later load returns.
 pub(super) async fn load_snapshot_in(
     tx: &mut sqlx::SqliteConnection,
@@ -412,7 +415,7 @@ pub(super) async fn load_snapshot_in(
 ) -> Result<Option<GraphSnapshot>, StoreError> {
     // The existence probe doubles as the embedding-contract read. Both
     // snapshot seed and `SetEmbedding` flush write these columns; root_goal
-    // likewise has its ordered mutation path (XP-8). `mutation_epoch` is
+    // likewise has its ordered mutation path. `mutation_epoch` is
     // the durable mutation counter (issue #17): flush stamps it, and this
     // read is what a writer restart resumes it from.
     let row = sqlx::query(
@@ -431,7 +434,7 @@ pub(super) async fn load_snapshot_in(
     let embedding_model: Option<String> =
         row.try_get(1).map_err(|e| db_err("lookup session", e))?;
     let embedding_dim: Option<i64> = row.try_get(2).map_err(|e| db_err("lookup session", e))?;
-    // XP-8: `root_goal` survives a reload — `Mutation::SetRootGoal` writes
+    // `root_goal` survives a reload — `Mutation::SetRootGoal` writes
     // it, so replaying the log no longer silently clears the drift anchor.
     let root_goal: Option<String> = row.try_get(3).map_err(|e| db_err("lookup session", e))?;
     let root_goal = root_goal

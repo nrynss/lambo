@@ -19,6 +19,7 @@ use std::time::Duration;
 mod admission;
 mod calibration;
 mod drain;
+mod hold;
 mod receipts;
 
 /// An embedder that parks until it is released, so a burst can be held in
@@ -87,7 +88,7 @@ impl Rig {
         Self::new_with_ledger(session, embedder, None)
     }
 
-    /// [`Rig::new`], with a call ledger attached so J4's durable-intent
+    /// [`Rig::new`], with a call ledger attached so the durable-intent
     /// completion lines land on a real file a test can read back.
     fn new_with_ledger(
         session: &str,
@@ -168,7 +169,7 @@ impl Rig {
 }
 
 // -----------------------------------------------------------------------
-// The J3-R1-1 cluster: a projection is not a bound
+// A projection is not a bound
 // -----------------------------------------------------------------------
 
 /// A store that advertises `VECTOR_SEARCH`, because `hybrid::derive` skips
@@ -349,7 +350,7 @@ impl Rig {
     }
 
     /// What a close whose final flush completes does to the queue: quiesce,
-    /// then settle the set-aside receipts as durable (#117 review M1).
+    /// then settle the set-aside receipts as durable (#117).
     /// Returns the quiesce's count of set-aside receipts.
     async fn close_queue(&self) -> usize {
         let deferred = self.pipeline.quiesce().await;

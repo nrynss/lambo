@@ -1,15 +1,21 @@
-//! #148: re-key stored concepts after identifier tokens stopped being stemmed.
+//! Re-key stored concepts after the canonical-key rule changed: identifier
+//! tokens stopped being stemmed (#148), and empty stems stopped reaching the
+//! key (#301).
 //!
 //! Builds before #148 stemmed every token, so a stored concept whose content
 //! holds an identifier token (`v2`, `2122de39e47e`, `src/main.rs`) carries a
 //! key the current [`canonical_key`] no longer derives, and a new write of the
-//! same text would mint a second concept. `lambo provision` calls
+//! same text would mint a second concept. Builds before #301 kept the empty
+//! stem Snowball English gives `''s`, so `''s-lease` was stored as `" leas"`,
+//! where the current rule derives `leas`. `lambo provision` calls
 //! [`crate::store::GraphStore::rekey_canonical_keys`], which reads every
 //! concept's `(id, session, content, key, type)` and the synonyms, plans here,
 //! and writes the plan in one transaction.
 //!
-//! The plan only touches a row whose stored key is exactly what the old rule
-//! derives from its content (through the session's synonyms). Anything else
+//! The plan only touches a row whose stored key is exactly what one of the
+//! old rules derives from its content (through the session's synonyms):
+//! [`legacy_canonical_key`] (before #148, empty stems kept) or
+//! [`unfiltered_canonical_key`] (from #148 up to #301). Anything else
 //! (a repository-scoped Resource key, a key a current build wrote) is left
 //! alone, so a rerun finds nothing to do. Already-merged concepts stay merged:
 //! the surviving concept keeps the content its first write gave it.
@@ -19,11 +25,22 @@
 //! break `UNIQUE (session_id, canonical_key)`; that row keeps its old key and
 //! is reported, never merged. So does a row whose staging placeholder
 //! ([`placeholder_key`]) another concept already holds: keys are
-//! caller-supplied, so the planner checks rather than assumes.
+//! caller-supplied, so the planner checks rather than assumes. So does a row
+//! whose new key is the key of a durable name bound to another concept
+//! ([`NameRow`]): the session would no longer load.
+//!
+//! A row whose new key would be empty (its text has only stopwords and empty
+//! stems, such as `''s ''s`, which an old build stored as `" "`) also keeps
+//! its old key and is reported ([`RekeyPlan::kept_empty`]): an empty key is
+//! one no write accepts, and in the key index every stopword-only text would
+//! resolve to that concept. Like a collision, such a row keeps the marker
+//! from being recorded (fail closed), so every provision reports it until the
+//! concept is retracted by its full id. It cannot be rewritten: a write of the
+//! same text derives the empty key and is refused.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::graph::canonical::{canonical_key, legacy_canonical_key};
+use crate::graph::canonical::{canonical_key, legacy_canonical_key, unfiltered_canonical_key};
 
 /// One stored concept, as the re-key reads it. `id` is the adapter's id text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +50,16 @@ pub struct KeyRow {
     pub content: String,
     pub canonical_key: String,
     pub observation: bool,
+}
+
+/// One stored durable name, as the re-key reads it: a name's key must not be
+/// a concept key of another concept in the session, or the session no
+/// longer loads. `node_id` is the adapter's id text, as [`KeyRow::id`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameRow {
+    pub session_id: String,
+    pub name_key: String,
+    pub node_id: String,
 }
 
 /// One planned key change.
@@ -51,6 +78,9 @@ pub struct RekeyPlan {
     /// Rows that keep their old key because the new one (or the row's
     /// staging placeholder) is taken, by id.
     pub collisions: Vec<String>,
+    /// Rows that keep their old key because the current rule gives them the
+    /// empty key, by id.
+    pub kept_empty: Vec<String>,
     /// The store's `store_meta` marker ([`REKEY_MARKER_KEY`]) said a previous
     /// re-key finished clean, so nothing was read or planned (#171).
     pub skipped: bool,
@@ -60,9 +90,10 @@ pub struct RekeyPlan {
 /// `lambo provision` skips the full concept scan.
 ///
 /// Written in the re-key's own transaction, and only when it left no
-/// collision behind: a store with a reported collision is checked again on
-/// every provision, since the operator may resolve it. Removed again by a
-/// forced re-key (`lambo provision --rekey`) that finds one.
+/// collision and no row kept from an empty key behind
+/// ([`RekeyPlan::is_clean`]): such a store is checked again on every
+/// provision, since the operator may resolve it. Removed again by a forced
+/// re-key (`lambo provision --rekey`) that finds one.
 ///
 /// The marker records what this build did, not what every writer since has
 /// done: a pre-#148 binary still writing to a Postgres or Cockroach store
@@ -71,13 +102,32 @@ pub struct RekeyPlan {
 /// full pass whatever the marker says.
 pub const REKEY_MARKER_KEY: &str = "canonical_key_rule";
 
-/// The value [`REKEY_MARKER_KEY`] holds once every key follows #148's rule.
-pub const REKEY_MARKER_VALUE: &str = "148-identifiers-unstemmed";
+impl RekeyPlan {
+    /// Whether the pass left nothing behind, so the store may record
+    /// [`REKEY_MARKER_KEY`]: no collision and no row kept from an empty key.
+    /// Either one withdraws the marker, so every provision reports it again
+    /// until the operator resolves it.
+    pub fn is_clean(&self) -> bool {
+        self.collisions.is_empty() && self.kept_empty.is_empty()
+    }
+}
+
+/// The value [`REKEY_MARKER_KEY`] holds once every key follows the current
+/// rule. It changed when #301 changed the rule, so a store whose marker a
+/// build before #301 recorded is scanned once more.
+pub const REKEY_MARKER_VALUE: &str = "301-empty-stems-dropped";
 
 /// Plan the re-key. `synonyms` maps `(session_id, source_key)` to the
-/// synonym's target text, as the `synonyms` table stores it.
-pub fn plan_rekey(rows: &[KeyRow], synonyms: &HashMap<(String, String), String>) -> RekeyPlan {
+/// synonym's target text, as the `synonyms` table stores it; `names` are the
+/// session's durable names, whose keys a concept may take only if the name
+/// is bound to it.
+pub fn plan_rekey(
+    rows: &[KeyRow],
+    synonyms: &HashMap<(String, String), String>,
+    names: &[NameRow],
+) -> RekeyPlan {
     let mut candidates: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    let mut kept_empty: Vec<String> = Vec::new();
     for (i, r) in rows.iter().enumerate() {
         // The write path's raw lookup (trimmed, exact) before normalizing;
         // trimming the target again changes no token.
@@ -85,13 +135,22 @@ pub fn plan_rekey(rows: &[KeyRow], synonyms: &HashMap<(String, String), String>)
         let effective = synonyms
             .get(&(r.session_id.clone(), raw.to_string()))
             .map_or(raw, String::as_str);
-        if legacy_canonical_key(effective, |_| None) != r.canonical_key {
+        if legacy_canonical_key(effective, |_| None) != r.canonical_key
+            && unfiltered_canonical_key(effective, |_| None) != r.canonical_key
+        {
             continue;
         }
         let new_key = canonical_key(effective, |_| None);
-        if new_key != r.canonical_key {
-            candidates.insert(r.id.clone(), (i, new_key));
+        if new_key == r.canonical_key {
+            continue;
         }
+        // Never write the empty key: no write accepts it, and the key index
+        // would resolve every stopword-only text to this concept.
+        if new_key.is_empty() {
+            kept_empty.push(r.id.clone());
+            continue;
+        }
+        candidates.insert(r.id.clone(), (i, new_key));
     }
     // A changed row parks on its placeholder between the two update passes.
     // Keys are caller-supplied, so a non-Observation concept in the same
@@ -112,6 +171,20 @@ pub fn plan_rekey(rows: &[KeyRow], synonyms: &HashMap<(String, String), String>)
         })
         .map(|(id, _)| id.clone())
         .collect();
+    // A durable name's key is held by the concept it is bound to: a load
+    // refuses a name whose key another concept carries (Observations
+    // included), so a row whose new key is such a name's key is refused as
+    // a collision. Names are not re-keyed, so this is fixed before the
+    // fixpoint.
+    for (id, (i, new_key)) in &candidates {
+        let r = &rows[*i];
+        if names
+            .iter()
+            .any(|n| n.session_id == r.session_id && n.name_key == *new_key && n.node_id != *id)
+        {
+            refused.insert(id.clone());
+        }
+    }
     // Fixpoint: a candidate whose new key is held by a row that keeps its key
     // is refused, and then its own old key stays held too.
     loop {
@@ -136,7 +209,11 @@ pub fn plan_rekey(rows: &[KeyRow], synonyms: &HashMap<(String, String), String>)
             break;
         }
     }
-    let mut plan = RekeyPlan::default();
+    kept_empty.sort();
+    let mut plan = RekeyPlan {
+        kept_empty,
+        ..RekeyPlan::default()
+    };
     for (id, (i, new_key)) in candidates {
         if refused.contains(&id) {
             plan.collisions.push(id);
@@ -172,29 +249,39 @@ pub fn first_live_holder(rows: &[(String, String)]) -> Option<&(String, String)>
 /// the old keys and would flush them back (or mint a duplicate).
 pub fn live_lease_err(session: &str, holder: &str, pending: usize) -> crate::types::StoreError {
     crate::types::StoreError::Capability(format!(
-        "cannot re-key {pending} concept(s) for unstemmed identifiers (#148) while session \
-         {session:?} is held by {holder:?}: a running holder keeps the old keys in memory. \
-         Stop every holder on this store, then rerun `lambo provision`"
+        "cannot re-key {pending} concept(s) to the current canonical-key rule (#148, #301) \
+         while session {session:?} is held by {holder:?}: a running holder keeps the old \
+         keys in memory. Stop every holder on this store, then rerun `lambo provision`"
     ))
 }
 
 /// The provision line for a plan that was applied.
 pub fn report(plan: &RekeyPlan) -> String {
     if plan.skipped {
-        return "canonical keys already follow the #148 rule (recorded in store_meta; \
+        return "canonical keys already follow the current rule (#148, #301; recorded in store_meta; \
                 `lambo provision --rekey` checks every concept again)"
             .to_owned();
     }
     let mut out = format!(
-        "re-keyed {} concept(s) for unstemmed identifiers (#148)",
+        "re-keyed {} concept(s) to the current canonical-key rule (#148, #301)",
         plan.changes.len()
     );
     if !plan.collisions.is_empty() {
         out.push_str(&format!(
             "; {} kept their old key because another concept already holds the new key \
-             (or its re-key placeholder): {}",
+             (or its re-key placeholder), or a durable name bound to another concept does: \
+             {}",
             plan.collisions.len(),
             plan.collisions.join(", ")
+        ));
+    }
+    if !plan.kept_empty.is_empty() {
+        out.push_str(&format!(
+            "; {} kept their old key because the current rule gives them an empty key \
+             (text of only stopwords and empty stems, which no write accepts now; retract \
+             them by these ids): {}",
+            plan.kept_empty.len(),
+            plan.kept_empty.join(", ")
         ));
     }
     out
@@ -333,7 +420,7 @@ mod tests {
                 &legacy_canonical_key("deploy v2 schemas", |_| None),
             ),
         ];
-        let plan = plan_rekey(&rows, &none());
+        let plan = plan_rekey(&rows, &none(), &[]);
         assert_eq!(
             plan.changes,
             vec![KeyChange {
@@ -358,7 +445,7 @@ mod tests {
                 "RepoResource:v1:[\"r\",\"src/release.rs\"]",
             ),
         ];
-        assert_eq!(plan_rekey(&rows, &none()), RekeyPlan::default());
+        assert_eq!(plan_rekey(&rows, &none(), &[]), RekeyPlan::default());
     }
 
     #[test]
@@ -372,7 +459,7 @@ mod tests {
             (r == "release").then_some("release 2122de39e47e")
         });
         let rows = [row("a", "release", &old)];
-        let plan = plan_rekey(&rows, &syn);
+        let plan = plan_rekey(&rows, &syn, &[]);
         assert_eq!(plan.changes[0].new_key, "2122de39e47e releas");
     }
 
@@ -387,17 +474,137 @@ mod tests {
             // Written by a current build before provision ran.
             row("z", "build 2122de39e47e", "2122de39e47e build"),
         ];
-        let plan = plan_rekey(&rows, &none());
+        let plan = plan_rekey(&rows, &none(), &[]);
         assert!(plan.changes.is_empty());
         assert_eq!(plan.collisions, vec!["a".to_string()]);
         // Another session is independent.
         let mut other = rows.clone();
         other[1].session_id = "t".into();
-        assert_eq!(plan_rekey(&other, &none()).changes.len(), 1);
+        assert_eq!(plan_rekey(&other, &none(), &[]).changes.len(), 1);
         // Observations are exempt from uniqueness, so they are re-keyed.
         let mut obs = rows.clone();
         obs[0].observation = true;
-        assert_eq!(plan_rekey(&obs, &none()).changes.len(), 1);
+        assert_eq!(plan_rekey(&obs, &none(), &[]).changes.len(), 1);
+    }
+
+    /// #301: a key a build from #148 up to #301 wrote (identifier unstemmed,
+    /// empty stem kept) is recognised and re-keyed, though the pre-#148 rule
+    /// would stem the identifier and not match it.
+    #[test]
+    fn a_key_with_an_empty_stem_is_rekeyed() {
+        let content = "''s build 2122de39e47e";
+        let stored = unfiltered_canonical_key(content, |_| None);
+        assert_eq!(stored, " 2122de39e47e build");
+        assert_ne!(legacy_canonical_key(content, |_| None), stored);
+        let rows = [
+            row("a", content, &stored),
+            // Written before #148: the legacy rule matches.
+            row("b", "''s-lease", " leas"),
+        ];
+        let plan = plan_rekey(&rows, &none(), &[]);
+        assert_eq!(
+            plan.changes,
+            vec![
+                KeyChange {
+                    id: "a".into(),
+                    old_key: " 2122de39e47e build".into(),
+                    new_key: "2122de39e47e build".into(),
+                },
+                KeyChange {
+                    id: "b".into(),
+                    old_key: " leas".into(),
+                    new_key: "leas".into(),
+                },
+            ]
+        );
+        assert!(plan.collisions.is_empty() && plan.kept_empty.is_empty());
+        // A rerun over the re-keyed rows finds nothing to do.
+        let rekeyed = [
+            row("a", content, "2122de39e47e build"),
+            row("b", "''s-lease", "leas"),
+        ];
+        assert_eq!(plan_rekey(&rekeyed, &none(), &[]), RekeyPlan::default());
+    }
+
+    /// A row whose new key is a durable name's key bound to another concept
+    /// is refused and reported: the session would no longer load. A name
+    /// bound to the row itself does not block it, and neither does one in
+    /// another session.
+    #[test]
+    fn a_new_key_held_by_another_concepts_name_is_a_collision() {
+        let rows = [row("a", "''s-lease", " leas")];
+        let name = |session: &str, node: &str| NameRow {
+            session_id: session.into(),
+            name_key: "leas".into(),
+            node_id: node.into(),
+        };
+        let plan = plan_rekey(&rows, &none(), &[name("s", "b")]);
+        assert!(plan.changes.is_empty(), "{plan:?}");
+        assert_eq!(plan.collisions, vec!["a".to_string()]);
+        assert!(!plan.is_clean());
+        // An Observation is refused too: a load checks every concept.
+        let mut obs = rows.clone();
+        obs[0].observation = true;
+        assert_eq!(
+            plan_rekey(&obs, &none(), &[name("s", "b")]).collisions,
+            vec!["a".to_string()]
+        );
+        // Its own name, or another session's, does not block it.
+        for names in [[name("s", "a")], [name("t", "b")]] {
+            let plan = plan_rekey(&rows, &none(), &names);
+            assert_eq!(plan.changes.len(), 1, "{plan:?}");
+            assert!(plan.is_clean());
+        }
+    }
+
+    /// A row refused because of a name keeps its old key, which then blocks
+    /// another candidate whose new key is that old key (the cascade).
+    #[test]
+    fn a_name_refusal_cascades_to_a_candidate_wanting_its_old_key() {
+        // `a` (written before #148) would move "2122de39e47" ->
+        // "2122de39e47e"; `b` (written before #301) would move
+        // " 2122de39e47" -> "2122de39e47", the key `a` gives up.
+        let b_old = unfiltered_canonical_key("2122de39e47 ''s", |_| None);
+        assert_eq!(b_old, " 2122de39e47");
+        let rows = [
+            row("a", "2122de39e47e", "2122de39e47"),
+            row("b", "2122de39e47 ''s", &b_old),
+        ];
+        // Without a name both move: `a` frees the key `b` takes.
+        let free = plan_rekey(&rows, &none(), &[]);
+        assert_eq!(free.changes.len(), 2, "{free:?}");
+        assert!(free.is_clean());
+        // A name on another concept holds `a`'s new key: `a` keeps
+        // "2122de39e47", so `b` cannot take it either.
+        let name = NameRow {
+            session_id: "s".into(),
+            name_key: "2122de39e47e".into(),
+            node_id: "n".into(),
+        };
+        let plan = plan_rekey(&rows, &none(), std::slice::from_ref(&name));
+        assert!(plan.changes.is_empty(), "{plan:?}");
+        assert_eq!(plan.collisions, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// #301: a row whose current key would be empty keeps its old key and is
+    /// reported, never written as `""` (the key index would resolve every
+    /// stopword-only text to it).
+    #[test]
+    fn an_empty_new_key_is_kept_and_reported() {
+        let rows = [
+            row("a", "''s ''s", " "),
+            row("b", "''s the ''s", " "),
+            // A current key that is already empty is not this case.
+            row("c", "the", ""),
+        ];
+        let plan = plan_rekey(&rows, &none(), &[]);
+        assert!(plan.changes.is_empty(), "{plan:?}");
+        assert!(plan.collisions.is_empty());
+        assert_eq!(plan.kept_empty, vec!["a".to_string(), "b".to_string()]);
+        let line = report(&plan);
+        assert!(line.contains("2 kept their old key"), "{line}");
+        assert!(line.contains("empty key"), "{line}");
+        assert!(line.ends_with("a, b"), "{line}");
     }
 
     #[test]
@@ -408,16 +615,16 @@ mod tests {
             // A caller-supplied key that happens to be a's staging placeholder.
             row("p", "anything", &placeholder_key("a")),
         ];
-        let plan = plan_rekey(&rows, &none());
+        let plan = plan_rekey(&rows, &none(), &[]);
         assert!(plan.changes.is_empty(), "{plan:?}");
         assert_eq!(plan.collisions, vec!["a".to_string()]);
         // Another session's placeholder text does not block it.
         let mut other = rows.clone();
         other[1].session_id = "t".into();
-        assert_eq!(plan_rekey(&other, &none()).changes.len(), 1);
+        assert_eq!(plan_rekey(&other, &none(), &[]).changes.len(), 1);
         // An Observation holding it is exempt from the index.
         let mut obs = rows.clone();
         obs[1].observation = true;
-        assert_eq!(plan_rekey(&obs, &none()).changes.len(), 1);
+        assert_eq!(plan_rekey(&obs, &none(), &[]).changes.len(), 1);
     }
 }

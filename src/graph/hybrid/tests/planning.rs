@@ -130,7 +130,7 @@ async fn concurrent_first_writers_cannot_mix_embedding_contracts() {
     g.assert_invariants().unwrap();
 }
 
-/// C4: one derive naming the same content in BOTH `concepts` and a
+/// One derive naming the same content in BOTH `concepts` and a
 /// `parent_of` pair must produce ONE node, under the product's strategy.
 ///
 /// The regression this pins is an identity split, not a missing edge:
@@ -138,7 +138,7 @@ async fn concurrent_first_writers_cannot_mix_embedding_contracts() {
 /// declared `Observation` (embedded, typed, carrying CoOccurrence /
 /// Derives / Semantic) and a bare `Entity` (unembedded, carrying only
 /// Derives / Hierarchical) — because `canonicalize` never matches an
-/// `Observation` (GRAPH-1). On Mooshik's bootstrap graph that was 170
+/// `Observation`. On Mooshik's bootstrap graph that was 170
 /// contents existing as such pairs, holding embedding coverage near 50%
 /// and splitting each fact's supporting interactions across two nodes.
 ///
@@ -217,12 +217,12 @@ async fn parent_of_child_resolves_to_a_concept_declared_in_the_same_call() {
     }
 }
 
-/// C4 control: the fix is scoped to THIS call's own writes, so a
+/// Control: the fix is scoped to THIS call's own writes, so a
 /// `parent_of` end the graph has never seen is still created fresh as
 /// `PARENT_OF_CONCEPT_TYPE` (`Entity`). Without this, a fix that made
 /// `canonicalize` match Observations generally would pass the test above
 /// while quietly reattaching agent content to demoted context-overflow
-/// records (GRAPH-1).
+/// records.
 #[tokio::test]
 async fn a_brand_new_parent_of_end_is_still_created_as_entity() {
     let (graph, interaction) = graph_with_interaction("hybrid-fresh-end", 1, 0, "ingest context");
@@ -397,7 +397,7 @@ async fn parent_of_ends_that_resolve_to_existing_concepts_are_not_re_embedded() 
 /// The degradation rules are the `concepts` rules. Capability absent: the end
 /// stays keyword-only and nothing is embedded (byte-identical to Canonical).
 /// Embedder failure on the end: the whole write fails with nothing written,
-/// exactly as it does for a declared concept (J3-R3-1).
+/// exactly as it does for a declared concept.
 #[tokio::test]
 async fn parent_of_end_embedding_follows_the_concepts_degrade_rules() {
     let (graph, interaction) =
@@ -662,7 +662,7 @@ async fn an_ends_only_call_checks_the_contract_before_any_embed() {
     assert_eq!(g.embedding().unwrap().kind, "fixture", "stamp preserved");
 }
 
-/// #60 review L3: the `parent_of` ends' refusal probe asks only a source
+/// #60: the `parent_of` ends' refusal probe asks only a source
 /// that can refuse. The holder's graph always answers, so an ends-only call
 /// over it embeds both ends and scans nothing.
 #[tokio::test]
@@ -856,7 +856,7 @@ async fn the_embed_budget_counts_concepts_and_new_parent_of_ends() {
     assert_eq!(out.embedded, 0);
 }
 
-/// The J3 ack runs the same count against the graph as it is at the call:
+/// The ack runs the same count against the graph as it is at the call:
 /// matched concepts and existing ends are free, and nothing is refused
 /// without vector search.
 #[test]
@@ -917,7 +917,7 @@ async fn first_use_empty_candidates_still_commits_contract() {
     let mut g = graph.write();
     assert_eq!(g.embedding(), Some(&contract("fixture", 1024)));
     assert_eq!(g.concepts().count(), 1);
-    // L82-4 (product decision 2026-08-14): the store had no trusted match,
+    // Product decision 2026-08-14: the store had no trusted match,
     // so no merge is recorded — but the vector that was successfully
     // computed IS persisted, which is what makes an organically-derived
     // concept vector-recallable. This assertion used to be `is_none()`;
@@ -1280,4 +1280,26 @@ async fn check_embed_context_agrees_with_the_apply_time_check() {
             "len {len}: {early:?} vs {out:?}"
         );
     }
+}
+
+/// #294: a `parent_of` pair whose two ends resolve to one canonical key is
+/// refused as an input refusal, which a replay settles `failed` rather than
+/// stopping on; a raw-reflexive pair (refused at the ack, so never met at
+/// replay) stays a plain `Invariant`.
+#[test]
+fn a_pair_resolving_to_one_key_is_an_input_refusal() {
+    let (graph, _) = graph_with_interaction("pair-one-key", 1, 0, "p");
+    let g = graph.read();
+    let err = validate_graph_inputs(&g, &ParentOf::from_pairs(&[("user schema", "schema user")]))
+        .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Store(e) if e.is_input_refusal()),
+        "{err:?}"
+    );
+    let err = validate_graph_inputs(&g, &ParentOf::from_pairs(&[("user schema", "user schema")]))
+        .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Store(e) if !e.is_input_refusal()),
+        "{err:?}"
+    );
 }

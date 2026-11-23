@@ -122,7 +122,7 @@ fn h1_operator_override_is_limited_to_same_width_same_kind_vector_aliases() {
 }
 
 // -----------------------------------------------------------------------
-// K2: Graph::reembed_all
+// Graph::reembed_all
 // -----------------------------------------------------------------------
 
 fn embed_contract(kind: &str, model: &str, dim: usize) -> crate::types::EmbeddingContract {
@@ -185,6 +185,52 @@ fn k2_reembed_all_rewrites_vectors_then_swaps_contract_in_order() {
                 embedding: Some(c),
                 ..
             }
+        ] if c == &target
+    ));
+}
+
+/// #322: on a session with no contract the drained batch stamps the contract
+/// FIRST, then carries the upserts, so the store's first-stamp legacy
+/// quarantine runs before the new vectors land instead of after. The graph
+/// ends exactly as on a stamped session. Mirrors
+/// `reembedOrdered_contract_first` and `reembedOrdered_graph_eq` in
+/// `formal/LamboProofs/Contract/Store.lean`.
+#[test]
+fn reembed_all_on_a_contractless_session_stamps_the_contract_first() {
+    let mut g = Graph::new(sid());
+    let i = interaction(1, None, 0);
+    let iid = i.id;
+    g.insert_interaction(i).unwrap();
+    let c1 = concept(1, iid, "user schema");
+    let c2 = concept(2, iid, "auth middleware");
+    let (id1, id2) = (c1.id, c2.id);
+    g.insert_concept(c1, iid).unwrap();
+    g.insert_concept(c2, iid).unwrap();
+    g.drain_log();
+    assert_eq!(g.embedding(), None, "a pre-contract session");
+
+    let target = embed_contract("fixture", "fixture-model", 1024);
+    g.reembed_all(
+        vec![(id1, vec![0.25_f32; 1024]), (id2, vec![0.5_f32; 1024])],
+        target.clone(),
+    )
+    .unwrap();
+    assert_eq!(g.embedding(), Some(&target));
+    for (id, v) in [(id1, 0.25_f32), (id2, 0.5_f32)] {
+        let Some(crate::types::Node::Concept(c)) = g.node(id) else {
+            panic!("expected concept {id}");
+        };
+        assert_eq!(c.embedding, Some(vec![v; 1024]));
+    }
+    assert!(matches!(
+        g.drain_log().mutations.as_slice(),
+        [
+            Mutation::SetEmbedding {
+                embedding: Some(c),
+                ..
+            },
+            Mutation::UpsertNode { .. },
+            Mutation::UpsertNode { .. },
         ] if c == &target
     ));
 }
@@ -371,7 +417,7 @@ fn k2_reembed_all_on_an_empty_graph_stamps_the_contract_alone() {
     ));
 }
 
-/// #22 design Q19 at the graph: an image concept's vector is never replaced
+/// #22 at the graph: an image concept's vector is never replaced
 /// by a text vector. `reembed_all` refuses while one remains, the dropping
 /// variant nulls it (keeping the source) in the same ordered batch, and a
 /// backfill refuses to give a vectorless image concept a caption vector.
@@ -463,4 +509,66 @@ fn re_embed_and_backfill_never_give_an_image_concept_a_text_vector() {
         .unwrap_err();
     assert!(err.to_string().contains("image concept"), "{err}");
     assert!(g.drain_log().is_empty());
+}
+
+/// #296: the in-place rewrite. On a session already under the contract it
+/// rewrites every text vector, keeps the contract and emits the upserts
+/// alone (no `SetEmbedding`); it refuses a session under another contract
+/// (a migration) and one that holds no vector (a backfill), and checks
+/// coverage like `reembed_all`.
+///
+/// Mirrors `Contract.reembedSame_spec` and `Contract.reembedSame_keeps_contract`.
+#[cfg(feature = "embed-fixture")]
+#[test]
+fn reembed_in_place_rewrites_every_vector_and_keeps_the_contract() {
+    let (mut g, c1, c2) = two_concept_graph();
+    let live = embed_contract("bge_m3", "old.gguf", 1024);
+    g.seed_test_vectors(vec![(c1, vec![0.1_f32; 1024]), (c2, vec![0.1_f32; 1024])]);
+    g.drain_log();
+
+    let err = g
+        .reembed_in_place(vec![(c1, vec![0.5_f32; 1024])], &live)
+        .unwrap_err();
+    assert!(err.to_string().contains("requires every concept"), "{err}");
+    let err = g
+        .reembed_in_place(
+            vec![(c1, vec![0.5_f32; 1024]), (c2, vec![0.5_f32; 1024])],
+            &embed_contract("candle", "BAAI/bge-m3@main sha256:abcd1234", 1024),
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("which is a migration"), "{err}");
+    assert!(g.drain_log().is_empty(), "a refusal appends nothing");
+
+    g.reembed_in_place(
+        vec![(c1, vec![0.25_f32; 1024]), (c2, vec![0.5_f32; 1024])],
+        &live,
+    )
+    .unwrap();
+    assert_eq!(g.embedding(), Some(&live));
+    let embedded = |g: &Graph, id: NodeId| match g.node(id) {
+        Some(crate::types::Node::Concept(c)) => c.embedding.clone().unwrap(),
+        other => panic!("expected concept {id}, got {other:?}"),
+    };
+    assert_eq!(embedded(&g, c1), vec![0.25_f32; 1024]);
+    assert_eq!(embedded(&g, c2), vec![0.5_f32; 1024]);
+    assert!(matches!(
+        g.drain_log().mutations.as_slice(),
+        [Mutation::UpsertNode { .. }, Mutation::UpsertNode { .. }]
+    ));
+
+    // A session under the contract with no vector: that is a backfill.
+    let mut g = Graph::new(sid());
+    let i = interaction(1, None, 0);
+    let iid = i.id;
+    g.insert_interaction(i).unwrap();
+    let mut c = concept(1, iid, "user schema");
+    c.embedding = None;
+    let id = c.id;
+    g.insert_concept(c, iid).unwrap();
+    g.stamp_embedding(live.clone()).unwrap();
+    g.drain_log();
+    let err = g
+        .reembed_in_place(vec![(id, vec![0.5_f32; 1024])], &live)
+        .unwrap_err();
+    assert!(err.to_string().contains("embed_missing"), "{err}");
 }

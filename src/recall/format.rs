@@ -1,4 +1,4 @@
-//! Recall context format (T5.3, spec §8 / v0.6.0 §9.2) — the text the demo
+//! Recall context format (spec §8 / v0.6.0 §9.2) — the text the demo
 //! video shows on screen.
 //!
 //! One hit renders as a block of lines, in this order:
@@ -25,7 +25,7 @@
 //! that skipped nothing renders without them.
 //!
 //! Blocks are joined with a blank line ([`render_context`]). The token budget
-//! is applied once, by [`fit_blocks`] (submodule `fit`): the longest ranked
+//! is applied once, by `fit_blocks` (submodule `fit`): the longest ranked
 //! prefix of whole blocks, except that a first block too long for the budget
 //! has its content cut at a UTF-8 boundary, keeps its label, and is followed
 //! by a marker naming its id (#130).
@@ -77,13 +77,12 @@
 //! Agent A wrote to it 11 seconds ago
 //! ```
 //!
-//! Subject is the payload's `writer` (ALGO-2) — never guessed from the
-//! `agents` list, which on the shipped fixture would pick the wrong agent
-//! (the newest write is agent-b's). [`agent_display`] maps the fixture's id
-//! convention (`agent-a` → `A`). The age renders as a numeral, matching the
-//! events channel's `"{}s ago"` convention and PHASE-8's "11-seconds-ago
-//! conflict line"; spec §13's "eleven seconds ago" is demo narration, not
-//! quoted screen text (unlike the ⚑ line above).
+//! Subject is the payload's `writer` — never guessed from the `agents` list,
+//! which on the shipped fixture would pick the wrong agent (the newest write
+//! is agent-b's). [`agent_display`] maps the fixture's id convention
+//! (`agent-a` → `A`). The age renders as a numeral, matching the events
+//! channel's `"{}s ago"` convention; spec §13's "eleven seconds ago" is demo
+//! narration, not quoted screen text (unlike the ⚑ line above).
 
 use std::collections::{HashMap, HashSet};
 
@@ -92,6 +91,9 @@ use crate::types::HotListPayload;
 use crate::types::{AgentId, EdgeType, Node, NodeId, RecallHit, Reservation};
 
 mod fit;
+/// The fit's private strings for `crate::formal_constants_tests` (#291).
+#[cfg(test)]
+pub(crate) use fit::formal_pins as fit_formal_pins;
 pub(crate) use fit::{fit_blocks, ContextBlock, FittedContext, Truncation};
 
 /// The structural edge types (spec §4.1 errata: `Derives` provenance and
@@ -168,9 +170,9 @@ pub fn blast_radius(graph: &Graph, node: NodeId) -> u64 {
     dependents_of(graph, node).len() as u64
 }
 
-/// All blast radii in ONE graph pass (GPT5.6sol P2-7): a map from each node
-/// with at least one dependent to its dependent count. Agrees with
-/// [`blast_radius`] for every node.
+/// All blast radii in ONE graph pass: a map from each node with at least one
+/// dependent to its dependent count. Agrees with [`blast_radius`] for every
+/// node.
 pub fn blast_radii(graph: &Graph) -> HashMap<NodeId, u64> {
     let concept_ids: HashSet<NodeId> = graph.concepts().map(|c| c.id).collect();
     let mut pairs: HashSet<(NodeId, NodeId)> = HashSet::new();
@@ -244,7 +246,7 @@ pub fn agent_display(id: &AgentId) -> String {
     out
 }
 
-/// The demo conflict sentence: subject is the payload's `writer` (ALGO-2).
+/// The demo conflict sentence: subject is the payload's `writer`.
 pub fn conflict_warning(writer: &AgentId, seconds_ago: u64) -> String {
     format!(
         "Agent {} wrote to it {} seconds ago",
@@ -422,7 +424,7 @@ pub fn superseded_warning(
     }
 }
 
-/// The active soft-lock line (spec §10.3.3, T2.7): agent + expiry.
+/// The active soft-lock line (spec §10.3.3): agent + expiry.
 pub fn reservation_warning(r: &Reservation) -> String {
     format!(
         "Reserved by {} until {}",
@@ -449,7 +451,7 @@ pub fn render_block(hit: &RecallHit, warnings: &[String]) -> String {
     lines.join("\n")
 }
 
-/// One hit's full block from the H3 presentation model: the label line
+/// One hit's full block from the presentation model: the label line
 /// (content, type marker, score, node id, blast radius) followed by its
 /// annotation warning lines. Reuses [`concept_label`] / [`render_block`] by
 /// projecting the presentation hit onto a [`RecallHit`], so the CLI-rendered
@@ -777,8 +779,8 @@ mod tests {
 
     #[test]
     fn conflict_warning_renders_writer_not_first_agent() {
-        // ALGO-2: the naive first-listed agent is wrong on the shipped
-        // fixture; the subject is the payload's writer, never `agents[0]`.
+        // The naive first-listed agent is wrong on the shipped fixture; the
+        // subject is the payload's writer, never `agents[0]`.
         assert_eq!(
             conflict_warning(&AgentId::from("agent-b"), 11),
             "Agent B wrote to it 11 seconds ago"
@@ -1025,9 +1027,9 @@ mod tests {
                 radii.get(&uid(id)).copied().unwrap_or(0)
             );
         }
-        // Self-loop divergence (deep-review F2): a node whose only inbound
-        // structural edge is a self-loop is NOT its own dependent. The batched
-        // map must agree with the single-node blast_radius (and the stores).
+        // Self-loop divergence: a node whose only inbound structural edge is a
+        // self-loop is NOT its own dependent. The batched map must agree with
+        // the single-node blast_radius (and the stores).
         let mut g = Graph::new(sid());
         let origin = interaction(97, "a");
         g.insert_interaction(origin.clone()).unwrap();

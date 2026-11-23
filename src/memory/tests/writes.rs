@@ -619,7 +619,7 @@ async fn hybrid_strategy_derives_and_mirrors_the_index() {
 /// session reload, and recall's vector leg finds it. This is the path that
 /// stored `embedding IS NULL` for all 13 organic concepts the live-Cockroach
 /// review measured — recall was keyword/recency only on everything the
-/// product itself wrote (`adve-review-t8.2-t8.3-live.md`, L82-4).
+/// product itself wrote (T8.2/T8.3 live review, finding L82-4).
 #[tokio::test]
 async fn organic_derive_persists_a_vector_that_recall_finds() {
     use crate::embed::{NEAR_A, NEAR_B};

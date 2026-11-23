@@ -1,0 +1,47 @@
+name: model-drift
+
+# Warns when Rust that a Lean model under formal/LamboProofs/ describes has
+# changed since the model was last read (#291). formal/models.toml lists each
+# model's Rust refs and a fingerprint of them; scripts/formal/check-model-drift.py
+# recomputes it. A warning stays until the model is re-read and bumped
+# (`--bump <Model>`); see "Keeping the models in step with the Rust" in
+# formal/README.md. Drift is a warning here, not a failure; a broken manifest
+# fails. Full history lets `read_against` narrow each warning to the changed
+# lines; without it every ref of a drifted model is listed.
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'formal/**'
+      - 'scripts/formal/**'
+      - '.github/workflows/model-drift.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'formal/**'
+      - 'scripts/formal/**'
+      - '.github/workflows/model-drift.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Self-test the drift check
+        run: python3 -I scripts/formal/check-model-drift.py --self-test
+
+      - name: Check the Lean models against the Rust they describe
+        run: python3 -I scripts/formal/check-model-drift.py

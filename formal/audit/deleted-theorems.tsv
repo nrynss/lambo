@@ -1,0 +1,104 @@
+# Theorems deleted from the models on purpose, in three groups. First, those
+# the audit in formal/audit/unreferenced-theorems.md found nothing referencing
+# (no proof in the dump's `uses`, no other declaration naming them, no example,
+# docs anchor, claims ledger row, Rust comment, oracle or README mention, and
+# no Audit.lean line except `Drain.orderInv_nil`'s, removed with it). Second,
+# the rows marked "purpose review", which failed the review recorded in
+# reviewed-theorems.tsv (header mentions went with them). Third, the #280
+# rows: that unimplemented design model, removed at the owner's request with
+# its six Audit.lean lines, its README and header mentions, and the
+# definitions only it used (a definition is listed only when nothing left
+# mentions it). Tab-separated: name, reason, the kept theorem that states the
+# same thing or more (`-` when there is none). Read by
+# scripts/formal/check-decl-equivalence.py --deletions and by
+# scripts/formal/audit-theorems.py.
+Lambo.BatchQueue.lengthChunks_nil	dead helper: an undocumented rfl unfolding of lengthChunks on [] that nothing uses or names	-
+Lambo.Fit.ctxOf_nil	dead helper: an undocumented rfl unfolding of ctxOf on [] that nothing uses or names	-
+Lambo.Hotlist.seq_mem_upsert	duplicate: states exactly what mem_upsert states (same statement up to binder names)	Lambo.Hotlist.mem_upsert
+Lambo.Supersession.recordRefused_nil	dead helper: an undocumented rfl unfolding of recordRefused on [] that nothing uses or names	-
+Lambo.Supersession.decideV_nil	dead helper: an undocumented rfl unfolding of decideV on [] that nothing uses or names	-
+Lambo.Tiered.markStale_d	dead helper: an undocumented rfl unfolding of markStale's durable side that nothing uses or names	-
+Lambo.Registry.holds_ers	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.holds_ern	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.unpl_ers	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.unpl_ern	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_none	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_held	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_failed	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_ers	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_ern	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.place_erased	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.isHeld_ers	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Registry.isHeld_ern	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Contract.canary_override_admits	implied by canary_refuses_iff (the gate refuses only without the override)	Lambo.Contract.canary_refuses_iff
+Lambo.Contract.canary_verify_refuses_drift	implied by canary_refuses_iff (verify, drifted, no override refuses)	Lambo.Contract.canary_refuses_iff
+Lambo.Contract.same_dim_not_enough	implied by compatible_iff_eq (compatibility is equality of kind, model and dim)	Lambo.Contract.compatible_iff_eq
+Lambo.Flush.ladder_last	leftover helper: unfolds the model's last retry rung, which nothing uses; `backoffAt_capped` states the ladder's end	-
+Lambo.Registry.sHeld_init	leftover helper: the example's held state is an initial state, which no proof or example uses	-
+Lambo.Registry.cfgEx_wf	leftover helper: the example configuration is well formed, which no proof or example uses	-
+Lambo.Fusion.full_rank_eq_raise_needs_sorted	a counterexample to a model lemma without its sortedness hypothesis; the Rust's keyword leg is always ranked, so it states nothing about the Rust	-
+Lambo.Fusion.rrf_den_pos	leftover helper: positivity of the model's exact-rational RRF denominator, which nothing uses and which `fusion.rs`'s f64 sum has no counterpart of	-
+Lambo.Fusion.idOrder_strictTotal	leftover helper: the examples' id tie-break is a strict total order, which no proof or example uses	-
+Lambo.Fusion.term_exact	model-internal: the exactness of the model's rational arithmetic, not a property of `fusion.rs`'s f64 sum	-
+Lambo.Supersession.mem_sortDedup	leftover helper: membership in the model's sort-and-dedup, which nothing uses	-
+Lambo.Supersession.edgeBetween_append_other	leftover helper: a fact about the model's edge lookup that nothing uses	-
+Lambo.Hotlist.insert_evicted_eq	model-internal: equates two model forms of `insert`'s eviction, and nothing uses it	-
+Lambo.Hotlist.countC_add_countO	leftover helper: a counting identity over the model's entry lists, which nothing uses	-
+Lambo.Hotlist.mem_sortPrio	leftover helper: membership in the model's priority sort, which nothing uses	-
+Lambo.Dispatch.recallRouted_eq	model-internal: equates a definition with its generalisation over the classifier, and nothing uses it	-
+Lambo.Dispatch.fitsStructural_eq	model-internal: equates a definition with its generalisation over the classifier, and nothing uses it	-
+Lambo.Dispatch.tryStructural_eq	model-internal: equates a definition with its generalisation over the classifier, and nothing uses it	-
+Lambo.Dispatch.asciiWord_letters	leftover helper: a character-class fact about the model's word check, which nothing uses	-
+Lambo.Resolve.Cmd.mem_all	leftover helper: the model's command list is complete, which nothing uses	-
+Lambo.BatchQueue.chunkOf_snd_sublist	leftover helper: what a chunk leaves keeps its order, which nothing uses	-
+Lambo.Policy.window_needs_earliest	a counterexample to a stronger form of a model lemma (`sessionCount_window`'s hypothesis); it states nothing about `separated_session_count` the Rust relies on	-
+Lambo.Cite.rel_of_mem_post	leftover helper: unfolds membership in the model's successor list, which nothing uses	-
+Lambo.Cite.Kind.cd_false_of_hier	leftover helper: a hierarchical edge kind is not causal or dependency, which nothing uses	-
+Lambo.Canon.legal_ne	implied by legal_irrefl: a legal transition never leaves the status where it is	Lambo.Canon.legal_irrefl
+Lambo.Drain.orderInv_nil	leftover helper: the base case of the replay's order invariant, which no proof uses	-
+Lambo.Score.clamp_idem	leftover helper: idempotence of the model's clamp, which nothing uses; `clampDim_eq_self` states the no-op the Rust's doc relies on	-
+Lambo.Tiered.frame_refl	leftover helper: reflexivity of the model's frame relation, which nothing uses	-
+Lambo.Tiered.settle_rep	leftover helper: a step fact about the model's repair position that nothing uses	-
+Lambo.Canonical.Sane.toNoSep	leftover helper: converts one model hypothesis into another, and nothing uses it	-
+Lambo.Canonical.map_lowerA_idem	leftover helper: idempotence of the model's ASCII lowercasing, which nothing uses	-
+Lambo.Canonical.words_all_sep	leftover helper: a string of separators has no words, which nothing uses; `nameKeyF_all_empty` states what `name_key` does with no tokens	-
+Lambo.BatchQueue.extract_snd_sublist	leftover helper: used only by the deleted chunkOf_snd_sublist	-
+Lambo.Canonical.words_sep_cons	leftover helper: used only by the deleted words_all_sep	-
+Lambo.Supersession.mem_insertDedup	leftover helper: used only by the deleted mem_sortDedup	-
+Lambo.Supersession.edgeBetween_append	leftover helper: used only by the deleted edgeBetween_append_other	-
+Lambo.BatchQueue.removeDesc_snd_sublist	leftover helper: used only by the deleted extract_snd_sublist	-
+Lambo.Canonical.words_nil	leftover helper: an rfl unfolding used only by the deleted words_sep_cons	-
+Lambo.Cite.Acyclic.irrefl	purpose review: a generic consequence of the definition of Acyclic for any relation; its doc claimed closing_edge refuses s -> s, which refuses_self_loop states about the gate	-
+Lambo.Fit.bsearch_fuel	purpose review: a fact about the model's fuel parameter (enough fuel gives the same answer), not about fit.rs, and no proof uses it	-
+Lambo.Fit.jumpEst_mono	purpose review: arithmetic about the toy counterexample estimator	-
+Lambo.Gc.taken_le_budget	purpose review: list arithmetic (take (min len b) has length at most b) that names no GC definition; its doc also claimed a prefix order it does not state	-
+Lambo.Gc.none_deferred_iff	purpose review: arithmetic (len - min len b = 0 iff len <= b) that names no GC definition	-
+Lambo.Order.Lawful.strict_total	purpose review: order theory about any lawful separating comparator, naming no Rust behaviour	-
+Lambo.Order.sorted_nodup	purpose review: order theory (a strictly sorted list has no duplicates) about any lawful comparator, naming no Rust behaviour	-
+Lambo.Order.promoted_canonical	purpose review: about the issue 280 gated order, a design not in the Rust	-
+Lambo.Order.clearsGate_mono	purpose review: about the issue 280 gated order, a design not in the Rust	-
+Lambo.Order.gatedRankMembers_zero	purpose review: about the issue 280 gated order, a design not in the Rust	-
+Lambo.Order.gatedRankMembers_unreachable	purpose review: about the issue 280 gated order, a design not in the Rust	-
+Lambo.Order.gatedRankMembers_canonical_first	purpose review: about the issue 280 gated order, a design not in the Rust	-
+Lambo.Order.gatedRankMembers_below_gate	purpose review: about the issue 280 gated order, a design not in the Rust	-
+Lambo.Order.promoted_zero	cascade: used only by the deleted gatedRankMembers_zero; about the issue 280 gated order, a design not in the Rust	-
+Lambo.Order.promoted_off	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_off	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_lawful	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_separating	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_sorted_unique	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_promoted_first	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_unpromoted	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_below_gate_score	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.clearsGate	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.promoted	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.ex280Canonical	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.ex280Rel	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.ex280RelHit	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.ex280Score	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.ex280Order	#280 unimplemented design; recoverable from git history	-
+Lambo.TopK.exSame	#280 unimplemented design; recoverable from git history	-
+Lambo.Cite.no_dependency_cycle	re-review: a generic consequence of Acyclic for any relation, as Acyclic.irrefl was; its doc claimed what closing_edge does, which it does not prove	-
+Lambo.Fit.rjEst_mono	re-review: arithmetic about the model's own counterexample estimator, as jumpEst_mono was	-
+Lambo.Confidence.noisyOr_ge_keyword	re-review: states exactly what keywordOnly_le_noisyOr states (the same statement; that one's proof now inlines this one's); its Audit.lean line removed	Lambo.Confidence.keywordOnly_le_noisyOr

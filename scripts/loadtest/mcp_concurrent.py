@@ -119,7 +119,7 @@ KNOWN_MESSAGES = (
     ("drop_queue_bytes", r"the background write queue is at its \d+ MiB payload cap"),
     ("drop_session_closing", r"^the session is closing$"),
     # src/writeq/receipts.rs ReceiptAnswer::CloseUnflushed describe (#117)
-    ("close_unflushed", r"^close did not finish its final flush"),
+    ("close_unflushed", r"^close could not confirm this write was saved"),
 )
 _KNOWN = tuple((rid, re.compile(p)) for rid, p in KNOWN_MESSAGES)
 # src/surface/error.rs err_class: every model-safe failure starts with one.

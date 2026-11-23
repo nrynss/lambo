@@ -1,0 +1,21 @@
+name = "lambo-proofs"
+version = "0.1.0"
+defaultTargets = ["LamboProofs"]
+
+[[lean_lib]]
+name = "LamboProofs"
+# Every module under LamboProofs/, imported or not, so a new model is always
+# checked (an unimported one would otherwise be skipped by `lake build`).
+globs = ["LamboProofs", "LamboProofs.+"]
+
+# The differential oracle (#291): `lake exe oracle` evaluates model
+# definitions over generated inputs and writes formal/oracle/*.json, which
+# src/formal_oracle_tests.rs replays against the Rust. Not a default target,
+# so `lake build` builds the proofs alone. See README.md, "Differential oracle".
+[[lean_lib]]
+name = "OracleExport"
+globs = ["OracleExport.+"]
+
+[[lean_exe]]
+name = "oracle"
+root = "OracleExport.Main"

@@ -1,14 +1,18 @@
-//! Canonicalization pipeline (T2.2) — spec §7.1 steps 1–5.
+//! Canonicalization pipeline — spec §7.1 steps 1–5.
 //!
 //! Steps, in order:
-//! 1. Normalize — Unicode **NFC** (adve-review GRAPH-9: composed and decomposed
+//! 1. Normalize — Unicode **NFC** (composed and decomposed
 //!    spellings of the same word must not become two concepts), split camelCase
 //!    boundaries, lowercase, split `[-_ ]` + whitespace, strip stopwords
 //!    (`STOPWORDS`, pinned to the fixture convention
 //!    `scripts/gen-fixtures.py`). See [`normalize_tokens`] for why NFC and not
 //!    NFKC.
-//! 2. Stem — Porter via `rust-stemmers` (`Algorithm::English`; snowball and
-//!    custom stemmers are cut per spec §7.1).
+//! 2. Stem — Snowball English (Porter2, not the original Porter algorithm)
+//!    via `rust-stemmers` (`Algorithm::English`), the only stemmer. Spec
+//!    §7.1's "Porter only" cut the configurable `snowball` option and custom
+//!    `stem_fn`s, not this algorithm.
+//!    Identifier tokens are not stemmed (#148), and empty stems are dropped
+//!    (#301).
 //! 3. Token-sort → canonical key (sorted stems joined with single spaces).
 //! 4. Synonym resolution — **direct lookup only**: no transitivity, no chains,
 //!    no merge token. Pinned ordering (fixtures.rs + `gen-fixtures.py`): the RAW
@@ -17,7 +21,7 @@
 //! 5. Match against existing `canonical_key` — [`canonicalize`] returns
 //!    [`CanonicalizeResult::Matched`] when a concept in the graph carries the
 //!    key, else [`CanonicalizeResult::Unmatched`]. Step 6 (hybrid/vector match,
-//!    `Semantic` edges) is T7.2's — the caller decides on `Unmatched`.
+//!    `Semantic` edges) is not this module's — the caller decides on `Unmatched`.
 //!
 //! Ordering note: the camelCase split must see the ORIGINAL case. Lowercasing
 //! first would destroy the boundary (`"UserSchema"` → `"userschema"`, one token),
@@ -27,7 +31,8 @@
 //!
 //! Pure by design (the graph owns no lock, spec §6.4): [`normalize_tokens`] and
 //! [`canonical_key`] have no `Graph` dependency, and [`canonicalize`] only reads
-//! through `Graph::synonym` (T2.1 storage — no new synonym storage here).
+//! through `Graph::synonym` (the graph's own storage — no new synonym storage
+//! here).
 
 use std::sync::LazyLock;
 
@@ -43,11 +48,19 @@ const STOPWORDS: [&str; 13] = [
     "the", "a", "an", "for", "of", "at", "in", "to", "on", "and", "or", "is", "are",
 ];
 
-/// Shared Porter (English) stemmer — created once, reused for every call.
+/// Test-only alias of [`STOPWORDS`], for `crate::formal_constants_tests`
+/// (#291): `formal/LamboProofs/Canonical.lean` hard-codes the list.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    pub(crate) const STOPWORDS: [&str; 13] = super::STOPWORDS;
+}
+
+/// Shared Snowball English (Porter2) stemmer — created once, reused for every
+/// call.
 static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::English));
 
 /// Codepoints that render as nothing, or as an empty cell — the single authority
-/// on "invisible" for the whole codebase (L82-2 / R1-2).
+/// on "invisible" for the whole codebase.
 ///
 /// # Why one table with two consumers
 ///
@@ -80,7 +93,7 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 /// family, the BOM, the deprecated format controls, the whole `U+E0000–U+E007F`
 /// TAGS block including its unassigned holes — a superset costs nothing and
 /// survives future assignments), **plus** two classes that are not *Cf* and were
-/// therefore missed entirely by the first L82-2 pass (R1-2b):
+/// therefore missed entirely by the first pass:
 ///
 /// * the *filler* codepoints, which are category `Lo`/`Mn` but render blank:
 ///   `U+115F`, `U+1160`, `U+3164`, `U+FFA0` (`U+3164` HANGUL FILLER is the
@@ -198,12 +211,16 @@ fn split_camel_case(s: &str) -> String {
 
 /// Spec §7.1 steps 1–2 — normalize + stem.
 ///
-/// **Unicode NFC first** (adve-review GRAPH-9), then lowercase, split `[-_ ]`
-/// and camelCase boundaries, drop stopwords, Porter stem. NO sort, NO synonym
+/// **Invisible codepoints stripped and Unicode NFC first**, then split
+/// camelCase boundaries on the original case, split on `-`, `_` and
+/// whitespace, lowercase, drop stopwords, stem with Snowball
+/// English (Porter2) except identifier tokens, and drop empty stems. The
+/// camelCase split comes before lowercasing, which would erase the boundary
+/// (module docs, ordering note). NO sort, NO synonym
 /// lookup, NO join (those are [`canonical_key`]'s job). Pure — no `Graph`
-/// dependency, so recall's keyword index (T2.6) can tokenize without a graph.
+/// dependency, so recall's keyword index can tokenize without a graph.
 ///
-/// ## Why NFC (GRAPH-9)
+/// ## Why NFC
 ///
 /// `"café"` composed (NFC, `é` = U+00E9) and decomposed (NFD, `e` + U+0301) are
 /// different byte strings and were therefore different canonical keys — so the
@@ -211,7 +228,7 @@ fn split_camel_case(s: &str) -> String {
 /// canonicalization could never merge. macOS filesystems hand back NFD while
 /// most editors and HTTP clients emit NFC, so both reach the same session.
 /// Normalizing at the head of the tokenizer fixes **both** `canonical_key`
-/// paths, [`canonicalize`] included, and the T2.6 keyword index with them —
+/// paths, [`canonicalize`] included, and recall's keyword index with them —
 /// they all tokenize through here, so key and index agree by construction.
 ///
 /// NFC, not NFKC: NFKC folds compatibility characters (`ﬁ` → `fi`, `²` → `2`,
@@ -223,14 +240,14 @@ fn split_camel_case(s: &str) -> String {
 /// pinned canonicalization case is byte-identical through this change.
 ///
 /// The raw synonym lookup in [`canonical_key`] / [`canonicalize`] stays
-/// byte-exact on the trimmed input (the pinned muse-spark S2 contract: synonym
+/// byte-exact on the trimmed input (the pinned contract: synonym
 /// keys must match the raw call-site spelling, case included). A synonym key and
 /// a call site that disagree about composition therefore miss each other — the
 /// same shape as the existing case-sensitivity, and not widened here. A synonym
 /// miss is harmless: the raw text falls through to this function and is
 /// normalized anyway.
 ///
-/// ## Why invisible characters are stripped first (R1-2)
+/// ## Why invisible characters are stripped first
 ///
 /// [`INVISIBLE_RANGES`] is erased **before** NFC, so the key is invariant under
 /// every codepoint a reviewer cannot see. Two texts that render identically
@@ -251,12 +268,25 @@ fn split_camel_case(s: &str) -> String {
 /// A token containing an ASCII digit, `/` or `.` is an identifier (a hash, a
 /// short id, a version, a path, a file name), not an English word, and is
 /// kept as it is after lowercasing. Stemming it merged distinct identifiers:
-/// the Porter stemmer drops a trailing `e`, so `2122de39e47e` and
+/// the stemmer drops a trailing `e`, so `2122de39e47e` and
 /// `2122de39e47` were one key and one concept. This is a deliberate, approved
 /// change to spec section 7.1 step 2; `lambo provision` re-keys stored
 /// concepts written under the old rule (see [`legacy_canonical_key`]).
+///
+/// ## Empty stems are dropped (#301)
+///
+/// The stemmer can return the empty string (`''s` stems to `""`: the
+/// prelude drops the leading apostrophe and the possessive step removes
+/// `'s`). Such a stem is dropped, so a key never has a leading, trailing or
+/// doubled space: `''s-lease` keys as `leas` (the key of `lease`), not
+/// `" leas"`, and an input whose stems are all empty keys as the empty key,
+/// which `name_key`, `derive` and `record_action` refuse. Text without an
+/// empty stem keys exactly as before (Lean `Canonical.keyF_eq_key`,
+/// `Canonical.keyF_tidy`).
 pub fn normalize_tokens(content: &str) -> Vec<String> {
-    tokens(content, true)
+    let mut out = tokens(content, true);
+    out.retain(|t| !t.is_empty());
+    out
 }
 
 /// Whether `token` is identifier-like and therefore not stemmed (#148).
@@ -335,13 +365,25 @@ fn tokens(content: &str, keep_identifiers: bool) -> Vec<String> {
         .collect()
 }
 
-/// The canonical key as builds before #148 derived it, stemming every token.
-/// Used only by the `lambo provision` re-key to recognise a stored key the
-/// old rule wrote; nothing derives new keys with it.
+/// The canonical key as builds before #148 derived it, stemming every token
+/// and keeping empty stems (as builds before #301 did). Used only by the
+/// `lambo provision` re-key to recognise a stored key the old rule wrote;
+/// nothing derives new keys with it.
 pub fn legacy_canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&str>) -> String {
     let raw = content.trim();
     let effective = synonyms(raw).unwrap_or(raw);
     tokens_to_key(&mut tokens(effective, false))
+}
+
+/// The canonical key as builds from #148 up to #301 derived it: identifier
+/// tokens unstemmed, empty stems kept. Used only by the `lambo provision`
+/// re-key to recognise a stored key such a build wrote; nothing derives new
+/// keys with it. It differs from [`canonical_key`] only for text with an
+/// empty stem.
+pub fn unfiltered_canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&str>) -> String {
+    let raw = content.trim();
+    let effective = synonyms(raw).unwrap_or(raw);
+    tokens_to_key(&mut tokens(effective, true))
 }
 
 /// Step 3 — sort stems and join with single spaces.
@@ -357,7 +399,7 @@ fn tokens_to_key(stems: &mut [String]) -> String {
 ///
 /// Synonym keys are matched EXACTLY on the trimmed input: case-sensitive, no
 /// case folding, no whitespace collapsing beyond the leading/trailing trim.
-/// `declare_synonym` keys must match the raw call-site spelling (muse-spark S2).
+/// `declare_synonym` keys must match the raw call-site spelling.
 pub fn canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&str>) -> String {
     let raw = content.trim();
     let effective = synonyms(raw).unwrap_or(raw);
@@ -369,17 +411,17 @@ pub fn canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&str>) -> 
 pub enum CanonicalizeResult {
     /// A concept in the graph already carries this canonical key.
     Matched { key: String, node: NodeId },
-    /// No concept carries the key; the caller (T2.3+) decides hybrid step 6.
+    /// No concept carries the key; the caller decides hybrid step 6.
     Unmatched { key: String },
 }
 
 /// Spec §7.1 step 5 — match against existing `canonical_key`.
 ///
-/// Step 4 reads `Graph::synonym` (T2.1 storage; `declare_synonym` lives on
+/// Step 4 reads `Graph::synonym` (the graph's storage; `declare_synonym` lives on
 /// `Graph`). `Result` is part of the pinned contract; this step itself cannot
 /// fail — the hybrid step 6 is deliberately left to the caller.
 ///
-/// **Observations are never matched** (adve-review GRAPH-1): demoted
+/// **Observations are never matched**: demoted
 /// context-overflow records skip the match step per spec §7 demote semantics,
 /// so `derive`/`record_action` must not attach agent-declared content to an
 /// Observation — even when one carries the same canonical key (legal for
@@ -403,8 +445,8 @@ pub fn canonicalize(content: &str, graph: &Graph) -> Result<CanonicalizeResult, 
         };
     }
     // Raw-lookup-before-normalization, identical to `canonical_key`'s pinned
-    // ordering, but reading T2.1's storage directly (the public synonym callback
-    // signature cannot borrow from the graph — see `canonical_key`).
+    // ordering, but reading the graph's storage directly (the public synonym
+    // callback signature cannot borrow from the graph — see `canonical_key`).
     let raw = content.trim();
     let key = match graph.synonym(raw) {
         Some(mapped) => tokens_to_key(&mut normalize_tokens(mapped)),
@@ -418,12 +460,15 @@ pub fn canonicalize(content: &str, graph: &Graph) -> Result<CanonicalizeResult, 
     }
 }
 #[cfg(test)]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::GraphSnapshot;
 
     /// Fixture STEM table (`scripts/gen-fixtures.py`, probe-verified against this
-    /// module's stemmer — Porter English). `(word, expected stem)`.
+    /// module's stemmer — Snowball English, Porter2). `(word, expected stem)`.
     const STEM: &[(&str, &str)] = &[
         ("registering", "regist"),
         ("register", "regist"),
@@ -530,7 +575,8 @@ mod tests {
     }
 
     /// Like [`graph_with_concept`], but with an arbitrary JSON concept type —
-    /// GRAPH-1's regression needs an Observation-carrying graph.
+    /// the never-match-Observations regression needs an Observation-carrying
+    /// graph.
     fn graph_with_concept_typed(canonical_key: &str, concept_type: &str) -> Graph {
         let snap: GraphSnapshot = serde_json::from_value(serde_json::json!({
             "session_id": "test-session",
@@ -624,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn porter_stems_match_fixture_stem_table() {
+    fn snowball_stems_match_fixture_stem_table() {
         for (word, expected) in STEM {
             assert_eq!(STEMMER.stem(word), *expected, "stem of {word:?}");
         }
@@ -674,10 +720,10 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // GRAPH-9 — Unicode NFC
+    // Unicode NFC
     // ------------------------------------------------------------------
 
-    /// GRAPH-9: composed (NFC) and decomposed (NFD) spellings of the same word
+    /// Composed (NFC) and decomposed (NFD) spellings of the same word
     /// must produce the same canonical key — and therefore resolve to the same
     /// concept — instead of two concepts canonicalization can never merge.
     #[test]
@@ -711,7 +757,7 @@ mod tests {
         );
     }
 
-    /// **R1-2(a), the pin.** The reviewer's reproduction: a ZWJ inside a token
+    /// **The pin.** The reviewer's reproduction: a ZWJ inside a token
     /// used to survive NFC, defeat the stemmer and yield an unrelated key —
     /// `"billing retries change"` → `"bill chang retri"` but
     /// `"billing\u{200D} retries change"` → `"billing\u{200d} chang retri"`.
@@ -899,7 +945,7 @@ mod tests {
         }
     }
 
-    /// GRAPH-9: pure ASCII is a fixed point of NFC, so no pinned key moves.
+    /// Pure ASCII is a fixed point of NFC, so no pinned key moves.
     #[test]
     fn ascii_canonical_keys_are_unchanged_by_nfc() {
         for input in [
@@ -922,7 +968,7 @@ mod tests {
     #[cfg(feature = "fixtures")]
     #[test]
     fn nfc_leaves_every_pinned_canonicalization_case_unchanged() {
-        // The frozen cases table is the contract (module docs); GRAPH-9 must be
+        // The frozen cases table is the contract (module docs); NFC must be
         // invisible to it. `canonicalization_cases` is ASCII throughout.
         let cases = crate::fixtures::load_canonicalization_cases().unwrap();
         let cases = cases.as_array().expect("cases table is a JSON array");
@@ -992,11 +1038,10 @@ mod tests {
 
     #[test]
     fn canonicalize_never_matches_observations() {
-        // GRAPH-1: demote creates Observations that may legally carry the same
-        // canonical key as agent-declared content (partial-UNIQUE errata,
-        // muse-spark M1-M2). The step-5 matcher must skip them — new agent
-        // content must never attach to a context-overflow record (spec §7
-        // demote semantics).
+        // Demote creates Observations that may legally carry the same
+        // canonical key as agent-declared content (partial-UNIQUE errata).
+        // The step-5 matcher must skip them — new agent content must never
+        // attach to a context-overflow record (spec §7 demote semantics).
         let g = graph_with_concept_typed("schema user", "Observation");
         match canonicalize("UserSchema", &g).unwrap() {
             CanonicalizeResult::Matched { .. } => panic!("Observation must not match"),
@@ -1153,5 +1198,45 @@ mod tests {
             canonical_key("registering users", no_synonym),
             legacy_canonical_key("registering users", no_synonym)
         );
+    }
+
+    /// #301, item 1: Snowball English stems `''s` to the empty string, and an
+    /// empty stem must not reach the key. Mirrors the Lean theorems
+    /// `Canonical.issue301_fixed` (`''s-lease` keys as `leas`, the name
+    /// `''s ''s` keys as the empty key and is refused), `Canonical.keyF_tidy`
+    /// (a key never has a leading, trailing or doubled space) and
+    /// `Canonical.keyF_eq_key` (a key without an empty stem is unchanged);
+    /// `Canonical.empty_stem_key` pins the previous behaviour.
+    #[test]
+    fn empty_stems_are_dropped_from_keys() {
+        assert_eq!(
+            STEMMER.stem("''s"),
+            "",
+            "the stemmer still yields an empty stem"
+        );
+        assert_eq!(normalize_tokens("''s-lease"), vec!["leas"]);
+        assert_eq!(canonical_key("''s-lease", no_synonym), "leas");
+        assert_eq!(
+            canonical_key("''s-lease", no_synonym),
+            canonical_key("lease", no_synonym)
+        );
+        assert_eq!(canonical_key("''s ''s", no_synonym), "");
+        assert_eq!(crate::graph::names::name_key("''s-lease").unwrap(), "leas");
+        assert!(crate::graph::names::name_key("''s ''s").is_err());
+        for text in ["''s-lease", "lease ''s writer", "''s ''s", "writer-''s"] {
+            let key = canonical_key(text, no_synonym);
+            assert!(
+                !key.starts_with(' ') && !key.ends_with(' ') && !key.contains("  "),
+                "{text:?} keys as {key:?}"
+            );
+        }
+        // A key without an empty stem is unchanged.
+        assert_eq!(
+            canonical_key("single-writer-lease", no_synonym),
+            "leas singl writer"
+        );
+        // The pre-#148 rule describes what earlier builds wrote, empty stems
+        // included, so the provision re-key still recognises such a row.
+        assert_eq!(legacy_canonical_key("''s-lease", no_synonym), " leas");
     }
 }

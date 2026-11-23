@@ -1,0 +1,1804 @@
+{
+  "version": 2,
+  "session": "lambo",
+  "at": "2026-11-22T11:32:30Z",
+  "concepts": 2743,
+  "interactions": 1077,
+  "edges": 7299,
+  "survival_raised": 0,
+  "rows_after_clock": {
+    "interactions": 0,
+    "edges": 0,
+    "demotions": 0
+  },
+  "source": {
+    "path": "store.db",
+    "sha256_before": "479202c21b0670d1a9d52be1222cac6e260cf7326167338c87b9b02e7c52f04a",
+    "sha256_after": "479202c21b0670d1a9d52be1222cac6e260cf7326167338c87b9b02e7c52f04a",
+    "lease_present": true,
+    "lease_token": 7,
+    "lease_live_at_clock": true,
+    "unconsumed_intents": 0
+  },
+  "policies": [
+    {
+      "policy": "Swarm",
+      "start": {
+        "Candidate": {
+          "Constraint": 147,
+          "Entity": 23,
+          "Logic": 121,
+          "Observation": 9,
+          "Resource": 144
+        },
+        "Canonical": {
+          "Logic": 5
+        },
+        "None": {
+          "Constraint": 99,
+          "Entity": 238,
+          "Logic": 664,
+          "Observation": 257,
+          "Resource": 1021
+        },
+        "Venerable": {
+          "Constraint": 1,
+          "Entity": 1,
+          "Logic": 2,
+          "Observation": 1,
+          "Resource": 10
+        }
+      },
+      "first_evaluation": {
+        "eligible": {},
+        "unmet": {
+          "Candidate->Venerable stage2/coverage": 442,
+          "Candidate->Venerable stage2/distinct_interactions": 410,
+          "None->Candidate stage1/dependent_interactions": 2259,
+          "None->Candidate stage1/gc_survived": 94,
+          "Venerable->Canonical stage2/coverage": 6,
+          "Venerable->Canonical stage2/distinct_interactions": 7,
+          "Venerable->Canonical stage3/blast_radius": 15
+        },
+        "one_gate_away": {
+          "Candidate->Venerable stage2/coverage": {
+            "total": 34,
+            "resource": 2,
+            "by_type": {
+              "Constraint": 5,
+              "Entity": 4,
+              "Logic": 18,
+              "Observation": 5,
+              "Resource": 2
+            }
+          },
+          "Candidate->Venerable stage2/distinct_interactions": {
+            "total": 2,
+            "resource": 2,
+            "by_type": {
+              "Resource": 2
+            }
+          },
+          "None->Candidate stage1/dependent_interactions": {
+            "total": 358,
+            "resource": 56,
+            "by_type": {
+              "Constraint": 15,
+              "Entity": 231,
+              "Logic": 40,
+              "Observation": 16,
+              "Resource": 56
+            }
+          },
+          "None->Candidate stage1/gc_survived": {
+            "total": 20,
+            "resource": 0,
+            "by_type": {
+              "Logic": 13,
+              "Observation": 7
+            }
+          },
+          "Venerable->Canonical stage3/blast_radius": {
+            "total": 8,
+            "resource": 4,
+            "by_type": {
+              "Constraint": 1,
+              "Logic": 2,
+              "Observation": 1,
+              "Resource": 4
+            }
+          }
+        },
+        "one_gate_away_top": [
+          {
+            "id": "2601f5a1-e35a-41a9-b135-bd82b92fd65f",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 17,
+            "distinct": 16,
+            "coverage": 0.08375184027777778,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4d78c6e2-b4f8-487c-9c07-6286e0e0787d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 8,
+            "distinct": 8,
+            "coverage": 0.029979365079365078,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "967b80a1-91b9-8281-a6fa-00edca83a292",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 7,
+            "distinct": 5,
+            "coverage": 0.0017767584325396825,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "290ef2ff-dbb3-406a-b176-045558c8cd36",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.02261791832010582,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "45143ace-fe1e-473a-8ee0-49f44f1e9888",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.01529360367063492,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "0130e296-ea59-47c0-b41c-de77a2811213",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.015053077876984127,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "04eb3f21-85af-4f26-b6e4-3bb618b8d51d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.0021707184193121695,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "14bb4172-2b75-4ec2-80d3-af9b0565c1dc",
+            "concept_type": "Logic",
+            "status": "None",
+            "next": "Candidate",
+            "dependents": 5,
+            "unmet": [
+              "stage1/gc_survived"
+            ]
+          },
+          {
+            "id": "383b3543-bb8b-8e8b-b92a-927cca6aefb0",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 4,
+            "coverage": 0.01372984375,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "6c1285b7-d832-4a78-a530-086e7b0551fc",
+            "concept_type": "Logic",
+            "status": "Venerable",
+            "next": "Canonical",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.8503696957671958,
+            "unmet": [
+              "stage3/blast_radius"
+            ]
+          },
+          {
+            "id": "6c9579da-1144-893a-b9c4-aa04726a6ab0",
+            "concept_type": "Constraint",
+            "status": "Venerable",
+            "next": "Canonical",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.5971792898478836,
+            "unmet": [
+              "stage3/blast_radius"
+            ]
+          },
+          {
+            "id": "7e3302c4-d6dc-4a70-8078-a7e6f5c74b2e",
+            "concept_type": "Logic",
+            "status": "None",
+            "next": "Candidate",
+            "dependents": 5,
+            "unmet": [
+              "stage1/gc_survived"
+            ]
+          },
+          {
+            "id": "88999482-44c0-4850-88b5-572a88c07b21",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.0021707184193121695,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "92d7abcb-df7c-4a1d-8f18-6cdffd621d37",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.015730696924603174,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "9f4b8fc7-57b9-8e19-84d5-3af90a5d99dd",
+            "concept_type": "Resource",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.07973903852513227,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "48e1c9c9-28c2-8469-8b6f-3a8d2c6c6d21",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.021596750165343917,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4dd576a3-c3cb-41e9-a765-6bba819f04b2",
+            "concept_type": "Observation",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 4,
+            "coverage": 0.0025812632275132273,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "52488d33-60cb-86e2-94c4-46ed5efea0bd",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.0017220552248677248,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "6ccf6286-c807-475d-88f6-940baadee9a5",
+            "concept_type": "Logic",
+            "status": "None",
+            "next": "Candidate",
+            "dependents": 4,
+            "unmet": [
+              "stage1/gc_survived"
+            ]
+          },
+          {
+            "id": "6e1f8505-8ccd-4843-984b-fa84f55c010b",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.016089534556878306,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          }
+        ],
+        "load_bearing": [
+          {
+            "id": "2601f5a1-e35a-41a9-b135-bd82b92fd65f",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 17,
+            "distinct": 16,
+            "coverage": 0.08375184027777778,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4d78c6e2-b4f8-487c-9c07-6286e0e0787d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 8,
+            "distinct": 8,
+            "coverage": 0.029979365079365078,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "967b80a1-91b9-8281-a6fa-00edca83a292",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 7,
+            "distinct": 5,
+            "coverage": 0.0017767584325396825,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "290ef2ff-dbb3-406a-b176-045558c8cd36",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.02261791832010582,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "45143ace-fe1e-473a-8ee0-49f44f1e9888",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.01529360367063492,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          }
+        ],
+        "load_bearing_total": 5
+      },
+      "cycles": 30,
+      "stop": "fixed_point",
+      "quiet_needed": 30,
+      "budget_saturated": false,
+      "first_cycle": {},
+      "hops": {},
+      "reached": {},
+      "demoted": {
+        "total": 0,
+        "resource": 0,
+        "by_type": {}
+      },
+      "end": {
+        "Candidate": {
+          "Constraint": 147,
+          "Entity": 23,
+          "Logic": 121,
+          "Observation": 9,
+          "Resource": 144
+        },
+        "Canonical": {
+          "Logic": 5
+        },
+        "None": {
+          "Constraint": 99,
+          "Entity": 238,
+          "Logic": 664,
+          "Observation": 257,
+          "Resource": 1021
+        },
+        "Venerable": {
+          "Constraint": 1,
+          "Entity": 1,
+          "Logic": 2,
+          "Observation": 1,
+          "Resource": 10
+        }
+      },
+      "fixed_point": {
+        "eligible": {},
+        "unmet": {
+          "Candidate->Venerable stage2/coverage": 442,
+          "Candidate->Venerable stage2/distinct_interactions": 410,
+          "None->Candidate stage1/dependent_interactions": 2259,
+          "None->Candidate stage1/gc_survived": 94,
+          "Venerable->Canonical stage2/coverage": 6,
+          "Venerable->Canonical stage2/distinct_interactions": 7,
+          "Venerable->Canonical stage3/blast_radius": 15
+        },
+        "one_gate_away": {
+          "Candidate->Venerable stage2/coverage": {
+            "total": 34,
+            "resource": 2,
+            "by_type": {
+              "Constraint": 5,
+              "Entity": 4,
+              "Logic": 18,
+              "Observation": 5,
+              "Resource": 2
+            }
+          },
+          "Candidate->Venerable stage2/distinct_interactions": {
+            "total": 2,
+            "resource": 2,
+            "by_type": {
+              "Resource": 2
+            }
+          },
+          "None->Candidate stage1/dependent_interactions": {
+            "total": 358,
+            "resource": 56,
+            "by_type": {
+              "Constraint": 15,
+              "Entity": 231,
+              "Logic": 40,
+              "Observation": 16,
+              "Resource": 56
+            }
+          },
+          "None->Candidate stage1/gc_survived": {
+            "total": 20,
+            "resource": 0,
+            "by_type": {
+              "Logic": 13,
+              "Observation": 7
+            }
+          },
+          "Venerable->Canonical stage3/blast_radius": {
+            "total": 8,
+            "resource": 4,
+            "by_type": {
+              "Constraint": 1,
+              "Logic": 2,
+              "Observation": 1,
+              "Resource": 4
+            }
+          }
+        },
+        "one_gate_away_top": [
+          {
+            "id": "2601f5a1-e35a-41a9-b135-bd82b92fd65f",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 17,
+            "distinct": 16,
+            "coverage": 0.08375184027777778,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4d78c6e2-b4f8-487c-9c07-6286e0e0787d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 8,
+            "distinct": 8,
+            "coverage": 0.029979365079365078,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "967b80a1-91b9-8281-a6fa-00edca83a292",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 7,
+            "distinct": 5,
+            "coverage": 0.0017767584325396825,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "290ef2ff-dbb3-406a-b176-045558c8cd36",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.02261791832010582,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "45143ace-fe1e-473a-8ee0-49f44f1e9888",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.01529360367063492,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "0130e296-ea59-47c0-b41c-de77a2811213",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.015053077876984127,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "04eb3f21-85af-4f26-b6e4-3bb618b8d51d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.0021707184193121695,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "14bb4172-2b75-4ec2-80d3-af9b0565c1dc",
+            "concept_type": "Logic",
+            "status": "None",
+            "next": "Candidate",
+            "dependents": 5,
+            "unmet": [
+              "stage1/gc_survived"
+            ]
+          },
+          {
+            "id": "383b3543-bb8b-8e8b-b92a-927cca6aefb0",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 4,
+            "coverage": 0.01372984375,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "6c1285b7-d832-4a78-a530-086e7b0551fc",
+            "concept_type": "Logic",
+            "status": "Venerable",
+            "next": "Canonical",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.8503696957671958,
+            "unmet": [
+              "stage3/blast_radius"
+            ]
+          },
+          {
+            "id": "6c9579da-1144-893a-b9c4-aa04726a6ab0",
+            "concept_type": "Constraint",
+            "status": "Venerable",
+            "next": "Canonical",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.5971792898478836,
+            "unmet": [
+              "stage3/blast_radius"
+            ]
+          },
+          {
+            "id": "7e3302c4-d6dc-4a70-8078-a7e6f5c74b2e",
+            "concept_type": "Logic",
+            "status": "None",
+            "next": "Candidate",
+            "dependents": 5,
+            "unmet": [
+              "stage1/gc_survived"
+            ]
+          },
+          {
+            "id": "88999482-44c0-4850-88b5-572a88c07b21",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.0021707184193121695,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "92d7abcb-df7c-4a1d-8f18-6cdffd621d37",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.015730696924603174,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "9f4b8fc7-57b9-8e19-84d5-3af90a5d99dd",
+            "concept_type": "Resource",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.07973903852513227,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "48e1c9c9-28c2-8469-8b6f-3a8d2c6c6d21",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.021596750165343917,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4dd576a3-c3cb-41e9-a765-6bba819f04b2",
+            "concept_type": "Observation",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 4,
+            "coverage": 0.0025812632275132273,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "52488d33-60cb-86e2-94c4-46ed5efea0bd",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.0017220552248677248,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "6ccf6286-c807-475d-88f6-940baadee9a5",
+            "concept_type": "Logic",
+            "status": "None",
+            "next": "Candidate",
+            "dependents": 4,
+            "unmet": [
+              "stage1/gc_survived"
+            ]
+          },
+          {
+            "id": "6e1f8505-8ccd-4843-984b-fa84f55c010b",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.016089534556878306,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          }
+        ],
+        "load_bearing": [
+          {
+            "id": "2601f5a1-e35a-41a9-b135-bd82b92fd65f",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 17,
+            "distinct": 16,
+            "coverage": 0.08375184027777778,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4d78c6e2-b4f8-487c-9c07-6286e0e0787d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 8,
+            "distinct": 8,
+            "coverage": 0.029979365079365078,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "967b80a1-91b9-8281-a6fa-00edca83a292",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 7,
+            "distinct": 5,
+            "coverage": 0.0017767584325396825,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "290ef2ff-dbb3-406a-b176-045558c8cd36",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.02261791832010582,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "45143ace-fe1e-473a-8ee0-49f44f1e9888",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.01529360367063492,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          }
+        ],
+        "load_bearing_total": 5
+      },
+      "canonical": [
+        {
+          "id": "f586c6c0-c615-4ca6-a1d3-ccadf709be91",
+          "concept_type": "Logic",
+          "status": "Canonical",
+          "dependents": 21,
+          "distinct": 18,
+          "coverage": 0.8947749049272486
+        },
+        {
+          "id": "ca2cb7d7-daab-4041-baff-d80b3679076c",
+          "concept_type": "Logic",
+          "status": "Canonical",
+          "dependents": 13,
+          "distinct": 13,
+          "coverage": 0.3995003480489418
+        },
+        {
+          "id": "db60cb86-86a1-414d-b967-4e2fa4efb595",
+          "concept_type": "Logic",
+          "status": "Canonical",
+          "dependents": 11,
+          "distinct": 11,
+          "coverage": 0.9105546279761905
+        },
+        {
+          "id": "341fdd9c-6c77-49fa-a0c1-c8b6e5364f19",
+          "concept_type": "Logic",
+          "status": "Canonical",
+          "dependents": 9,
+          "distinct": 8,
+          "coverage": 0.8632683060515873
+        },
+        {
+          "id": "b853d1aa-b6a3-4003-b5ac-f0bced9f39ab",
+          "concept_type": "Logic",
+          "status": "Canonical",
+          "dependents": 7,
+          "distinct": 7,
+          "coverage": 0.37113002645502646
+        }
+      ],
+      "canonical_total": 5,
+      "canonical_ids": [
+        "341fdd9c-6c77-49fa-a0c1-c8b6e5364f19",
+        "b853d1aa-b6a3-4003-b5ac-f0bced9f39ab",
+        "ca2cb7d7-daab-4041-baff-d80b3679076c",
+        "db60cb86-86a1-414d-b967-4e2fa4efb595",
+        "f586c6c0-c615-4ca6-a1d3-ccadf709be91"
+      ],
+      "invariants": [
+        {
+          "name": "fixed_point",
+          "held": true,
+          "detail": "30 cycles, 30 quiet cycles needed"
+        },
+        {
+          "name": "one_legal_hop_per_cycle",
+          "held": true,
+          "detail": ""
+        },
+        {
+          "name": "canonical_within_budget",
+          "held": true,
+          "detail": "5 of 1000"
+        },
+        {
+          "name": "promoted_canonicals_hold_stage2_and_stage3",
+          "held": true,
+          "detail": ""
+        },
+        {
+          "name": "nothing_eligible_at_the_stop",
+          "held": true,
+          "detail": "0 concepts explained eligible"
+        },
+        {
+          "name": "graph_invariants",
+          "held": true,
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "policy": "Solo",
+      "start": {
+        "Candidate": {
+          "Constraint": 147,
+          "Entity": 23,
+          "Logic": 121,
+          "Observation": 9,
+          "Resource": 144
+        },
+        "Canonical": {
+          "Logic": 5
+        },
+        "None": {
+          "Constraint": 99,
+          "Entity": 238,
+          "Logic": 664,
+          "Observation": 257,
+          "Resource": 1021
+        },
+        "Venerable": {
+          "Constraint": 1,
+          "Entity": 1,
+          "Logic": 2,
+          "Observation": 1,
+          "Resource": 10
+        }
+      },
+      "first_evaluation": {
+        "eligible": {
+          "None->Candidate": {
+            "total": 149,
+            "resource": 53,
+            "by_type": {
+              "Constraint": 13,
+              "Entity": 19,
+              "Logic": 57,
+              "Observation": 7,
+              "Resource": 53
+            }
+          }
+        },
+        "unmet": {
+          "Candidate->Venerable stage2/coverage": 442,
+          "Candidate->Venerable stage2/distinct_interactions": 410,
+          "Candidate->Venerable stage2/solo_score": 383,
+          "None->Candidate stage1/solo_score": 2130,
+          "Venerable->Canonical stage2/coverage": 6,
+          "Venerable->Canonical stage2/distinct_interactions": 7,
+          "Venerable->Canonical stage3/blast_radius": 15,
+          "Venerable->Canonical stage3/solo_score": 13
+        },
+        "one_gate_away": {
+          "Candidate->Venerable stage2/coverage": {
+            "total": 32,
+            "resource": 2,
+            "by_type": {
+              "Constraint": 5,
+              "Entity": 4,
+              "Logic": 18,
+              "Observation": 3,
+              "Resource": 2
+            }
+          },
+          "Candidate->Venerable stage2/distinct_interactions": {
+            "total": 2,
+            "resource": 2,
+            "by_type": {
+              "Resource": 2
+            }
+          },
+          "None->Candidate stage1/solo_score": {
+            "total": 242,
+            "resource": 5,
+            "by_type": {
+              "Constraint": 2,
+              "Entity": 212,
+              "Logic": 3,
+              "Observation": 20,
+              "Resource": 5
+            }
+          },
+          "Venerable->Canonical stage3/blast_radius": {
+            "total": 2,
+            "resource": 0,
+            "by_type": {
+              "Constraint": 1,
+              "Logic": 1
+            }
+          }
+        },
+        "one_gate_away_top": [
+          {
+            "id": "2601f5a1-e35a-41a9-b135-bd82b92fd65f",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 17,
+            "distinct": 16,
+            "coverage": 0.08375184027777778,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4d78c6e2-b4f8-487c-9c07-6286e0e0787d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 8,
+            "distinct": 8,
+            "coverage": 0.029979365079365078,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "967b80a1-91b9-8281-a6fa-00edca83a292",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 7,
+            "distinct": 5,
+            "coverage": 0.0017767584325396825,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "290ef2ff-dbb3-406a-b176-045558c8cd36",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.02261791832010582,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "45143ace-fe1e-473a-8ee0-49f44f1e9888",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.01529360367063492,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "0130e296-ea59-47c0-b41c-de77a2811213",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.015053077876984127,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "04eb3f21-85af-4f26-b6e4-3bb618b8d51d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.0021707184193121695,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "383b3543-bb8b-8e8b-b92a-927cca6aefb0",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 4,
+            "coverage": 0.01372984375,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "6c1285b7-d832-4a78-a530-086e7b0551fc",
+            "concept_type": "Logic",
+            "status": "Venerable",
+            "next": "Canonical",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.8503696957671958,
+            "unmet": [
+              "stage3/blast_radius"
+            ]
+          },
+          {
+            "id": "6c9579da-1144-893a-b9c4-aa04726a6ab0",
+            "concept_type": "Constraint",
+            "status": "Venerable",
+            "next": "Canonical",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.5971792898478836,
+            "unmet": [
+              "stage3/blast_radius"
+            ]
+          },
+          {
+            "id": "88999482-44c0-4850-88b5-572a88c07b21",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.0021707184193121695,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "92d7abcb-df7c-4a1d-8f18-6cdffd621d37",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.015730696924603174,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "9f4b8fc7-57b9-8e19-84d5-3af90a5d99dd",
+            "concept_type": "Resource",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.07973903852513227,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "48e1c9c9-28c2-8469-8b6f-3a8d2c6c6d21",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.021596750165343917,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4dd576a3-c3cb-41e9-a765-6bba819f04b2",
+            "concept_type": "Observation",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 4,
+            "coverage": 0.0025812632275132273,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "52488d33-60cb-86e2-94c4-46ed5efea0bd",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.0017220552248677248,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "6e1f8505-8ccd-4843-984b-fa84f55c010b",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.016089534556878306,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "721c33b5-0035-415b-94e5-8cdafef77aae",
+            "concept_type": "Observation",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 4,
+            "coverage": 0.028381690641534393,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "a9bacb4c-cd5d-8f45-ad4e-4445ec58fa74",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.004016249173280423,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "aad78306-5fb9-4d9d-ba57-f93a552ece51",
+            "concept_type": "Observation",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 4,
+            "coverage": 0.028381690641534393,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          }
+        ],
+        "load_bearing": [
+          {
+            "id": "2601f5a1-e35a-41a9-b135-bd82b92fd65f",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 17,
+            "distinct": 16,
+            "coverage": 0.08375184027777778,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4d78c6e2-b4f8-487c-9c07-6286e0e0787d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 8,
+            "distinct": 8,
+            "coverage": 0.029979365079365078,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "967b80a1-91b9-8281-a6fa-00edca83a292",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 7,
+            "distinct": 5,
+            "coverage": 0.0017767584325396825,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "290ef2ff-dbb3-406a-b176-045558c8cd36",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.02261791832010582,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "45143ace-fe1e-473a-8ee0-49f44f1e9888",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.01529360367063492,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          }
+        ],
+        "load_bearing_total": 5
+      },
+      "cycles": 33,
+      "stop": "fixed_point",
+      "quiet_needed": 30,
+      "budget_saturated": false,
+      "first_cycle": {
+        "None->Candidate Resource": 5,
+        "None->Candidate non-Resource": 45
+      },
+      "hops": {
+        "None->Candidate Resource": 53,
+        "None->Candidate non-Resource": 96
+      },
+      "reached": {
+        "Candidate": {
+          "total": 149,
+          "resource": 53,
+          "by_type": {
+            "Constraint": 13,
+            "Entity": 19,
+            "Logic": 57,
+            "Observation": 7,
+            "Resource": 53
+          }
+        }
+      },
+      "demoted": {
+        "total": 0,
+        "resource": 0,
+        "by_type": {}
+      },
+      "end": {
+        "Candidate": {
+          "Constraint": 160,
+          "Entity": 42,
+          "Logic": 178,
+          "Observation": 16,
+          "Resource": 197
+        },
+        "Canonical": {
+          "Logic": 5
+        },
+        "None": {
+          "Constraint": 86,
+          "Entity": 219,
+          "Logic": 607,
+          "Observation": 250,
+          "Resource": 968
+        },
+        "Venerable": {
+          "Constraint": 1,
+          "Entity": 1,
+          "Logic": 2,
+          "Observation": 1,
+          "Resource": 10
+        }
+      },
+      "fixed_point": {
+        "eligible": {},
+        "unmet": {
+          "Candidate->Venerable stage2/coverage": 591,
+          "Candidate->Venerable stage2/distinct_interactions": 552,
+          "Candidate->Venerable stage2/solo_score": 525,
+          "None->Candidate stage1/solo_score": 2130,
+          "Venerable->Canonical stage2/coverage": 6,
+          "Venerable->Canonical stage2/distinct_interactions": 7,
+          "Venerable->Canonical stage3/blast_radius": 15,
+          "Venerable->Canonical stage3/solo_score": 13
+        },
+        "one_gate_away": {
+          "Candidate->Venerable stage2/coverage": {
+            "total": 38,
+            "resource": 2,
+            "by_type": {
+              "Constraint": 5,
+              "Entity": 4,
+              "Logic": 24,
+              "Observation": 3,
+              "Resource": 2
+            }
+          },
+          "Candidate->Venerable stage2/distinct_interactions": {
+            "total": 2,
+            "resource": 2,
+            "by_type": {
+              "Resource": 2
+            }
+          },
+          "None->Candidate stage1/solo_score": {
+            "total": 242,
+            "resource": 5,
+            "by_type": {
+              "Constraint": 2,
+              "Entity": 212,
+              "Logic": 3,
+              "Observation": 20,
+              "Resource": 5
+            }
+          },
+          "Venerable->Canonical stage3/blast_radius": {
+            "total": 2,
+            "resource": 0,
+            "by_type": {
+              "Constraint": 1,
+              "Logic": 1
+            }
+          }
+        },
+        "one_gate_away_top": [
+          {
+            "id": "2601f5a1-e35a-41a9-b135-bd82b92fd65f",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 17,
+            "distinct": 16,
+            "coverage": 0.08375184027777778,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4d78c6e2-b4f8-487c-9c07-6286e0e0787d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 8,
+            "distinct": 8,
+            "coverage": 0.029979365079365078,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "967b80a1-91b9-8281-a6fa-00edca83a292",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 7,
+            "distinct": 5,
+            "coverage": 0.0017767584325396825,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "290ef2ff-dbb3-406a-b176-045558c8cd36",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.02261791832010582,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "45143ace-fe1e-473a-8ee0-49f44f1e9888",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.01529360367063492,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "0130e296-ea59-47c0-b41c-de77a2811213",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.015053077876984127,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "04eb3f21-85af-4f26-b6e4-3bb618b8d51d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.0021707184193121695,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "14bb4172-2b75-4ec2-80d3-af9b0565c1dc",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.0019585267857142857,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "383b3543-bb8b-8e8b-b92a-927cca6aefb0",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 4,
+            "coverage": 0.01372984375,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "6c1285b7-d832-4a78-a530-086e7b0551fc",
+            "concept_type": "Logic",
+            "status": "Venerable",
+            "next": "Canonical",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.8503696957671958,
+            "unmet": [
+              "stage3/blast_radius"
+            ]
+          },
+          {
+            "id": "6c9579da-1144-893a-b9c4-aa04726a6ab0",
+            "concept_type": "Constraint",
+            "status": "Venerable",
+            "next": "Canonical",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.5971792898478836,
+            "unmet": [
+              "stage3/blast_radius"
+            ]
+          },
+          {
+            "id": "7e3302c4-d6dc-4a70-8078-a7e6f5c74b2e",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.016316452546296295,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "88999482-44c0-4850-88b5-572a88c07b21",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.0021707184193121695,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "92d7abcb-df7c-4a1d-8f18-6cdffd621d37",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.015730696924603174,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "9f4b8fc7-57b9-8e19-84d5-3af90a5d99dd",
+            "concept_type": "Resource",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 5,
+            "distinct": 5,
+            "coverage": 0.07973903852513227,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "48e1c9c9-28c2-8469-8b6f-3a8d2c6c6d21",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.021596750165343917,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4dd576a3-c3cb-41e9-a765-6bba819f04b2",
+            "concept_type": "Observation",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 4,
+            "coverage": 0.0025812632275132273,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "52488d33-60cb-86e2-94c4-46ed5efea0bd",
+            "concept_type": "Entity",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.0017220552248677248,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "6ccf6286-c807-475d-88f6-940baadee9a5",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 4,
+            "coverage": 0.0004682423941798942,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "6e1f8505-8ccd-4843-984b-fa84f55c010b",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 4,
+            "distinct": 3,
+            "coverage": 0.016089534556878306,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          }
+        ],
+        "load_bearing": [
+          {
+            "id": "2601f5a1-e35a-41a9-b135-bd82b92fd65f",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 17,
+            "distinct": 16,
+            "coverage": 0.08375184027777778,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "4d78c6e2-b4f8-487c-9c07-6286e0e0787d",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 8,
+            "distinct": 8,
+            "coverage": 0.029979365079365078,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "967b80a1-91b9-8281-a6fa-00edca83a292",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 7,
+            "distinct": 5,
+            "coverage": 0.0017767584325396825,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "290ef2ff-dbb3-406a-b176-045558c8cd36",
+            "concept_type": "Logic",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.02261791832010582,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          },
+          {
+            "id": "45143ace-fe1e-473a-8ee0-49f44f1e9888",
+            "concept_type": "Constraint",
+            "status": "Candidate",
+            "next": "Venerable",
+            "dependents": 6,
+            "distinct": 6,
+            "coverage": 0.01529360367063492,
+            "unmet": [
+              "stage2/coverage"
+            ]
+          }
+        ],
+        "load_bearing_total": 5
+      },
+      "canonical": [
+        {
+          "id": "f586c6c0-c615-4ca6-a1d3-ccadf709be91",
+          "concept_type": "Logic",
+          "status": "Canonical",
+          "dependents": 21,
+          "distinct": 18,
+          "coverage": 0.8947749049272486
+        },
+        {
+          "id": "ca2cb7d7-daab-4041-baff-d80b3679076c",
+          "concept_type": "Logic",
+          "status": "Canonical",
+          "dependents": 13,
+          "distinct": 13,
+          "coverage": 0.3995003480489418
+        },
+        {
+          "id": "db60cb86-86a1-414d-b967-4e2fa4efb595",
+          "concept_type": "Logic",
+          "status": "Canonical",
+          "dependents": 11,
+          "distinct": 11,
+          "coverage": 0.9105546279761905
+        },
+        {
+          "id": "341fdd9c-6c77-49fa-a0c1-c8b6e5364f19",
+          "concept_type": "Logic",
+          "status": "Canonical",
+          "dependents": 9,
+          "distinct": 8,
+          "coverage": 0.8632683060515873
+        },
+        {
+          "id": "b853d1aa-b6a3-4003-b5ac-f0bced9f39ab",
+          "concept_type": "Logic",
+          "status": "Canonical",
+          "dependents": 7,
+          "distinct": 7,
+          "coverage": 0.37113002645502646
+        }
+      ],
+      "canonical_total": 5,
+      "canonical_ids": [
+        "341fdd9c-6c77-49fa-a0c1-c8b6e5364f19",
+        "b853d1aa-b6a3-4003-b5ac-f0bced9f39ab",
+        "ca2cb7d7-daab-4041-baff-d80b3679076c",
+        "db60cb86-86a1-414d-b967-4e2fa4efb595",
+        "f586c6c0-c615-4ca6-a1d3-ccadf709be91"
+      ],
+      "invariants": [
+        {
+          "name": "fixed_point",
+          "held": true,
+          "detail": "33 cycles, 30 quiet cycles needed"
+        },
+        {
+          "name": "one_legal_hop_per_cycle",
+          "held": true,
+          "detail": ""
+        },
+        {
+          "name": "canonical_within_budget",
+          "held": true,
+          "detail": "5 of 1000"
+        },
+        {
+          "name": "promoted_canonicals_hold_stage2_and_stage3",
+          "held": true,
+          "detail": ""
+        },
+        {
+          "name": "nothing_eligible_at_the_stop",
+          "held": true,
+          "detail": "0 concepts explained eligible"
+        },
+        {
+          "name": "graph_invariants",
+          "held": true,
+          "detail": ""
+        }
+      ]
+    }
+  ],
+  "invariants": [
+    {
+      "name": "clock_after_the_data",
+      "held": true,
+      "detail": ""
+    },
+    {
+      "name": "scratch_removed",
+      "held": true,
+      "detail": ""
+    },
+    {
+      "name": "source_unchanged",
+      "held": true,
+      "detail": ""
+    }
+  ]
+}

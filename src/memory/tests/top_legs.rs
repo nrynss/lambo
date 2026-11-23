@@ -364,11 +364,12 @@ async fn the_reference_contract_reports_the_two_leg_value_in_either_mode() {
     }
 }
 
-/// A query that is exactly a concept's durable name ranks that concept with
-/// a keyword score of 1.0 (unchanged, per hit). `top_legs.bm25` is the
-/// index's own best BM25, never that sentinel, whether the real score is
-/// above every other match or (in a store where the word is everywhere)
-/// below 1.0; `exact_name_match` reports the name.
+/// A query that is exactly a concept's durable name raises that concept's
+/// per-hit keyword score to at least 1.0: the higher of its BM25 and 1.0
+/// (#288). `top_legs.bm25` is the index's own best BM25, never the 1.0
+/// floor, whether the real score is above every other match or (in a store
+/// where the word is everywhere) below 1.0; `exact_name_match` reports the
+/// name.
 #[tokio::test]
 async fn an_exact_name_query_reports_the_raw_bm25_and_the_match() {
     let raw_best = |mem: &Memory, q: &str| {
@@ -383,7 +384,7 @@ async fn an_exact_name_query_reports_the_raw_bm25_and_the_match() {
     };
 
     // The named concept's real BM25 is the best match: the old fold took
-    // the runner-up, since the named one's slot held 1.0.
+    // the runner-up, since the named one's slot held 1.0 before #288.
     let mem = seeded(
         "top-legs-name",
         &[
@@ -408,12 +409,12 @@ async fn an_exact_name_query_reports_the_raw_bm25_and_the_match() {
         .recall_detailed(query("auth tokens rotate"))
         .await
         .unwrap();
+    let best = raw_best(&mem, "auth tokens rotate");
     assert_eq!(
         named.legs.get(&target).and_then(|l| l.keyword),
-        Some(1.0),
-        "premise: the per-hit keyword leg is the exact-name sentinel, unchanged"
+        Some(best.max(1.0)),
+        "the per-hit keyword leg is raised to at least 1.0, never below its BM25 (#288)"
     );
-    let best = raw_best(&mem, "auth tokens rotate");
     let runner_up = named
         .legs
         .iter()
@@ -435,7 +436,7 @@ async fn an_exact_name_query_reports_the_raw_bm25_and_the_match() {
     assert_keyword_only(&named, best);
     mem.close().await.unwrap();
 
-    // Every concept holds the word, so its BM25 is small: the sentinel
+    // Every concept holds the word, so its BM25 is small: the 1.0 floor
     // would have been reported as a keyword score no concept had.
     let mem = seeded(
         "top-legs-name-small",
@@ -462,7 +463,26 @@ async fn an_exact_name_query_reports_the_raw_bm25_and_the_match() {
     let best = raw_best(&mem, "alpha");
     assert!(
         best < 1.0,
-        "premise: every BM25 is under the sentinel: {best}"
+        "premise: every BM25 is under the 1.0 floor: {best}"
+    );
+    let own = mem
+        .index
+        .read()
+        .search_ranked("alpha")
+        .into_iter()
+        .find(|s| s.item == target)
+        .map(|s| s.score);
+    assert!(
+        own.is_some_and(|s| s < 1.0),
+        "premise: the named concept matched, under the floor: {own:?}"
+    );
+    // Per hit, the named concept takes the floor: max(BM25, 1.0) is 1.0
+    // here: below 1.0, like exactly 1.0 or no hit, the raise and the old
+    // overwrite agree.
+    assert_eq!(
+        named.legs.get(&target).and_then(|l| l.keyword),
+        Some(1.0),
+        "a BM25 under 1.0 is raised to the 1.0 floor (#288)"
     );
     assert_eq!(named.top_legs.bm25, Some(best));
     assert!(named.top_legs.exact_name_match);

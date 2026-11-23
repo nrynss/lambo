@@ -291,9 +291,10 @@ pub fn eligible_pair(g: &Graph, new: &Concept, old: &Concept) -> bool {
 /// never naming a concept in `skip` (the write path passes every concept
 /// the call itself wrote or re-derived). A candidate in `merged` (the write
 /// path passes the tied merge tier `new` merged with) is listed and marked
-/// [`merged`](ReplacementCandidate::merged). Ranked by cosine, then id; at
-/// most [`REPLACEMENT_CANDIDATE_LIMIT`]. Empty when `new` is not a concept
-/// of `g`.
+/// [`merged`](ReplacementCandidate::merged). An id listed more than once
+/// counts once, at its highest cosine. Ranked by cosine, then id; at most
+/// [`REPLACEMENT_CANDIDATE_LIMIT`]. Empty when `new` is not a concept of
+/// `g`.
 pub fn select(
     g: &Graph,
     new: NodeId,
@@ -319,7 +320,15 @@ pub fn select(
         if score < floor {
             continue;
         }
-        if skip.contains(&hit.item) || kept.iter().any(|(c, _)| c.id == hit.item) {
+        if skip.contains(&hit.item) {
+            continue;
+        }
+        // A repeated id keeps its highest score, so the result does not
+        // depend on the order the store returned the hits in. It is kept
+        // only if an earlier occurrence was eligible, and eligibility
+        // depends only on the id.
+        if let Some(entry) = kept.iter_mut().find(|(c, _)| c.id == hit.item) {
+            entry.1 = entry.1.max(score);
             continue;
         }
         if let Some(Node::Concept(old)) = g.node(hit.item)

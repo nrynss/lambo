@@ -12,7 +12,9 @@
 //!   function.
 //! * **No graph lock across `.await`**, and **no `.await` between a completed
 //!   graph write and its settle**, so an aborted worker always means "not
-//!   written".
+//!   written". (Test builds only: a worker waiting at an armed test pause is
+//!   the exception, and `abort_workers` refuses to run then; see
+//!   `test_pause`.)
 //! * **Per-job fence check**: a lane drained after a lost lease refuses each
 //!   job and leaves its durable intent for the session's current holder.
 
@@ -27,8 +29,8 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use super::{
-    model_safe_failure, settle_one, AppliedSummary, Job, JobPayload, ReceiptAnswer, WriteKind,
-    WritePipeline, MAX_RECEIPT_IDS,
+    hold_one, model_safe_failure, settle_one, AppliedSummary, Job, JobPayload, ReceiptAnswer,
+    ReceiptId, WriteKind, WritePipeline, MAX_RECEIPT_IDS,
 };
 use crate::embed::Embedder;
 use crate::graph::action::{record_action_against, Action, ActionEmbeddings};
@@ -69,7 +71,7 @@ pub(crate) struct WriteCtx {
     pub(crate) daemon_wake: Arc<Notify>,
     /// The single-writer fence, shared with the heartbeat and the flush task.
     pub(crate) lease_lost: Arc<AtomicBool>,
-    /// J4. An optional call ledger this pipeline appends durable-intent
+    /// An optional call ledger this pipeline appends durable-intent
     /// **completion** lines to (`applied` / `applied_after_restart` / `failed`
     /// / `deferred`), on the same [`crate::ledger::Ledger::append`] path every
     /// other line rides. `None` for every process run without `--ledger`, and
@@ -115,7 +117,7 @@ pub(super) fn truncate_ids(ids: &[NodeId]) -> Vec<String> {
         .collect()
 }
 
-/// When — and as what — a job's durable intent is consumed at commit (J3).
+/// When — and as what — a job's durable intent is consumed at commit.
 ///
 /// `tag` is `"applied"` when the acking process itself applies the job, and
 /// `"applied_after_restart"` when a later serve replays it. `at` is the
@@ -127,11 +129,54 @@ pub(crate) struct ConsumeStamp {
     pub(super) at: DateTime<Utc>,
 }
 
+/// What the lane worker does at a write's commit, run by [`WriteCtx::run`]
+/// **inside the commit's critical section**, under the graph write lock,
+/// beside the intent's consume ([`WorkerCommit::at_commit`]): it resets
+/// `Lanes::lookup_streak` (#346) and records the write as consumed and not
+/// yet settled (`Graph::mark_consumed_unsettled`, #345). The worker's failure
+/// consume records it too, in its own consume's lock hold.
+///
+/// **The record (#345 re-review).** A worker can panic after its commit and
+/// before its settle; its receipt stays unsettled, and the close sets it
+/// aside. So a dead-lettered receipt is forgotten only once its write
+/// settles (`Graph::settled_write`, in the worker's settle), not at its
+/// consume, and the flush's note skips a put only when its write is consumed
+/// and no longer in the record, that is, settled (Lean:
+/// `Drain.settlePrune_never_vouches_dropped`; pruning at the consume,
+/// `Drain.keptAtConsume_vouches_after_panic`). The replay passes no
+/// `WorkerCommit`: its writes are earlier processes', whose puts are not in
+/// this process's log.
+///
+/// The streak counts first-attempt lookup timeouts "with nothing applied
+/// between", and a write is applied at its commit. Reset there, the commit
+/// and the reset are one step: the commit is visible to no one until the
+/// graph lock is released, after the reset, and a timeout's lanes-lock hold
+/// falls before both or after both. Reset later (the `Ok` arm, or the settle
+/// block before that), a timeout another lane met in between counted toward
+/// the old run (Lean: `Drain.streak_okArm_counts_across_commit`,
+/// `Drain.streak_old_counts_across_commit`; the fix,
+/// `Drain.streakNew_eq_runSince`).
+///
+/// Lock order: graph write, then lanes, as admission nests them
+/// (`WritePipeline::admit`); no path takes the lanes lock and then the
+/// graph's. The replay passes none: its own streak is local to the replay.
+#[derive(Clone)]
+pub(super) struct WorkerCommit(Arc<parking_lot::Mutex<super::Lanes>>);
+
+impl WorkerCommit {
+    /// At the commit of the job with receipt `receipt`, under the graph write
+    /// lock `g` is borrowed from.
+    fn at_commit(&self, g: &mut Graph, receipt: &str) {
+        g.mark_consumed_unsettled(receipt);
+        self.0.lock().lookup_streak = 0;
+    }
+}
+
 /// The receipt sentence for an applied derive — one function, because the
 /// receipt's copy and the durable intent outcome's copy (written inside the
 /// commit lock by the [`hybrid::CommitHook`]) must be the same sentence.
 ///
-/// Applied ≠ embedded (J3-R3-1): only the hybrid strategy can embed, so only
+/// Applied ≠ embedded: only the hybrid strategy can embed, so only
 /// it reports the count — and its sentence carries the number, so a write
 /// applied without its vector is never read as an unqualified success.
 pub(super) fn derive_sentence(
@@ -310,17 +355,22 @@ impl WriteCtx {
     /// Run one job through the ordinary write path.
     ///
     /// `consume`, when present, consumes the job's durable intent **inside the
-    /// same write-lock critical section as the commit** (J3): for the hybrid
+    /// same write-lock critical section as the commit**: for the hybrid
     /// path via [`hybrid::CommitHook`], for the canonical and action paths
     /// inline under the guard the graph write already holds. The flush drain
     /// takes that same lock, so the applied mutations and the
     /// `ConsumeWriteIntent` always travel in one batch — one store
     /// transaction — and a crash can never leave the write durable beside a
     /// still-unconsumed intent (the double-apply this design excludes).
+    ///
+    /// `worker`, when present (the lane worker's), runs in that same critical
+    /// section ([`WorkerCommit`]: the lookup-streak reset, #346, and the
+    /// consumed-unsettled record, #345).
     pub(super) async fn run(
         &self,
         job: &Job,
         consume: Option<ConsumeStamp>,
+        worker: Option<&WorkerCommit>,
     ) -> Result<AppliedSummary, LamboError> {
         match &job.payload {
             JobPayload::Derive {
@@ -378,8 +428,12 @@ impl WriteCtx {
                         let targets = pinned.against.clone();
                         let ctx = self.clone();
                         let destination = job.receipt_destination.clone();
+                        let worker = worker.cloned();
                         let on_commit: Option<hybrid::CommitHook> = Some(Box::new(
                             move |g: &mut Graph, outcome: &crate::graph::derive::DeriveOutcome| {
+                                if let Some(worker) = &worker {
+                                    worker.at_commit(g, &receipt);
+                                }
                                 if let Some(stamp) = consume {
                                     g.consume_write_intent(
                                         receipt,
@@ -427,6 +481,9 @@ impl WriteCtx {
                             pinned,
                         )?;
                         // Same lock hold as the commit — see `run`'s doc.
+                        if let Some(worker) = worker {
+                            worker.at_commit(&mut g, &job.receipt.to_string());
+                        }
                         if let Some(stamp) = consume {
                             g.consume_write_intent(
                                 job.receipt.to_string(),
@@ -524,7 +581,7 @@ impl WriteCtx {
                     // #36 PR 4: an entry that named a concept by id at the
                     // ack must name the same one now. #19(b): so must each
                     // `against` target, re-resolved in the same transaction,
-                    // before the contract is stamped (review L3).
+                    // before the contract is stamped.
                     // Legacy intents' None text slots were deliberately
                     // unpinned. Refresh only those under the commit lock;
                     // their id-shaped slots retain the original ack pins.
@@ -544,6 +601,9 @@ impl WriteCtx {
                         (!embeddings.is_empty()).then(|| self.embedding.clone()),
                     )?;
                     // Same lock hold as the commit — see `run`'s doc.
+                    if let Some(worker) = worker {
+                        worker.at_commit(&mut g, &job.receipt.to_string());
+                    }
                     if let Some(stamp) = consume {
                         g.consume_write_intent(
                             job.receipt.to_string(),
@@ -590,10 +650,120 @@ impl WriteCtx {
     }
 }
 
+/// #295: how long an agent's worker waits, after its oldest held write met
+/// an outage `attempts` times in a row, before it retries that write: one
+/// second, doubling per failed attempt, at most
+/// [`HYBRID_IO_TIMEOUT`](crate::graph::hybrid::HYBRID_IO_TIMEOUT) (30 s).
+/// The wait runs from the end of the failed attempt, and nothing starts a
+/// retry sooner: not a new write of the agent, not a refused one. An attempt
+/// itself can take up to `HYBRID_IO_TIMEOUT`, so a write that never embeds
+/// costs its agent one attempt per cycle of at most 60 s (the wait plus the
+/// attempt); a write that blinked is retried a second later, receipts
+/// waiting on it or not.
+pub(crate) fn held_retry_backoff(attempts: u32) -> std::time::Duration {
+    let first = std::time::Duration::from_secs(1);
+    let max = crate::graph::hybrid::HYBRID_IO_TIMEOUT;
+    first
+        .checked_mul(1u32 << attempts.saturating_sub(1).min(16))
+        .map_or(max, |d| d.min(max))
+}
+
+/// Test-only: wait at `point` if a test armed a pause there (#346), else
+/// return at once without awaiting.
+///
+/// **What it costs.** While a worker waits here, a test build has an
+/// `.await` between a committed graph write and its settle, so the worker's
+/// rule "no `.await` between a completed graph write and its settle"
+/// ("aborted means not written") does not hold for that worker: aborted
+/// there, it would leave a write that applied with an unsettled receipt,
+/// which a close would set aside and answer `intent_durable` or
+/// `close_unflushed`. So `Lanes::test_paused` is set for the wait, and
+/// `WritePipeline::abort_workers` (a close) and `abort_all_sync` (a dropped
+/// `Memory`, unless the test is already panicking) panic while it is set: a
+/// test must notify `resume` before it closes or drops the session. Unarmed (every other test, and
+/// every non-test build, which has no pause at all), nothing here awaits.
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+async fn test_pause(lanes: &parking_lot::Mutex<super::Lanes>, point: super::admission::PausePoint) {
+    let pause = {
+        let mut l = lanes.lock();
+        if l.test_pause.as_ref().is_some_and(|p| p.point == point) {
+            l.test_paused = true;
+            l.test_pause.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        pause.reached.notify_one();
+        pause.resume.notified().await;
+        lanes.lock().test_paused = false;
+    }
+}
+
+/// What the worker does next (one write at a time).
+enum Next {
+    /// Run this write (boxed: a `Job` dwarfs the other variants).
+    Run(Box<Job>),
+    /// A write taken off the queue while its agent has held writes and is
+    /// parked: it joined them, behind, without running.
+    Held(ReceiptId),
+    /// Nothing to run until the agent's retry is due. A new or refused write
+    /// of the agent wakes the worker sooner, but only to hold what it finds
+    /// queued: the retry still waits for this instant.
+    Wait(tokio::time::Instant),
+    Exit,
+}
+
 impl WritePipeline {
-    pub(super) fn spawn_worker(&self, agent: AgentId) -> JoinHandle<()> {
+    /// Test-only (#346): arm a one-shot pause. The next worker whose write
+    /// commits notifies the first `Notify` and waits for the second before
+    /// its settle block. The test must notify `resume` before it closes the
+    /// session: see [`test_pause`].
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn pause_before_settle(&self) -> (Arc<Notify>, Arc<Notify>) {
+        self.arm_test_pause(super::admission::PausePoint::BeforeSettle)
+    }
+
+    /// Test-only (#346): arm a one-shot pause after a write's commit, once
+    /// `WriteCtx::run` has returned and before the worker's `Ok` arm. The
+    /// test must notify `resume` before it closes the session: see
+    /// [`test_pause`].
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn pause_after_commit(&self) -> (Arc<Notify>, Arc<Notify>) {
+        self.arm_test_pause(super::admission::PausePoint::AfterCommit)
+    }
+
+    /// Test-only (#345 review): the next worker whose write commits panics
+    /// right after `WriteCtx::run` returns, before its settle.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn panic_after_commit(&self) {
+        self.lanes.lock().panic_after_commit = true;
+    }
+
+    /// Test-only: whether a worker has taken that panic.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn test_panicked(&self) -> bool {
+        self.lanes.lock().test_panicked
+    }
+
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    fn arm_test_pause(&self, point: super::admission::PausePoint) -> (Arc<Notify>, Arc<Notify>) {
+        let reached = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        self.lanes.lock().test_pause = Some(super::admission::TestPause {
+            point,
+            reached: reached.clone(),
+            resume: resume.clone(),
+        });
+        (reached, resume)
+    }
+
+    /// Spawn `agent`'s lane worker. Called under the lanes lock, so it takes
+    /// its wake-up (`Lanes::wake_for`) from the caller rather than the lock.
+    pub(super) fn spawn_worker(&self, agent: AgentId, wake: Arc<Notify>) -> JoinHandle<()> {
         let ctx = self.ctx.clone();
         let lanes = self.lanes.clone();
+        let worker_commit = WorkerCommit(self.lanes.clone());
         let receipts = self.receipts.clone();
         let counters = self.counters.clone();
         let settled = self.settled.clone();
@@ -602,49 +772,104 @@ impl WritePipeline {
         let apply_latency = self.apply_latency.clone();
         tokio::spawn(async move {
             loop {
-                let job = {
+                // One write per turn, under the lock admission takes, so a
+                // held write is counted (held, then running) until it settles.
+                let next = {
                     let mut l = lanes.lock();
-                    match l.queues.get_mut(&agent).and_then(VecDeque::pop_front) {
-                        Some(job) => {
-                            l.queued -= 1;
-                            l.bytes = l.bytes.saturating_sub(job.bytes);
+                    let fenced = ctx.lease_lost.load(Ordering::Acquire);
+                    let has_held = l.lane_held(&agent) > 0;
+                    // #295: the agent's retry is due once the backoff since its
+                    // last failed attempt has passed (`Lanes::held_due`).
+                    let due = l
+                        .held_due
+                        .get(&agent)
+                        .copied()
+                        .unwrap_or_else(tokio::time::Instant::now);
+                    let retry_due = due <= tokio::time::Instant::now();
+                    if has_held && (fenced || (retry_due && !l.sealed)) {
+                        // The oldest held write first: retried, or refused
+                        // below if the lease is gone.
+                        let job = l.held.get_mut(&agent).and_then(VecDeque::pop_front);
+                        if l.lane_held(&agent) == 0 {
+                            l.held.remove(&agent);
+                        }
+                        match job {
+                            Some(job) => {
+                                l.running += 1;
+                                *l.running_per_lane.entry(agent.clone()).or_insert(0) += 1;
+                                Next::Run(Box::new(job))
+                            }
+                            None => continue,
+                        }
+                    } else if let Some(job) = l.queues.get_mut(&agent).and_then(VecDeque::pop_front)
+                    {
+                        l.queued -= 1;
+                        if has_held {
+                            // Its retry not due yet (or closing): it keeps its
+                            // place behind the held writes, counted, unrun.
+                            let id = job.receipt;
+                            l.held.entry(agent.clone()).or_default().push_back(job);
+                            Next::Held(id)
+                        } else {
                             l.running += 1;
                             *l.running_per_lane.entry(agent.clone()).or_insert(0) += 1;
-                            job
+                            Next::Run(Box::new(job))
                         }
-                        None => {
-                            // Exit decision and liveness bookkeeping happen
-                            // under the same lock an enqueue takes, so no job
-                            // can be queued against a worker that has already
-                            // decided to stop. Dropping our own JoinHandle
-                            // here detaches a task that is about to return.
-                            l.queues.remove(&agent);
-                            l.workers.remove(&agent);
-                            l.running_per_lane.remove(&agent);
-                            return;
-                        }
+                    } else if has_held && !l.sealed {
+                        Next::Wait(due)
+                    } else {
+                        // Exit decision and liveness bookkeeping happen under
+                        // the same lock an enqueue takes, so no job can be
+                        // queued against a worker that has already decided to
+                        // stop. Dropping our own JoinHandle here detaches a
+                        // task that is about to return. A sealed lane's held
+                        // writes are the close's to set aside.
+                        l.queues.remove(&agent);
+                        l.workers.remove(&agent);
+                        l.running_per_lane.remove(&agent);
+                        l.wakes.remove(&agent);
+                        Next::Exit
                     }
                 };
+                let job = match next {
+                    Next::Exit => return,
+                    Next::Held(id) => {
+                        hold_one(&receipts, &id);
+                        continue;
+                    }
+                    Next::Wait(due) => {
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(due) => {}
+                            _ = wake.notified() => {}
+                        }
+                        continue;
+                    }
+                    Next::Run(job) => *job,
+                };
+                // A retry of the write this worker held after a failed attempt
+                // (not a held write's first attempt).
+                let retried = lanes
+                    .lock()
+                    .held_attempts
+                    .get(&agent)
+                    .is_some_and(|(id, _)| *id == job.receipt);
 
-                // The fence, checked per job rather than once: the lease can be
-                // lost while a lane drains, and every job after that must be
-                // refused rather than written into a session another writer
-                // owns.
-                let outcome = if ctx.lease_lost.load(Ordering::Acquire) {
+                // The fence, checked per write, right before it would run: the
+                // lease can be lost while a lane drains or a retry runs, and
+                // every write taken after that is refused rather than written
+                // into a session another writer owns. A write already running
+                // when it is lost can still commit here; the store refuses
+                // that flush.
+                let (outcome, hold_cause) = if ctx.lease_lost.load(Ordering::Acquire) {
                     counters.abandoned.fetch_add(1, Ordering::Relaxed);
                     // The durable intent is deliberately NOT consumed here: it
                     // is not ours to consume any more. If it flushed before
                     // the fence, the session's current holder replays it
                     // (fenced flushes are refused at the store, so this
                     // process can neither apply nor consume it now); if it
-                    // never flushed, it dies with this process's tail.
-                    //
-                    // JE2E-12: this arm hand-writes its own message and always
-                    // did, which is why the finding did not reach it — it is
-                    // lambo's own text about lambo's own lease, with nothing of
-                    // the environment in it. It carries the same string twice
-                    // because the model and the operator want the same words
-                    // here; the split exists for the arms where they do not.
+                    // never flushed, it dies with this process's tail. The
+                    // message is lambo's own text about its own lease, the
+                    // same for the model and the operator.
                     let fenced = format!(
                         "this handle lost its single-writer lease before the write was applied; \
                          this process wrote nothing for session {} — if the write's durable \
@@ -652,84 +877,177 @@ impl WritePipeline {
                          apply it",
                         ctx.session
                     );
-                    Err((fenced.clone(), fenced))
+                    (Err((fenced.clone(), fenced)), None)
                 } else {
                     // Timed, because this lane is single-consumer: the wall
-                    // clock around one `run` *is* this deployment's serial
-                    // service time, embedder warmth and all (J3-R1-2) — the
-                    // figure `write_queue_serial_items_per_sec` publishes. It
-                    // feeds no admission decision (J3 round-1 N3: this said "the
-                    // serial service time the admission bound needs"); what it
-                    // is *for* is that an operator watching a slowing embedder
-                    // sees the deployment's own writes, not a startup estimate.
-                    // A fenced refusal above is deliberately not sampled — it
-                    // never entered `run`, and calling it a fast write would
-                    // bias the rate upward, which is the dangerous direction.
-                    //
-                    // **And neither is a failure** (J3-R2-2): the same argument
-                    // reaches one step further than it was taken. A write that
-                    // fails — embedder error, HYBRID_IO_TIMEOUT, a store error —
-                    // fails FAST, and sampling it says "this deployment retires
-                    // work quickly" on the evidence of work it did not retire.
-                    // Measured on this rig: llama returns HTTP 500 in ~2 ms for
-                    // an input it refuses, which is 30x faster than a write it
-                    // accepts. The hazard is the recovery, not the outage: an
-                    // embedder that fast-fails a burst inflates the bound, then
-                    // comes back and services the inflated queue at its real
-                    // rate. Only work that went all the way through the pipeline
-                    // is evidence about the pipeline.
+                    // clock around one `run` is this deployment's serial
+                    // service time, the figure
+                    // `write_queue_serial_items_per_sec` publishes. Neither a
+                    // fenced refusal nor a failure is sampled: both are fast
+                    // and say nothing about work the pipeline retired, and
+                    // sampling them would bias the rate upward.
                     let started = tokio::time::Instant::now();
                     let stamp = ConsumeStamp {
                         tag: "applied",
                         at: (clock)(),
                     };
-                    let raw_outcome = ctx.run(&job, Some(stamp)).await;
+                    let raw_outcome = ctx.run(&job, Some(stamp), Some(&worker_commit)).await;
+                    // Test-only (#346): hold a committed write here, after
+                    // `run` returned and before the `Ok` arm, while another
+                    // worker runs. See `test_pause`.
+                    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
                     if raw_outcome.is_ok() {
-                        observed.lock().sample(started.elapsed().as_secs_f64());
-                    } else {
-                        // J3-R2R-2 (in-session symmetry). A failed job's intent
-                        // must be settled — `run` consumes only at a commit, and
-                        // a failure has no commit to ride — but WHICH failures
-                        // consume it is the question this arm answers to match
-                        // the replay arm. A content refusal
-                        // (`LamboError::Embed`) is settled `failed` and consumed,
-                        // exactly as the replay arm does. An embedder **outage**
-                        // (`LamboError::EmbedUnavailable`) is NOT: it says
-                        // nothing was learned about this *input*, so destroying
-                        // the durable intent over it would recreate N1's loss on
-                        // the path that handles almost every write. Instead the
-                        // intent is left unconsumed, and the next serve of the
-                        // session re-attempts it. The receipt still says `failed`
-                        // (nothing was written by this process), and the deferred
-                        // J4 seam is to re-queue with backoff or keep leaving it
-                        // unconsumed for replay.
-                        if let Err(e) = &raw_outcome
-                            && !matches!(e, LamboError::EmbedUnavailable(_))
-                        {
-                            ctx.graph.write().consume_write_intent(
-                                job.receipt.to_string(),
-                                WriteIntentOutcome {
-                                    // JE2E-12: the intent row IS the durable
-                                    // half of the receipt store — a restart
-                                    // answers `failed` straight out of this
-                                    // `summary` — so what it holds must be
-                                    // what a receipt may say. The operator's
-                                    // copy is the completion line and the
-                                    // WARN below, both written from `detail`.
-                                    tag: "failed".into(),
-                                    summary: super::receipts::durable_summary(
-                                        &model_safe_failure(e),
-                                        job.receipt_destination.as_ref(),
-                                    ),
-                                    consumed_at: (clock)(),
-                                },
-                            );
+                        test_pause(&lanes, super::admission::PausePoint::AfterCommit).await;
+                        // Test-only (#345 review): a panic after the commit.
+                        let panic_now = {
+                            let mut l = lanes.lock();
+                            let armed = std::mem::take(&mut l.panic_after_commit);
+                            l.test_panicked |= armed;
+                            armed
+                        };
+                        if panic_now {
+                            panic!("test-only panic after a commit, before its settle");
                         }
                     }
+                    // Which failures hold the write rather than consume it.
+                    // An embedder outage says nothing about the input, so the
+                    // write is held (#295). A lookup timeout is the replay's
+                    // rule (#125): one is a fact about this write, settled
+                    // `failed`; a run of `REPLAY_LOOKUP_TIMEOUT_LIMIT` in a
+                    // row with nothing applied between says the store is slow
+                    // for everyone, and holds it. Like the replay, which
+                    // counts each intent once per pass, the run counts first
+                    // attempts only: the retry of a write it held is that
+                    // write's last attempt, and settles `failed` if the lookup
+                    // times out again, so one input slow every time cannot
+                    // hold the lane.
+                    let hold_cause = match &raw_outcome {
+                        Ok(_) => {
+                            // No `lookup_streak` reset here: `run` reset it
+                            // inside the commit (`WorkerCommit`, #346). Here is
+                            // already past the index mirroring, so a timeout
+                            // another lane met in between would have counted
+                            // toward the old run (Lean:
+                            // `Drain.streak_okArm_counts_across_commit`).
+                            observed.lock().sample(started.elapsed().as_secs_f64());
+                            None
+                        }
+                        Err(e) if e.is_lookup_timeout() => {
+                            if retried {
+                                None
+                            } else {
+                                let mut l = lanes.lock();
+                                l.lookup_streak += 1;
+                                (l.lookup_streak >= super::REPLAY_LOOKUP_TIMEOUT_LIMIT)
+                                    .then_some("the store's vector lookup is slow for every write")
+                            }
+                        }
+                        Err(LamboError::EmbedUnavailable(_)) => Some("the embedder did not answer"),
+                        Err(_) => None,
+                    };
+                    if let Err(e) = &raw_outcome
+                        && hold_cause.is_none()
+                    {
+                        // A failure has no commit to ride, so it is consumed
+                        // here. The row holds the model-safe form: a restart
+                        // answers `failed` straight out of its summary, and the
+                        // operator's copy is the completion line and the WARN
+                        // below.
+                        let why = if e.is_lookup_timeout() {
+                            format!(
+                                "the vector candidate lookup did not answer within {:?}, so the \
+                                 write is not retried; nothing was written",
+                                crate::graph::hybrid::VECTOR_LOOKUP_TIMEOUT
+                            )
+                        } else {
+                            model_safe_failure(e)
+                        };
+                        let receipt = job.receipt.to_string();
+                        let mut g = ctx.graph.write();
+                        g.consume_write_intent(
+                            receipt.clone(),
+                            WriteIntentOutcome {
+                                tag: "failed".into(),
+                                summary: super::receipts::durable_summary(
+                                    &why,
+                                    job.receipt_destination.as_ref(),
+                                ),
+                                consumed_at: (clock)(),
+                            },
+                        );
+                        // Consumed, not yet settled, in the consume's own
+                        // lock hold (`WorkerCommit`, #345).
+                        g.mark_consumed_unsettled(&receipt);
+                    }
                     // Two strings from here on: the class for the model, the
-                    // error for the operator (JE2E-12).
-                    raw_outcome.map_err(|e| (model_safe_failure(&e), e.to_string()))
+                    // error for the operator.
+                    (
+                        raw_outcome.map_err(|e| {
+                            let why = if e.is_lookup_timeout() && hold_cause.is_none() {
+                                format!(
+                                    "the vector candidate lookup did not answer within {:?}, so \
+                                     the write is not retried; nothing was written",
+                                    crate::graph::hybrid::VECTOR_LOOKUP_TIMEOUT
+                                )
+                            } else {
+                                model_safe_failure(&e)
+                            };
+                            (why, e.to_string())
+                        }),
+                        hold_cause,
+                    )
                 };
+                if let (Some(cause), Err((_, detail))) = (hold_cause, &outcome) {
+                    // #295: hold this write as the agent's oldest owed one. Its
+                    // intent stays unconsumed and its bytes counted; its
+                    // receipt answers `pending_replay`. No `.await` from here
+                    // to the `continue`.
+                    let receipt = job.receipt;
+                    let (attempts, held) = {
+                        let mut l = lanes.lock();
+                        l.running -= 1;
+                        if let Some(n) = l.running_per_lane.get_mut(&agent) {
+                            *n = n.saturating_sub(1);
+                        }
+                        let attempts = match l.held_attempts.get(&agent) {
+                            Some((id, n)) if *id == receipt => n + 1,
+                            _ => 1,
+                        };
+                        l.held_attempts.insert(agent.clone(), (receipt, attempts));
+                        l.held_due.insert(
+                            agent.clone(),
+                            tokio::time::Instant::now() + held_retry_backoff(attempts),
+                        );
+                        l.held.entry(agent.clone()).or_default().push_front(job);
+                        (attempts, l.lane_held(&agent))
+                    };
+                    hold_one(&receipts, &receipt);
+                    tracing::warn!(
+                        session = %ctx.session,
+                        agent = %agent,
+                        receipt = %receipt,
+                        attempts,
+                        held,
+                        retry_in = ?held_retry_backoff(attempts),
+                        error = %detail,
+                        "write queue: {cause} for this agent's oldest owed write ({attempts} \
+                         attempt(s) in this server); it and the agent's {held} held write(s) answer \
+                         pending_replay and are retried in the background, oldest first, so none \
+                         applies ahead of it. At close they stay durable intents for the next \
+                         serve. A write that never succeeds (too large for the embed budget, say) \
+                         holds this agent's writes until a restart"
+                    );
+                    settled.notify_waiters();
+                    continue;
+                }
+
+                // Test-only (#346): hold a committed write here, between its
+                // commit and its settle block, while another worker runs. See
+                // `test_pause` for what that costs and how it is guarded.
+                #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+                if outcome.is_ok() {
+                    test_pause(&lanes, super::admission::PausePoint::BeforeSettle).await;
+                }
 
                 // No `.await` from here to the end of the iteration: an
                 // `abort()` cannot land between a completed graph write and the
@@ -738,17 +1056,27 @@ impl WritePipeline {
                 {
                     let mut l = lanes.lock();
                     l.running -= 1;
+                    l.bytes = l.bytes.saturating_sub(job.bytes);
                     if let Some(n) = l.running_per_lane.get_mut(&agent) {
                         *n = n.saturating_sub(1);
+                    }
+                    // No `lookup_streak` reset here: it is reset at the commit
+                    // (`WorkerCommit`, inside `run`). A second reset here would forget
+                    // timeouts that came after the commit (Lean:
+                    // `Drain.streak_both_forgets_run`).
+                    if retried {
+                        // The held write that set the backoff has settled; the
+                        // writes behind it have had no attempt yet.
+                        l.held_attempts.remove(&agent);
+                        l.held_due.remove(&agent);
                     }
                 }
                 let answer = match outcome {
                     Ok(summary) => {
                         counters.applied.fetch_add(1, Ordering::Relaxed);
                         apply_latency.lock().record(job.admitted.elapsed());
-                        // J4 proof obligation 5: a closed acked write's applied
-                        // lifecycle is measurable — carry the metric-2 fact set,
-                        // which is exactly what a durable-intent replay hid.
+                        // A closed acked write's applied lifecycle is
+                        // measurable: carry the metric-2 fact set.
                         if let Some(ledger) = &ctx.ledger {
                             ledger.append(&crate::ledger::completion_line(
                                 &job.agent.to_string(),
@@ -761,11 +1089,8 @@ impl WritePipeline {
                     }
                     Err((why, detail)) => {
                         counters.failed.fetch_add(1, Ordering::Relaxed);
-                        // JE2E-12: the ledger line is operator-facing JSONL and
-                        // gets the raw error; the receipt is model-facing and
-                        // gets the class. Same fact, two audiences, one site —
-                        // which is what keeps the detail from being lost rather
-                        // than merely hidden.
+                        // The ledger line is operator-facing and gets the raw
+                        // error; the receipt is model-facing and gets the class.
                         if let Some(ledger) = &ctx.ledger {
                             ledger.append(&crate::ledger::completion_line(
                                 &job.agent.to_string(),
@@ -785,7 +1110,15 @@ impl WritePipeline {
                     }
                 };
                 settle_one(&receipts, &job.receipt, answer, (clock)());
+                // Waiters on the receipt wake first; the graph bookkeeping
+                // below is not part of the answer they wait for.
                 settled.notify_waiters();
+                // Settled: a close will not set it aside, so the graph
+                // forgets it as consumed-and-unsettled and as dead-lettered
+                // (#345). After `settle_one`, on its own graph lock hold: a
+                // panic before here leaves both records, and the close
+                // answers a dead-lettered one `close_unflushed`.
+                ctx.graph.write().settled_write(&job.receipt.to_string());
             }
         })
     }

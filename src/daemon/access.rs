@@ -17,7 +17,7 @@
 //!
 //! ## What is an access
 //!
-//! Decided in `dev-diary/notes/issue-30-access-count.md`; in short:
+//! Decided in #30. In short:
 //!
 //! * every **concept** hit a recall returns to its caller, whether or not its
 //!   block fit the token budget (the MCP and HTTP payloads carry every hit's

@@ -393,7 +393,7 @@ fn layer_floor_measured_concepts_per_contract() {
     }
     assert_eq!(REFERENCE_LAYER_FLOOR_CONCEPTS, 12);
     assert!(
-        include_str!("../../dev-diary/notes/feat-157-layer-tuning.md")
+        include_str!("../../evidence/157-layer-tuning/README.md")
             .contains("The general layer contains 12 concepts."),
         "the reference size must match #157's write-up"
     );

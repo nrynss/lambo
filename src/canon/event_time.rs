@@ -1,12 +1,12 @@
-//! Event time — the clock canonization measures (workstream D).
+//! Event time — the clock canonization measures.
 //!
 //! Every time-based gate used to read **flush time**: when Lambo recorded a
 //! fact. Ten years of history arriving in ninety minutes has no temporal
 //! structure in that clock, so Stage 2's `min_age` floor, the 0.3
 //! temporal-extent coverage bar, SoloPolicy's 24-hour session separation and
 //! `blast_radius`'s `min_edge_age` all read a bootstrap as "everything
-//! happened at once". D adds a second, per-fact instant — **event time**, the
-//! time a fact is *about* — and moves those gates onto it.
+//! happened at once". The design adds a second, per-fact instant — **event
+//! time**, the time a fact is *about* — and moves those gates onto it.
 //!
 //! The three design questions the spec posed are answered here, in one place,
 //! because they are one decision chain:
@@ -33,10 +33,11 @@
 //! queued), so the stamp is on that interaction when the queued write runs and
 //! every edge it later creates inherits it. MCP exposes this as optional
 //! RFC3339 `event_time` on `lambo_derive` and `lambo_record_action`; CLI flags
-//! remain deliberately absent. F18 bans client wall-clock timestamp names
-//! (`timestamp`, `now`, `when`) because flush time is server-authoritative.
-//! Event time is a different concept — about-time, not observed-at — and this
-//! does not weaken F18, whose rule guards the server's own stamping authority.
+//! remain deliberately absent. Client wall-clock timestamp names
+//! (`timestamp`, `now`, `when`) are banned because flush time is
+//! server-authoritative. Event time is a different concept — about-time, not
+//! observed-at — and this does not weaken that ban, whose rule guards the
+//! server's own stamping authority.
 //!
 //! ## 2. The fallback rule, and mixing
 //!
@@ -46,13 +47,14 @@
 //! default is promoted onto such a fact: a live Mooshik session has no commit
 //! date, and borrowing another fact's would corrupt its age in either
 //! direction. A no-event-time fact therefore behaves exactly as it did before
-//! D — which is also why every pre-D fixture and test keeps passing.
+//! event time existed — which is also why every older fixture and test keeps
+//! passing.
 //!
 //! **Mixing:** both clocks are absolute UTC instants, so a session holding
 //! both kinds resolves each fact independently and measures on the union
 //! timeline. The consequence is deliberate and conservative: ages stay honest
 //! per fact (a 2016 commit-dated fact is old; a just-flushed live fact is
-//! fresh — the F17 fresh-evidence guard survives mixing by construction,
+//! fresh — the fresh-evidence guard survives mixing by construction,
 //! because fallback edges still age on flush time), while coverage gets
 //! *harder*, never easier: mixing a decade-old extent with today's points
 //! widens the denominator without widening the support. Nothing promotes a
@@ -72,11 +74,11 @@
 //!
 //! ## What the eval passes, and what the store resolves
 //!
-//! Gate predicates keep taking `now` (F8 discipline — the adapter has no clock
-//! of its own) and compute the cutoff `now - min_age` exactly as before. What
-//! changes is which stored instant the predicate compares against that cutoff:
-//! the **resolved** about-time, not the bare `created_at`. The anchor stays
-//! the flush clock's `now`; an event-timed fact older than the anchor simply
+//! Gate predicates keep taking `now` (the adapter has no clock of its own)
+//! and compute the cutoff `now - min_age` exactly as before. What changes is
+//! which stored instant the predicate compares against that cutoff: the
+//! **resolved** about-time, not the bare `created_at`. The anchor stays the
+//! flush clock's `now`; an event-timed fact older than the anchor simply
 //! clears any age floor immediately, which is the truth about a decade-old
 //! fact. An event time in the future of the anchor makes the row invisible
 //! until wall time catches up — conservative, and never special-cased.
@@ -87,12 +89,12 @@ use chrono::{DateTime, Utc};
 
 /// Count how many sessions in `starts` are separated by at least `gap`.
 ///
-/// This is D2's deliverable to C2: the solo score's recurrence term wants
-/// "three or more sessions separated by ≥ 24 hours", measured on **event
-/// time** — a bulk ingest of a decade has that separation in commit dates and
-/// none whatsoever in flush time, so the count must resolve session starts
-/// through [`crate::types::Interaction::about_time`] (the earliest interaction
-/// of each session) before calling this.
+/// The solo score's recurrence term wants "three or more sessions separated
+/// by ≥ 24 hours", measured on **event time** — a bulk ingest of a decade has
+/// that separation in commit dates and none whatsoever in flush time, so the
+/// count must resolve session starts through
+/// [`crate::types::Interaction::about_time`] (the earliest interaction of each
+/// session) before calling this.
 ///
 /// The rule is greedy and order-free: sort ascending (deduplicating exact
 /// repeats — the same instant is one session start), then count a start only
@@ -100,13 +102,13 @@ use chrono::{DateTime, Utc};
 /// contribute one session each; stragglers further than `gap` out extend the
 /// chain.
 ///
-/// **No production caller yet, by design** — this is D2's seam for C2, whose
-/// spec (`dev-diary/lambo-for-mooshik/C-solopolicy.md`) defines the solo
-/// formula that will call it. [`SoloScorer`](super::policy::SoloScorer)
-/// refuses until then; when C2 lands, its tests must kill a mutant that
-/// resolves session starts through flush stamps instead of
-/// [`crate::types::Interaction::about_time`]. Until that caller exists,
-/// only these unit tests exercise the helper.
+/// This is the solo policy's seam (workstream C, the Solo policy).
+/// Its production caller is
+/// the solo policy's recurrence term, `recurrence_sessions` in `policy.rs`,
+/// which resolves session starts through
+/// [`crate::types::Interaction::about_time`].
+/// `a_bulk_ingest_recurs_only_under_event_time` in `policy.rs` kills the mutant
+/// that resolves them through flush stamps instead.
 pub fn separated_session_count(starts: &[DateTime<Utc>], gap: Duration) -> usize {
     let gap = chrono::Duration::from_std(gap).unwrap_or(chrono::Duration::MAX);
     let mut sorted = starts.to_vec();

@@ -3,7 +3,7 @@
 //! Packaging: Cargo features gate adapters (`embed-bge`, `embed-candle`, `embed-fixture`,
 //! `embed-bedrock`, `embed-gemini`, `embed-eg2`, `embed-elastic`);
 //! `lambo.toml` / env select among compiled kinds. See
-//! `dev-diary/notes/level-b-pluggability.md`.
+//! `docs/reference/config.mdx` ("Features").
 
 pub mod api_key;
 pub mod calibration;
@@ -15,6 +15,8 @@ pub(crate) mod math;
 mod bge_m3;
 #[cfg(feature = "embed-candle")]
 mod candle;
+#[cfg(all(test, feature = "embed-candle"))]
+pub(crate) use candle::formal_pins as candle_formal_pins;
 #[cfg(feature = "embed-eg2")]
 pub(crate) mod eg2;
 #[cfg(feature = "embed-elastic")]
@@ -357,11 +359,13 @@ pub trait Embedder: Send + Sync {
     /// it was previously honoured by all implementations but documented by none
     /// (F-R1-4).
     ///
-    /// The two vector-capable adapters rank by different formulas, and the formulas
+    /// The vector-capable adapters rank by different formulas, and the formulas
     /// coincide **only** on unit-norm input:
     ///
     /// * SQLite (and the `MemoryStore` reference) score `crate::embed::cosine`, which
     ///   divides by both norms and is therefore norm-invariant.
+    /// * PostgreSQL scores `1 − d` over pgvector's cosine distance, which is also
+    ///   norm-invariant.
     /// * Cockroach scores `1 − d²/2` over the `<->` L2 distance, which is *not*
     ///   norm-invariant; it equals cosine exactly when both operands are unit vectors.
     ///
@@ -373,7 +377,7 @@ pub trait Embedder: Send + Sync {
     ///
     /// Shipped implementations comply: `bge_m3` L2-normalizes what llama.cpp returns
     /// (and rejects a zero-norm vector), and `FixtureEmbedder` emits unit vectors by
-    /// construction. `A-gemini-embedder.md` instructs the next one to.
+    /// construction. Every new embedder must comply too.
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>;
 
     /// Embed a recall **query** (#22). Same input and output contract as
@@ -562,18 +566,24 @@ impl EmbedderKind {
         }
     }
 
-    /// Whether [`build_embedder`] can return a working adapter (feature on **and** impl exists).
-    pub const fn is_ready(self) -> bool {
+    /// Whether this kind has an adapter at all, whatever the build's
+    /// features: every kind but Bedrock.
+    pub const fn has_adapter(self) -> bool {
         match self {
-            Self::BgeM3 => cfg!(feature = "embed-bge"),
-            Self::Candle => cfg!(feature = "embed-candle"),
-            Self::Fixture => cfg!(feature = "embed-fixture"),
-            Self::Gemini => cfg!(feature = "embed-gemini"),
-            Self::EmbeddingGemma2 => cfg!(feature = "embed-eg2"),
-            Self::Elastic => cfg!(feature = "embed-elastic"),
+            Self::BgeM3
+            | Self::Candle
+            | Self::Fixture
+            | Self::Gemini
+            | Self::EmbeddingGemma2
+            | Self::Elastic => true,
             // T7.1 not implemented yet.
             Self::Bedrock => false,
         }
+    }
+
+    /// Whether [`build_embedder`] can return a working adapter (feature on **and** impl exists).
+    pub const fn is_ready(self) -> bool {
+        self.is_compiled() && self.has_adapter()
     }
 }
 
@@ -1099,7 +1109,7 @@ pub fn elastic_identity(_embedder: &dyn Embedder) -> Option<String> {
 fn missing_feature(kind: EmbedderKind) -> EmbedError {
     EmbedError::Unavailable(format!(
         "embedder kind `{kind}` is not compiled into this binary; rebuild with \
-         `--features {}` (see dev-diary/notes/level-b-pluggability.md)",
+         `--features {}` (see Features in docs/reference/config.mdx)",
         kind.feature_name()
     ))
 }
@@ -2315,7 +2325,7 @@ mod tests {
     ///
     /// Before this pin the store read `GCP_LAMBO_CREDENTIALS` then
     /// `GOOGLE_APPLICATION_CREDENTIALS` while the embedder read only the second, so the
-    /// export block in `L-gcp-hosted-postgres.md` started the store and refused the
+    /// workstream L setup's export block started the store and refused the
     /// embedder. Both arms are asserted, because a fix that swapped one hardcoded
     /// variable for another would pass half of this.
     #[test]

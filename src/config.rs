@@ -1,7 +1,7 @@
 //! Runtime configuration — named defaults from the v0.1 hackathon spec,
 //! plus Level B process file (`lambo.toml`) for store/embedder selection.
 //!
-//! See `dev-diary/notes/level-b-pluggability.md`.
+//! See `docs/reference/config.mdx` ("Features").
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -62,7 +62,7 @@ impl Default for ScoringWeights {
 }
 
 impl ScoringWeights {
-    /// Every non-finite or negative weight replaced by `0.0` (ALGO-10).
+    /// Every non-finite or negative weight replaced by `0.0`.
     ///
     /// A zeroed weight drops its dimension out of the composite; it can never
     /// poison the whole score. Idempotent, and the identity on any valid set.
@@ -113,9 +113,21 @@ fn default_coverage_window() -> Duration {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
+    /// How often pending writes flush to the store.
     pub backend_flush_interval: Duration,
+    /// Early-flush trigger, not a cap: once this many mutations wait, they
+    /// flush before the next interval tick (not during the hold after
+    /// exhausted retries). A flush sends everything waiting.
     pub backend_flush_max_batch: usize,
+    /// Retries after a flush attempt that failed with a retryable error
+    /// (`retries + 1` attempts). When they are used up the batch is retained
+    /// and retried after a hold, never dropped. A constraint violation
+    /// dead-letters it, whole, and a stale write fences the handle and drops
+    /// it; neither is retried.
     pub backend_flush_retries: u32,
+    /// Degrade threshold, not a cap: when the mutations not yet durable
+    /// exceed it, the session degrades to `durability = "none"` and the flush
+    /// loop drops its backlog and what it drains after.
     pub backend_log_max: usize,
 
     pub scoring: ScoringWeights,
@@ -136,7 +148,7 @@ pub struct Config {
     pub recall_selection: crate::recall::redundancy::RecallSelection,
 
     /// Daemon poll interval — how often the loop rescores and re-runs the
-    /// detectors (XP-7). This is the one daemon parameter nothing else can
+    /// detectors. This is the one daemon parameter nothing else can
     /// derive: it governs stale-detection latency, GC latency, and how long a
     /// hot-list entry can lag the graph. Default
     /// [`crate::daemon::DAEMON_TICK_INTERVAL`].
@@ -153,7 +165,7 @@ pub struct Config {
     pub conflict_recency_window: Duration,
     /// `drift_threshold` in hops (spec §9). `usize` — the metric is a hop
     /// count, which every consumer (`drift::detect`, `CycleParams`) indexes
-    /// with; the previous `u32` forced a cast at every use site (XP-7).
+    /// with; the previous `u32` forced a cast at every use site.
     pub drift_threshold: usize,
 
     pub gc_interval: u64,
@@ -194,7 +206,7 @@ pub struct Config {
     pub canonization_eval_batch_size: usize,
     pub canonization_repromotion_cooldown: Duration,
 
-    /// Which promotion policy canonization's Stage 1 runs (C1).
+    /// Which promotion policy canonization's Stage 1 runs.
     ///
     /// A *selector*, not a threshold — it chooses which predicate reads the
     /// canonization knobs above, and restates none of them. The bars
@@ -399,10 +411,10 @@ impl Config {
                 self.canonization_eval_interval
             )));
         }
-        // C1's Solo refusal lived here while the solo scorer was
+        // A Solo refusal lived here while the solo scorer was
         // unimplemented ("a policy that cannot promote is indistinguishable
         // from one that merely promoted nothing — fail where the reason can be
-        // named"). C2 landed the formula, so both the refusal and its
+        // named"). The formula has since landed, so both the refusal and its
         // `unimplemented!()` backstop are gone together: every variant of
         // `promotion_policy` names a policy that can run a cycle, and there is
         // nothing left to refuse here.
@@ -475,7 +487,7 @@ impl Config {
 /// cadence itself is unchanged: every threshold (`gc_survived >= 3`, the
 /// dependence floors of #36) stays exactly as designed.
 ///
-/// # Both paragraphs above are policy-conditional (C2)
+/// # Both paragraphs above are policy-conditional
 ///
 /// `promotion_policy = "Solo"` does not read `gc_survived`:
 /// [`crate::canon::SoloScorer`] admits a Candidate by its score band, so a
@@ -836,7 +848,7 @@ mod tests {
         assert_eq!(c.scoring.session_activity, 0.20);
         assert_eq!(c.scoring.density, 0.35);
 
-        // XP-7: the daemon tick has a named default, and the spec §9 knobs the
+        // The daemon tick has a named default, and the spec §9 knobs the
         // daemon also declares as consts must agree with them here — a drift
         // between the two is exactly what CycleParams' literal duplication hid.
         assert_eq!(c.daemon_tick_interval, Duration::from_secs(1));
@@ -858,10 +870,10 @@ mod tests {
             c.canonization_repromotion_cooldown,
             Duration::from_secs(300)
         );
-        // C1: swarm is the shipped default and the whole point of the seam is
-        // that it stays one. Since C2 nothing else defends that — `validate`
-        // accepts either policy — so this assertion is the only thing standing
-        // between an unset `promotion_policy` and moved behaviour.
+        // Swarm is the shipped default and the whole point of the seam is
+        // that it stays one. Nothing else defends that — `validate` accepts
+        // either policy — so this assertion is the only thing standing between
+        // an unset `promotion_policy` and moved behaviour.
         assert_eq!(c.promotion_policy, PromotionPolicy::Swarm);
 
         assert_eq!(
@@ -891,8 +903,8 @@ mod tests {
         assert_eq!(c.scoring, back);
     }
 
-    /// C2 clean cutover: with the solo formula landed, `Solo` validates — the
-    /// C1-era refusal (and its `unimplemented!()` backstop) is gone, and every
+    /// Clean cutover: with the solo formula landed, `Solo` validates — the
+    /// old refusal (and its `unimplemented!()` backstop) is gone, and every
     /// `promotion_policy` value names a runnable cycle.
     ///
     /// Mutation: reintroduce a refusal arm for non-default policies in
@@ -1299,7 +1311,7 @@ mod tests {
         }
     }
 
-    /// #36 PR 2 review L5: the Stage 2 coverage cap is a library setting.
+    /// #36 PR 2: the Stage 2 coverage cap is a library setting.
     /// The file reserves `[daemon]` for cadences (see `DaemonConfig`), so
     /// the key, under any spelling a reader might try, is refused there and
     /// at the top level rather than silently ignored.
@@ -1362,7 +1374,7 @@ mod tests {
     }
 
     /// A value under an enum-typed or number-typed key is never quoted back
-    /// (#32 PR 1 review L1). A DSN or token pasted under `[store] kind`,
+    /// (#32 PR 1). A DSN or token pasted under `[store] kind`,
     /// `[embedder] kind`, `promotion_policy` or a numeric key reached the
     /// startup error through the kind parsers' "unknown ... kind {value}" and
     /// serde's `invalid type: string "..."`. The refusal lists what is
@@ -1528,7 +1540,7 @@ mod tests {
     }
 
     /// The FILE surface goes through `PromotionPolicy::from_str`, not serde's
-    /// exact-`PascalCase` derive (P3-a). `store.kind` and `embedder.kind` are
+    /// exact-`PascalCase` derive. `store.kind` and `embedder.kind` are
     /// both trimmed and case-insensitive with aliases, and every other value in
     /// this file is snake_case — a `promotion_policy` that took `Solo` in the
     /// environment and refused it in the file, or took `"Solo"` and refused
@@ -1584,7 +1596,7 @@ mod tests {
         );
     }
 
-    /// P1-a: an exported-but-empty `LAMBO_PROMOTION_POLICY=` is **unset**.
+    /// An exported-but-empty `LAMBO_PROMOTION_POLICY=` is **unset**.
     ///
     /// `var_os` returns `Some("")` for it, so parsing unconditionally turned an
     /// empty `.env` placeholder — and any harness that exports the variable

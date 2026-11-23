@@ -32,7 +32,7 @@ pub const APPLY_LATENCY_WINDOW: usize = 256;
 /// service time, which is what a caller waiting on a receipt experiences (#11).
 ///
 /// Failures are not recorded, for the reason they are not sampled into the
-/// observed rate (J3-R2-2): a fast failure is not evidence about how long a
+/// observed rate: a fast failure is not evidence about how long a
 /// write takes to land.
 #[derive(Debug, Default)]
 pub(super) struct ApplyLatency {
@@ -77,7 +77,7 @@ pub struct ApplyLatencySummary {
     pub max: Duration,
 }
 
-/// Why the durable-intent replay last stopped without draining (J3-R2R-8).
+/// Why the durable-intent replay last stopped, or ended, without draining.
 ///
 /// `replay_owed` is a *level* — an operator cannot tell "draining" from
 /// "wedged" from it alone. This names the class of the error that ended the
@@ -85,15 +85,24 @@ pub struct ApplyLatencySummary {
 /// used to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplayBlockReason {
-    /// The replay drained, was never owed, or has not been attempted this attach.
+    /// The replay drained, was never owed, or has not been attempted (or is
+    /// still running) this attach. Never the answer once a replay has ended
+    /// with intents owed (#295).
     #[default]
     None,
     /// The embedder answered transiently (or not at all) past
     /// [`EMBEDDER_SICK_THRESHOLD`](super::EMBEDDER_SICK_THRESHOLD) — it is
-    /// presumed sick. This is "wedged", not "draining".
+    /// presumed sick. This is "wedged", not "draining". Also the reason when
+    /// the replay ended with an agent's intents owed because the embedder did
+    /// not answer one of them at either of its two attempts (#295: the agent
+    /// was deferred, and its intents wait, in order, for the next serve).
     Embedder,
     /// A non-embedder, session-wide fault (a store error, a lost lease, a
-    /// config error) ended the loop.
+    /// config error) ended the loop, or it halted because the lease was lost
+    /// or the session began to close with intents still owed (#295). Also
+    /// the reason when the replay ended with intents owed only behind an
+    /// intent whose receipt id is in another version of the receipt format,
+    /// which this build leaves owed (quarantined, #295).
     Other,
     /// An image derive intent (#22) reached the head of the backlog in a
     /// process that cannot apply one: its match strategy is not `hybrid`, or
@@ -123,7 +132,7 @@ pub struct WriteQueueCounters {
     pub(super) dropped_queue_full: AtomicU64,
     pub(super) dropped_queue_bytes: AtomicU64,
     /// Refusals because the session was closing or fenced — **a third drop
-    /// class, not a subtraction** (J3-R1-8). It rides its own counter and is
+    /// class, not a subtraction**. It rides its own counter and is
     /// summed into [`WriteQueueCounters::dropped`], so no count vanishes and
     /// the gauge's exclusivity argument is untouched: like the other two, a
     /// refusal never enters `accepted`. Split out because
@@ -133,7 +142,7 @@ pub struct WriteQueueCounters {
     pub(super) dropped_closed: AtomicU64,
     /// Acked writes a clean `close()` did **not** apply and did not lose:
     /// their durable intents survive the close and the next serve of the
-    /// session applies them (J3 durable intents). A fourth settle class beside
+    /// session applies them (durable intents). A fourth settle class beside
     /// `applied`/`failed` — never a subset of either — because "your write
     /// will happen, later, in another process" is neither a success nor a
     /// failure and must not be counted as one.
@@ -144,19 +153,19 @@ pub struct WriteQueueCounters {
     /// here), so `outstanding` stays exact.
     pub(super) replayed: AtomicU64,
     /// Durable intents from a previous process that this session found owed and
-    /// has **not** paid — the live replay debt (J3 round-1 N1).
+    /// has **not** paid — the live replay debt.
     ///
     /// Set to the backlog when the replay task is spawned and decremented as
     /// each intent is applied or settled `failed`. It is the operator-visible
     /// answer to "the embedder was down at attach — what happened to my
     /// writes?": a non-zero value with `write_queue_replayed` not advancing says
-    /// the debt is intact, which is the honest state and the one the N1 fix
-    /// preserves instead of destroying. Unlike the other counters this one can
+    /// the debt is intact, which is the honest state and the one the replay-debt
+    /// fix preserves instead of destroying. Unlike the other counters this one can
     /// go **down as well as up**, because it is a depth, not a total; it is
     /// therefore not a term in `outstanding` (those intents were never accepted
     /// by this process).
     pub(super) replay_owed: AtomicU64,
-    /// The reason the last replay stopped without draining (J3-R2R-8), or
+    /// The reason the last replay stopped without draining, or
     /// [`ReplayBlockReason::None`] when it drained / was never owed. Renders as
     /// the `write_queue_replay_blocked` stat: `null` = draining or idle,
     /// `"embedder"` = sick/wedged, `"other"` = store/lease/config,
@@ -217,7 +226,7 @@ impl WriteQueueCounters {
     /// Every refused admission, whatever the bound that refused it. The three
     /// classes are disjoint and this is their sum, so splitting
     /// `dropped_closed` out of `dropped_queue_full` moved no count and lost
-    /// none (J3-R1-8).
+    /// none.
     pub fn dropped(&self) -> u64 {
         self.dropped_queue_full() + self.dropped_queue_bytes() + self.dropped_closed()
     }

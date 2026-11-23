@@ -1,7 +1,7 @@
 # Example Lambo process config (Level B pluggability).
 # Copy to lambo.toml and adjust. Secrets stay in .env / the environment — not here.
 #
-# Selection rules: see dev-diary/notes/level-b-pluggability.md
+# Selection rules: see docs/reference/config.mdx, "Features"
 # - Cargo features decide what is compiled in.
 # - This file (or env) selects among compiled backends.
 # - Unknown or uncompiled `kind` => hard startup error.
@@ -501,6 +501,9 @@ url = "http://127.0.0.1:8080"
 # recall_concurrency = 4       # recalls at once, 1 to 1024
 # embedder = true              # false: never load the embedder; recall is keyword + recent only
 # list_sessions = false        # true: GET /api/sessions names the caller's sessions (off: no such route)
+# discover_sessions = false    # true: also serve every live, non-erased session in the store
+#                              # (new ones without a restart) to local, LAMBO_AUTH_TOKEN and "*"
+#                              # callers only; on loopback it also turns the listing on
 # inherit_serve_credentials = false  # true: [[serve.credential]] tokens read too (no write);
 #                                    # their "*" is serve's sessions + prefixes, not this list
 #

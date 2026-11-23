@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+### Changes
+
 - `lambo serve-web` no longer loads the embedder at startup (#247). Browsing
   (the page, counts, the canonization feed, inspect, the graph and
   `/api/session`) never loads it; the first `/api/recall` that needs a query
@@ -17,6 +19,780 @@
   prints which of the two applies. The configured embedder is still resolved
   (identity and width, no weights), so the embedding-contract status is
   unchanged.
+- Formal models are reorganized; no kept theorem's statement changes. The
+  large models are split along their Rust seams into directories in the same
+  namespace (`Drain/`, `Conflict/`, `Policy/`, `Contract/`, `Supersession/`,
+  `Hotlist/`, `Flush/`, `Resolve/`, `Fusion/`, `Registry/`, `Tiered/`,
+  `BatchQueue/`), the runs of the Rust before a fix move to `History.lean`
+  files the docs may not cite (`Drain/`, `Tiered/`), generic list facts move
+  to `LamboProofs/Lib/List.lean`, and every model's header now says what it
+  models, which Rust, its end results and what it does not cover. Every
+  theorem is used by another proof or has a doc comment stating what it
+  guarantees about which Rust behaviour, and CI checks that rule
+  (`scripts/formal/audit-theorems.py --check`). The 81 theorems that met
+  neither, or whose doc comment did not hold up against the Rust on review
+  (pure order theory or arithmetic, a design not in the Rust), are deleted,
+  each listed with its reason in `formal/audit/deleted-theorems.tsv`. They
+  include the whole #280 gated-order design model, which the Rust does not
+  implement, removed with the nine definitions only it used. A theorem nothing
+  else references keeps its place only with a reviewed verdict in
+  `formal/audit/reviewed-theorems.tsv`, and `--check` fails on one without.
+  `scripts/formal/check-decl-equivalence.py` compares the Lean environments of
+  two trees and confirms that every other theorem is stated exactly as before,
+  with the moved helpers in `formal/audit/moved-helpers.tsv`. Earlier entries
+  below name model files as they were before the split.
+- Formal models: `formal/LamboProofs/Drain.lean` states the close, crash and
+  shutdown accounting over the current write-queue worker (#295's held
+  writes, retries and fence), not only over the worker before #295, under
+  which an in-session embedder outage answered `failed`. Over the current
+  worker, after a close every admitted write is exactly one of applied,
+  failed with its intent consumed, failed after a lost lease with its intent
+  left unconsumed (the session's current holder's to apply, if an earlier
+  flush took it), `intent_durable` and owed in the flushed log, or
+  `close_unflushed` (`shutdown_no_silent_lossW`, `shutdown_exactly_oneW`); a
+  held write answers `pending_replay` while held, and the close never answers
+  it `failed` but `intent_durable` or `close_unflushed` (`held_at_closeW`,
+  `outage_holdsW`); a lookup timeout settles `failed` and consumes its intent,
+  except a first attempt once a run of them has reached the limit, which is
+  held (`lookupTimeout_settlesW`, `lookupTimeout_run_holdsW`); and no write in a durable prefix of the log is
+  applied again by the current two-pass serve (`crash_never_reappliesW`,
+  through `runW_log_refines` and `serveR_applied_pending`). The older
+  theorems stay, each labelled as describing the worker before #295 and
+  naming its counterpart; `outage_failed_but_owed` and
+  `outage_failed_then_applied` say the current Rust does not behave that
+  way. It does not model a write refused at admission, which in the Rust
+  answers `dropped` with no intent: the theorems speak only of admitted
+  writes. Review of this model found the two Rust defects under Fixed
+  below (#345, #346), each now modelled. `docs/reference/mcp.mdx` now cites the new
+  theorems for close and crash accounting, and says a run of slow vector
+  lookups holds every later first attempt until a write applies, not only the
+  third. `scripts/formal/count-theorems.py` counts the theorems by the rule
+  `formal/README.md` states (2,486 with the #345 and #346 models below; the
+  README said 2,393 for files it counts as 2,394).
+- Repository: the frozen v0.1 hackathon spec (`lambo-hackathon-spec-v0.1.md`)
+  and the `dev-diary/` tree are removed. Lambo has outgrown both, and agents
+  read them as rules. The source and the reference docs are the authority;
+  the dogfood rig runbook moved to `docs/operations/dogfood-rig.md` and the
+  backend design rules to the Features section of `docs/reference/config.mdx`.
+  The originals stay in git history (for example at `v0.15.0`), which is what
+  remaining `spec §N` and `dev-diary/` citations in comments, earlier entries
+  here and `evidence/` refer to.
+- `scripts/run-llama-embed.sh` starts `llama-server` with `--batch-size` and
+  `--ubatch-size` (default: the context size; `LAMBO_LLAMA_EMBED_BATCH`
+  overrides). Without them llama-server answered HTTP 500 for any input over
+  512 tokens while `/health` passed. `--check`, and the script finding a
+  server already running, now embed a 700-word input and fail with a restart
+  hint when it is refused. The installation page's `llama-server` command
+  carries the same flags.
+- `candle` fetches weights into the cache `HF_HOME` names (and from
+  `HF_ENDPOINT`), the same cache `offline = true` reads. Before, an online
+  fetch always went to `~/.cache/huggingface/hub`, so with `HF_HOME` set an
+  offline start reported weights it had just fetched as not cached.
+- `docs/reference/config.mdx` documents the embedder keys it never listed:
+  `device`, `repo`, `revision`, `weights_file`, `offline` and `weights_dir`
+  for `candle`, `dimensions` for `bge_m3`, the four `gemini_*` keys, and
+  their environment variables.
+
+### Fixed
+
+- **A close no longer answers `intent_durable` for a write whose intent a
+  dead letter dropped (#345).** A background flush the store refuses with a
+  constraint violation (or a value it cannot hold) drops its whole batch
+  while the session goes on, and that batch can hold the intent of a write
+  still held or queued. The close then found nothing left to flush and
+  answered that write `intent_durable`, though the next serve had nothing
+  to replay. The flush now notes the receipt ids of the intents in every
+  batch it dead-letters, and the close answers those writes
+  `close_unflushed` (ledger reason `intent_dead_lettered`), whatever its
+  final flush does; a retried close no longer upgrades them. The rule is
+  exact for a close whose final flush completes: it answers
+  `intent_durable` exactly when the write's intent reached the store. A
+  close whose final flush does not complete still answers every set-aside
+  write `close_unflushed`, as before. `close_unflushed`'s description now says the close
+  could not confirm the write was saved, since an incomplete final flush is
+  no longer its only cause. Modelled first in
+  `formal/LamboProofs/Drain.lean` (`closeW_vouches_dead_lettered`, the
+  defect; `closeD_durable_iff`, `closeD_retryD`, `shutdown_no_silent_lossD`,
+  the fix).
+- **A lookup timeout that follows a successful write no longer counts
+  toward the run of slow lookups (#346).** The in-session streak of lookup
+  timeouts reset in a write's settle block, after its commit, so another
+  agent's timeout landing between the two counted as part of the old run
+  and could be held instead of settled `failed`. The streak now resets
+  inside the write's commit, under the same graph lock hold, which is the
+  documented rule: three timeouts in a row with nothing applied between.
+  Modelled first in `Drain.lean` (`streak_old_counts_across_commit` and
+  `streak_okArm_counts_across_commit`, the defect at the settle and at the
+  worker's `Ok` arm; `streakNew_eq_runSince`, `heldNew_iff`, the fix).
+
+## 0.15.0 (2026-11-22)
+
+### Highlights
+
+- **An embedder outage no longer reorders an agent's writes (#295).** In
+  session, a write that meets an outage is held and answers `pending_replay`
+  instead of `failed`; the agent's later writes wait behind it, and the
+  worker retries the oldest on a backoff (1 s, doubling, at most 30 s)
+  without needing a new write. Writes still held at close answer
+  `intent_durable`, and the next serve replays them in admission order.
+- **Sessions holding a mixed `parent_of`/citation cycle load (#325).** A
+  child citing its own parent was accepted at write time, after which every
+  load of the session failed with "Causal/Dependency/Hierarchical cycle
+  detected". Such sessions now load with no data change.
+- **Store-wide session discovery in `lambo serve-web` (#276).** Opt in with
+  `--discover-sessions` or `[web] discover_sessions = true`: callers whose
+  scope already covers every served session also read every live session in
+  the store, including ones created after startup.
+- **Canary drift repair (#296).** `lambo re-embed --rewrite-same-contract`
+  rewrites a drifted session's text vectors in place under its contract.
+- **Lease and flush fixes (#293, #301).** A writer that lost its lease is
+  fenced even when its own heartbeat re-takes it, and a store error no retry
+  can fix is no longer retried every 10 s.
+- **The Lean models are checked against the Rust (#291, developer-facing).**
+  A model drift check, pinned constants, property tests and a differential
+  oracle; the oracle found the zero-score tie fixed in #328.
+
+### Upgrading from 0.14.0
+
+No re-embedding is needed, and no table or column is added.
+
+- Run `lambo provision` on each store. Its re-key marker changed, so the
+  first run scans the store once and re-keys any concept whose canonical key
+  held an empty stem (from a standalone `''s` token) (#301). A durable name
+  with such a key now stops its session from opening, and the error names
+  the row; the #301 entry below gives the SQL to find and remove it.
+- A write that meets an in-session embedder outage answers `pending_replay`,
+  not `failed` (#295). `failed` now means this server wrote nothing and will
+  not try again. `write_queue_failed` no longer counts embedder outages,
+  `write_queue_outstanding` counts held writes until they settle, and
+  `write_queue_replay_blocked` reads `embedder` or `other` instead of `null`
+  while intents stay owed.
+- On `lambo serve` and `lambo serve-web`, a token that starts with `-` is
+  passed as `--auth-token=-abc`; the space form is refused, as in 0.14.0
+  (#315). From the flag on, a rejected argument now prints as `<redacted>`,
+  and `serve-web` no longer quotes a malformed token. The exit code is still
+  `2`.
+- Sessions 0.14.0 could not load because of a mixed `parent_of`/citation
+  cycle now load, and `lambo canon alias-preview` and
+  `lambo names migrate --map` (preview and apply) move a citation that closes
+  such a cycle instead of refusing it (#325).
+- Ranking: zero-score ties under RRF and the default max fusion fall to the
+  tie-break (canonical key, then id) instead of the zero's sign (#328); an
+  exact durable-name match keeps its BM25 when that is above 1.0 (#288); a
+  dependency-question phrase routes to traversal only as whole words (#299).
+  Solo canonization dates a dependence by the turn that wrote it, so some
+  Solo Candidates and Venerables can lose score (#300).
+- `lambo re-embed`: a full re-embed refuses to replace a canary pin the live
+  embedder does not reproduce unless `--repin-canary` is given, and
+  `--missing-only` runs the canary, refusing on a drift under
+  `canary = "verify"` (#296). `--missing-only` on a session with no
+  embedding contract is refused before it embeds anything (#322).
+- A store error no retry can fix (an undefined table, a missing privilege)
+  degrades the session to `durability = "none"` at once and `close` returns
+  an error; a value the store rejects is dead-lettered (#301).
+- `[web] discover_sessions` is off by default, so existing configs serve
+  exactly their allowlist. A 0.14.0 binary refuses a file that sets it
+  (unknown key), so leave it out if you might roll back.
+- Library API: `StoreError` gains `Permanent` and `DropReason` gains
+  `HeldLane`, so an exhaustive `match` outside the crate must handle them;
+  `StoreError::Constraint` now also covers values the store rejects.
+
+### Changes
+
+- Recall: under RRF fusion (`[fusion] kind = "rrf"`), candidates whose
+  fused score is zero are now ordered by the tie-break (canonical key, then
+  id) like every other tie (#328). A candidate whose only leg score was
+  non-finite earns no rank and fused to `-0.0` (an empty `f64` sum), while
+  one ranked only in a leg of weight zero fused to `+0.0`, and the sort put
+  every `+0.0` first: with a zero leg weight configured, a keyed concept
+  could sort after keyless ones. The fused sum now starts at `+0.0`, and a
+  `-0.0` leg score ranks with `+0.0` by the tie-break. The same held under
+  the default max fusion: a candidate whose best leg score was `-0.0`
+  sorted after one at `+0.0` whatever their keys; every fused value is now
+  normalised so a zero is `+0.0`. Found by the #291
+  differential oracle; `Fusion.lean` already ordered them this way.
+- Load: a session holding a cycle that mixes `parent_of` with citations or
+  action edges now loads (#325). The write-time checks refuse a cycle in
+  `Causal`/`Dependency` (`record_action`, `depends_on`) and, separately, a
+  cycle in the `parent_of` hierarchy, but the load check refused a cycle
+  through any mix of the three. A child citing its own parent
+  (`depends_on: [P]` with `parent_of: [(P, C)]`, in one call or two) was
+  written and flushed, and every later load of the session (a restart,
+  `lambo names assign`, canon dry-run, the names migration) failed with
+  "Causal/Dependency/Hierarchical cycle detected" until the database was
+  edited by hand. The load check now checks the same two conditions as the
+  write checks (spec §5.7), so a session already written this way loads
+  with no data change; a cycle within either condition is still refused.
+  `lambo canon alias-preview`, which refused to move a citation that
+  would close such a mixed cycle, now moves it like any other, and
+  `lambo names migrate --map ...` (preview and apply), which refused the
+  whole upgrade with "alias repair would create a cycle" for such a
+  citation, now accepts it. Both still refuse a move that would close a
+  `Causal`/`Dependency` cycle. Modelled first in
+  `formal/LamboProofs/Cite.lean` (`written_loadOk`,
+  `union_check_rejects_written`, `redirect_preserves`).
+- Formal models: `formal/models.toml` maps each Lean model in
+  `formal/LamboProofs/` to the Rust files and items it models and a
+  `read_digest`, a fingerprint of that Rust as it was when the model was last
+  read (comments and `#[cfg(test)]` code blanked, whitespace collapsed outside
+  string and char literals, literals kept verbatim), and
+  `scripts/formal/check-model-drift.py` flags a model whose Rust no longer
+  matches it (#291). The warning stays until the model is re-read and bumped
+  with `--bump <Model>`; editing the model file alone does not clear it, and
+  since the ref list is part of the fingerprint, dropping or narrowing a ref
+  is drift too. The check needs no git history, so it holds across squash and
+  rebase merges and in shallow clones. An optional `read_against` commit
+  narrows the report to the refs that changed, at their changed lines, only
+  when it is in the clone and the refs there fingerprint to `read_digest`;
+  otherwise every ref of the model is listed. Digests are written
+  `v<N>:sha256:<hex>`, N the digest scheme: after a change to the
+  normalisation the check fails once with "digest scheme changed" until
+  `--bump-all` is run. Drift is a warning, not a failure (`--strict` makes it
+  one); a broken manifest (a model with no entry, a listed path or item that
+  no longer exists, a malformed `read_digest` or one of another scheme)
+  fails. `formal/README.md` says how to clear the warning.
+- Property tests (#291): proptest (dev-dependency only) checks the Rust
+  against the Lean theorems with generated inputs, each oracle written from
+  the Lean definition rather than from the code under test: graph expansion
+  (`Expand`), the member and tie-break orders (`Order`), forced members and
+  the #181 selection (`TopK`), context fitting (`Fit`), the lease fence
+  (`Lease`), the citation cycle check (`Cite`), one canonization cycle
+  replayed against Lean `cycle` (`Canon`), canonical keys (`Canonical`) and
+  candle's length chunks (`BatchQueue`). `rank_members` now sorts by a named
+  `rank_cmp`, unchanged, so the order laws run on the real comparator.
+  Cases default to 256 (`PROPTEST_CASES` overrides) and no regression files
+  are written.
+- Formal models: a differential oracle (#291). `lake exe oracle`
+  (`formal/OracleExport/`) evaluates the Lean definitions over a fixed set of
+  generated inputs and writes inputs and outputs to `formal/oracle/*.json`;
+  `src/formal_oracle_tests.rs` replays every input through the real Rust and
+  asserts the Lean output, so nothing in the comparison is transcribed from
+  the model by hand. Covered: `Order` (`rank_cmp`, `rank_members`,
+  `tie_break_by_key`), `Fit` (`fit_blocks`), `Canonical` (`canonical_key`,
+  `unfiltered_canonical_key`, `name_key`), `TopK` (`emitted`, with and
+  without the #181 selection), `Expand` (`expand`), `BatchQueue`
+  (`length_chunks`, with `embed-candle`), `Score` (`score`,
+  `bonus_and_modifier`, within `1e-9` of the exact model), `Fusion` (RRF in
+  `rank`) and `Canon` (the transition gate and stage predicates). Where a
+  model leaves Rust logic abstract (the stemmer, `tie_form`, the redundancy
+  signals, graph adjacency), the inputs are restricted to where it is
+  trivial and the test checks that first. `scripts/formal/check-oracle.sh`
+  regenerates the vectors and fails if the committed ones are stale; a
+  change under `formal/oracle/` runs the Rust CI. The oracle found that RRF
+  ordered two candidates whose exact value is zero by the sign of the zero
+  instead of by the tie-break (#328, fixed below). Test-only
+  `formal_oracle` modules expose the private functions.
+- Formal models: the constants the Lean models in `formal/LamboProofs/`
+  hard-code are now pinned to the Rust (#291). `src/formal_constants_tests.rs`
+  has one test per model that asserts each threshold, weight, bound and
+  default the model copies (Stage 1 to 3 thresholds, score weights and bonus
+  bounds, the write-queue and receipt caps, the RRF defaults, the backoff
+  ladder, the serve's retry and grace constants, the coalescer's batch
+  constants and others), with fixed-point values asserted at the model's
+  scale. Each test reads its model's source, comments dropped, and compares
+  the Rust against the value the model states: a scalar is parsed from its
+  one declaration and must be a bare literal, a formula is matched as a
+  shape whose literals are read out, and a table over an enum is evaluated
+  per constructor. Each value is written once, in the model, so changing a
+  constant on either side fails the test and names the Lean definition (a
+  `Bool` guard's operators, outside its values, are still a second copy in
+  the test); a
+  change under `formal/LamboProofs/` now starts the Rust CI. A new Rust
+  variant does not compile until its Lean constructor is named, and a new
+  Lean constructor fails the test. Private constants are read through
+  test-only `formal_pins` aliases; no production visibility changed.
+  `Registry.lean`'s witness `cfgEx` mixes fixed constants with example
+  settings (a 60 s `idle_detach`, `max_attached = 2` and the `cap` it
+  gives); its doc now says which are which, and the test builds the settings
+  as a `ServeConfig` and checks `ServeConfig::validate` accepts them.
+- Recall tier: a flush that changes a session's embedding contract is now
+  re-indexed from the store instead of mirrored (#319). `lambo re-embed`
+  into another model drains every rewritten concept before the trailing
+  `SetEmbedding`, and the mirror projected those vectors into the **old**
+  contract's index, wrote nothing to the new one, advanced the sync marker
+  and stayed in sync: vector recall under the new contract silently found
+  nothing until `lambo recall-index backfill`. The `--allow-embedding-mismatch`
+  relabel (a lone `SetEmbedding` over kept vectors) left the new index empty
+  the same way. Now a batch that moves an existing contract, or stamps one
+  after an upsert that carries a vector, writes nothing to the index: the
+  session goes stale (not counted as a mirror failure), its reads fall back
+  to the store, and the writer asks for a repair from the durable snapshot,
+  which indexes every vector under the new contract and sweeps the old
+  contract's documents. The repair starts right away unless a recent failed
+  repair is still backing off, in which case it runs once the backoff ends.
+  If the command releases the lease before the repair finishes, the next
+  writer's load finishes it. Batches without a contract
+  change, and first stamps that come before the concepts (every derive), are
+  mirrored as before. Modelled first in `formal/LamboProofs/Tiered.lean`
+  (`mirror_switch_writes_nothing`, `write_agrees`,
+  `reembed_migration_repaired`).
+- Flush loop: a store error that no retry can fix and that is not a
+  constraint violation is no longer retried (#301). Both SQL adapters
+  mapped it to a retryable backend error, so the batch was retried, kept,
+  and resent every 10 s until the backlog passed `backend_log_max`, against
+  the classification's own "everything else is permanent". Such errors now
+  split by scope:
+  - An error about the store itself, such as an undefined table (SQLSTATE
+    class `42`, SQLite "no such table") or a missing privilege, is the new
+    `StoreError::Permanent`: the flush loop does not retry it, the session
+    degrades to `durability = "none"` at once, and `close` returns an error.
+  - An error about a value the batch holds (SQLSTATE classes `21`, `22`,
+    `44` and `54000`; `SQLITE_TOOBIG`, `SQLITE_MISMATCH`), such as a
+    character the encoding cannot hold, is reported as
+    `StoreError::Constraint` and dead-lettered like a constraint violation:
+    the batch is dropped and counted in `dead_lettered`, and the session
+    goes on. `StoreError::Constraint`'s message now reads "constraint
+    violated or value rejected".
+
+  The permanent codes are an explicit list per adapter
+  (`src/store/error.rs`); connection failures, timeouts, serialization
+  conflicts, `SQLITE_BUSY` / `SQLITE_LOCKED`, `0A000` (Postgres also returns
+  it for a cached plan that clears on reconnect), errors without a code and
+  any code not on the list stay retryable as before. The Postgres /
+  CockroachDB transaction replay no longer replays a permanent error. A
+  server's background attach still retries a permanent store error, as it
+  did the backend error it used to be, so a pinned session recovers once
+  the operator fixes the store (a migration, a `GRANT`) without a restart.
+  An attach that hits a value rejection, now a constraint error, marks the
+  pinned session failed instead of retrying it. A rejected value's statement
+  and the driver's message are logged at warn (`StoreValueRejected`) when it
+  is mapped, since the dead letter keeps only its code.
+  The adapters now tell SQLite and Postgres codes apart by the driver's
+  error type, so a numeric SQLSTATE whose low byte matches a SQLite code
+  (`42501` and `22021` read as `SQLITE_BUSY`) is no longer misread.
+  `docs/reference/api.mdx` describes the new paths under
+  `backend_flush_retries` and `backend_log_max`, and
+  `docs/reference/mcp.mdx` what `dead_lettered` now counts.
+  **Breaking (library API):** `StoreError` has a new variant, `Permanent`,
+  so an exhaustive `match` on `StoreError` outside this crate no longer
+  compiles until it handles it. `StoreError::Constraint` is wider: a caller
+  that treats it as a key collision now also gets the codes of SQLSTATE
+  classes `21`, `22` and `44` and `54000`, and `SQLITE_TOOBIG` and
+  `SQLITE_MISMATCH`.
+- `lambo re-embed` on a session with no embedding contract (for example one
+  written before contracts existed, which the load tells you to re-embed) now keeps
+  the vectors it writes (#322). The batch wrote the new vectors and then
+  stamped the contract, and every store treats a first stamp as the legacy
+  upgrade that nulls all of the session's vectors in the same transaction,
+  so the session ended under the live contract with no vector while the
+  command reported full coverage. On such a session the contract is now
+  stamped first, then the vectors are written; a session that already has a
+  contract is re-embedded exactly as before. `lambo re-embed --missing-only`
+  on a session with no contract is now refused before it embeds anything,
+  naming the full re-embed (it was refused only after embedding every
+  concept). The load warning and `docs/reference/cli.mdx` now say what to
+  run: the full re-embed while no writer has attached since, and
+  `--missing-only` once one has, since a writer attach records the live
+  contract.
+- Flush loop: the lease read behind the erased check that follows a failed
+  flush, and the flush-stats row write, now run under the same 30 s timeout
+  and panic containment as a flush attempt (#301). A store adapter that
+  panicked in either killed the flush task with the batch it held:
+  `degraded` stayed false, nothing was counted, and `close` logged the join
+  error and returned `Ok` over the lost batch. One that never returned kept
+  the flush loop from serving `close`'s stop, so `close` never returned. A
+  lease read that panics or times out now counts as a read that failed (the
+  session is not erased), so the batch is retained as after any failed flush;
+  a stats write that panics or times out is logged and ignored, as a failed
+  one was.
+- Security: `lambo serve-web --auth-token` no longer prints a malformed
+  token (#315). The flag was parsed through `AuthToken`'s `FromStr`, so
+  clap's error quoted the refused value (`invalid value 'NOTASECRET-probe '
+  for '--auth-token <TOKEN>': ...`), and a token with a stray trailing space
+  reached stderr and any log capturing it. The refusal is now built the way
+  `lambo serve`'s is: it names the flag and the rule the token broke, says
+  the value is not shown, and still exits `2` at parse time, before
+  `lambo.toml` is read. `docs/reference/cli.mdx` already promised this.
+  `formal/LamboProofs/Resolve.lean` models the fix
+  (`serveWebFlagRefusalFixed`, and `render_noninterference` now covers this
+  path).
+  On `lambo serve` and `lambo serve-web`, clap's "unexpected argument"
+  error could also print a token: one starting with `-` was taken for a
+  flag (`--auth-token --abc` printed `'--abc'`, `-abc` printed `'-a'`), and
+  the rest of an unquoted token with a space was printed whole. From
+  `--auth-token` on, an argument the command does not accept, an invalid
+  value of a flag it accepts (`--port <it>`) and an unrecognized subcommand
+  are now shown as `<redacted>`, with a tip to check the arguments and quote
+  the token; the usage line, where clap prints one, is replaced by the
+  command's plain usage. The exit code is still `2`.
+  An unexpected argument before the flag, a missing value ("a value is
+  required") and a misplaced `--auth-token` itself are shown as before. A
+  flag right after `--auth-token ` is still refused, never taken as the
+  token; a token that starts with `-` is given as `--auth-token=-abc`.
+  `Resolve.lean` models this path (`quotedRender`, `authFlagValue`).
+
+- Embedding canary drift repair (#296). On a drift the refusal told the
+  operator to run `lambo re-embed`, which refuses a session already under the
+  live contract, the only state a drift is detected in. `lambo re-embed
+  --rewrite-same-contract` now rewrites every text vector of such a session
+  in place and keeps the contract; it is refused on a session under another
+  contract or with no vector, and checks the lease, widths and image vectors
+  as a migration does. A plain `lambo re-embed` on a same-contract session is
+  still refused, now before embedding anything and naming the two modes. The
+  drift refusal and `docs/reference/config.mdx` name the new flag, and
+  `docs/reference/cli.mdx` gains *Repairing a canary drift*.
+  `lambo re-embed --missing-only` now runs the embedder canary like any
+  writer attach: under `canary = "verify"` a drift refuses it before it
+  writes (it used to backfill vectors from the drifted embedder). A full
+  re-embed now reads the store's canary pin for the live contract before it
+  writes and refuses to replace a pin the live embedder does not reproduce
+  (a drift, or a check that could not run) unless `--repin-canary` is given,
+  because the store's other sessions under that contract rest on it; the
+  re-pin used to be silent, and its warning keyed on a condition no
+  successful rewrite met. With the opt-in the output says those sessions are
+  no longer flagged. A check that could not run (the embedder errored, timed
+  out, or answered the wrong width) is refused with advice to retry once the
+  embedder answers; `--repin-canary` there is only for a pin known to be from
+  another build. `--repin-canary` under `canary = "off"`, which neither
+  checks nor pins, is a usage error rather than silently ignored. If the
+  re-pin fails after the rewrite is durable, the output names the recovery
+  (`lambo re-embed --rewrite-same-contract --repin-canary` on that session),
+  which `docs/reference/cli.mdx` also documents for a process that stops
+  between the two. A drift refusal reached through `--missing-only` now
+  advises the in-place rewrite instead of `--allow-embedding-mismatch`, which
+  re-embed refuses. The `--allow-embedding-mismatch` WARN ("relabeled the
+  session's existing vectors") is now logged after the relabel succeeds,
+  never ahead of a cross-kind relabel that refuses.
+  `formal/LamboProofs/Contract.lean` models the fix (`reembedCmdFixed`).
+
+- Solo canonization: a dependence is now dated by the turn that wrote it, in
+  both of the Solo score's time terms (#300). The recurrence term
+  (`supporting_interaction_times`) dated a `Dependency` edge by its source
+  concept's origin interaction, and the dependents term credited every
+  dependence edge to its dependent's origin, so a dependence written later
+  by an older concept was invisible: `record_action` reuses an existing
+  action node, and a day-5 repeat of an action first recorded on day 0,
+  adding `depends_on` Y, added no session to Y and, when Y came from the
+  day-0 turn too, no dependent either. The recurrence term now reads the
+  edge's own about-time (`Edge::about_time`, stamped from the writing turn),
+  and the dependents term (`canon::solo_dependent_interactions` and
+  `solo_dependent_interaction_counts`, read by `SoloScorer` and Solo's
+  inspect breakdown) credits the interaction flushed at the edge's
+  `created_at`, falling back to the dependent's origin when no single
+  interaction was. The own-origin exclusion now asks whether the pillar's
+  own turn wrote the dependence. Where every dependence was written in its
+  dependent's origin turn (a fresh action or concept, the usual case)
+  nothing changes. Scores can also drop: a dependence written in the
+  concept's own turn from an older concept (a repeated action whose
+  `depends_on` creates the concept) no longer counts as a dependent and its
+  support moves to the writing day, so existing Solo Candidates and
+  Venerables can lose score. Re-sending an identical dependence reinforces
+  the edge and keeps its date, so it still adds nothing. Swarm's Stage 1
+  count and Stage 2's span keep crediting the dependent's origin,
+  unchanged, so a concept can now become a Solo Candidate on writer-dated
+  evidence that Stage 2 does not count toward Venerable. The evaluator
+  resolves writers once per graph epoch and lends them to the policy
+  (`PromotionScorer::candidates_with` / `admits_hop_with`, `canon::Writers`),
+  so a cycle does not rebuild them per concept, and only for a policy whose
+  `PromotionScorer::reads_writers` is true (Solo): a Swarm cycle with
+  supersession off resolves none, as before. The dry run resolves them at
+  most once per survey.
+  `formal/LamboProofs/Policy.lean` models the fix
+  (`reused_action_dependency_is_dated_by_its_writer`).
+- Replacement candidates: a concept the store's vector hits list more than
+  once is now listed at its highest cosine, not at its first occurrence's
+  (#302). `select` documented its hits as taken "in any order" and its
+  candidates as "ranked by cosine", but the first occurrence decided the
+  cosine and so the rank. Latent: no current vector source returns a
+  duplicate id. `formal/LamboProofs/Supersession.lean` models the fix
+  (`selectF`) and proves the list does not depend on the order or repetition
+  of the hits (`selectF_order_independent`).
+- Canonical keys: an empty stem no longer reaches a key (#301, item 1). The
+  Snowball English stemmer stems a standalone `''s` (or `''s'`) token to the
+  empty string, and the tokenizer kept it, so `''s-lease` keyed as
+  `" leas"` (a leading space, and a different concept from `lease`) and the
+  name `''s ''s` keyed as `" "` and was accepted. `normalize_tokens` now
+  drops empty stems, so a key never has a leading, trailing or doubled
+  space: `''s-lease` keys as `leas`, and an input whose stems are all empty
+  keys as the empty key, which names, `derive` and `record_action` already
+  refuse. Only keys containing an empty stem change; every other key, and
+  the keyword index's terms for text without one, are unchanged.
+  `formal/LamboProofs/Canonical.lean` models the fix (`keyF`, `keyF_tidy`,
+  `keyF_eq_key`, `issue301_fixed`).
+
+  Stored data written before this change:
+
+  * **Concepts.** `lambo provision` re-keys a stored concept whose key held
+    an empty stem, and now also recognises keys written between #148 and
+    this change (identifier unstemmed, empty stem kept). The re-key marker
+    in `store_meta` changed, so the next plain `lambo provision` scans each
+    store once (`--rekey` forces it as before). A concept whose current key
+    would be empty (text of only stopwords and `''s` tokens, stored as
+    `" "`) keeps its old key and is listed in the provision line ("kept
+    their old key because the current rule gives them an empty key"): the
+    re-key never writes an empty key. Like a collision, such a row keeps
+    the marker from being recorded, so every provision scans and reports it
+    again until the concept is removed with the API's `retract`, given its
+    full id (the provision line lists the ids; a write of the same text
+    derives the empty key and is refused, so it cannot be rewritten). A concept is
+    also never re-keyed onto the key of a durable name bound to another
+    concept, which would stop the session loading: it keeps its old key and
+    is reported as a collision.
+  * **Durable names.** A stored name whose key held an empty stem makes the
+    whole session fail to open (every command that loads it, `lambo names`
+    included), by design: the name no longer passes the load-time name
+    check. The error names the row, for example
+    `invariant violated: concept name "''s-lease" of session dogfood (bound
+    to <node id>) has key " leas", but the current rule derives "leas"`, or,
+    for a name whose stems are all empty, `... concept name "''s ''s" of
+    session dogfood (bound to <node id>) has key " ", but the current rule
+    refuses the name: ...`. Find and
+    remove the row with the session stopped (the same SQL on SQLite,
+    Postgres and Cockroach; double each `'` inside a literal), then declare
+    the name again if it is still wanted:
+
+    ```sql
+    -- Find: names whose stored key has a leading, trailing or doubled space.
+    SELECT session_id, name, name_key, node_id FROM concept_names
+     WHERE name_key LIKE ' %' OR name_key LIKE '% ' OR name_key LIKE '%  %';
+    -- Remove one, by its primary key.
+    DELETE FROM concept_names
+     WHERE session_id = '<session>' AND name_key = '<stored key>' AND name = '<name>';
+    ```
+
+    Updating `name_key` to the current key instead keeps the binding only
+    if no other name or concept in the session holds that key.
+
+- Conflict detection: a re-send by another agent no longer drops an edge's
+  original writer from the conflict agent set (#297). Re-sending an edge (the
+  same source, target and type, through `record_action` or `lambo_derive`'s
+  `depends_on`) reinforces the one edge and moves its `last_reinforced`, and
+  `daemon::conflict` resolved the edge's writer only at that latest write,
+  so the edge read as the re-sender's alone and a real conflict could vanish.
+  An edge now contributes its writers at its first write (`created_at`, the
+  instant contradiction dating already attributes at) and at its latest
+  write. The window test, the named `writer` and `seconds_ago` still describe
+  the latest write. Where no edge was re-sent nothing changes, and every
+  conflict the old rule found still fires. The graph keeps only an edge's
+  first and latest write, so a writer between them (re-sent over by a third
+  write) is still not attributable. `formal/LamboProofs/Conflict.lean` models
+  the fix (`conflictAtFixed`).
+- Recall: a dependency-question phrase ("depends on", "dependents of",
+  "what uses", "safe to delete", ...) now routes a query to graph traversal
+  only where it stands as whole words (#299). The classifier was a substring
+  test, so "the answer depends only on the score" (via "depends on"), "who
+  are the independents of the senate" and "the team somewhat uses the old
+  schema" were answered by traversal when the words after the phrase named a
+  concept with dependents. The phrase now follows the word rule subject names
+  already follow (letters, digits, `_` and combining marks are word
+  characters; a hyphen between word characters joins them), and anchor
+  resolution measures a subject's distance only from those whole-word
+  phrases. `formal/LamboProofs/Dispatch.lean` models the fixed classifier and
+  proves that a phrase glued to a longer word never counts, that every phrase
+  as whole words still does, and that the dispatch theorems hold for it.
+- Daemon: a cycle no longer lets an entry it has stopped detecting evict a
+  fresh hot-list warning (#298). `detect_into_hot_list` used to enforce the
+  bound and the contradiction budget on every insert and drop undetected
+  entries only afterwards, so on a full list an old entry of a higher tier
+  (say a lapsed conflict) could push off a fresh high-risk, drift or stale
+  hit and then be dropped itself, leaving the list below its bound and the
+  hit without its warning line or force-inclusion until a later cycle. The
+  detectors now insert inside a new crate-internal `HotList::sync_cycle`,
+  which defers the sort, the bound and the budget while they run (inserts
+  refresh or push through an index, so a cycle sorts the list once instead
+  of once per hit), cuts the list to the cycle's condition set, then
+  enforces both once (also when a detector panics). While the cycle's hits
+  fit, the list now holds every one of them; when they do not, only they
+  are evicted, the lowest-priority first (contradictions over the budget
+  first, which may outrank a kept entry of another kind). Events are
+  unchanged. `prime_offline` shares the path. `formal/LamboProofs/Hotlist.lean` models
+  the fixed cycle (`cycleFixed`) and proves it keeps the invariant, keeps
+  every fresh hit that fits (`cycleFixed_keeps_hits`,
+  `cycleFixed_keys_eq_hits`), evicts only detected entries, ranked at or
+  below every kept one except for contradictions over the budget
+  (`cycleFixed_evicts_only_for_held`), and agrees with the old cycle
+  whenever that one evicted nothing while inserting. That the two agree
+  whenever no entry lapses, even with overflowing hits, is checked on
+  examples only.
+
+- Single-writer lease: a holder that lost its lease is now fenced even when
+  its own heartbeat takes the lease back (#293). A refresh is an acquire, so
+  after the documented operator takeover (or a takeover and release by another
+  writer between two heartbeats) the wedged holder's next refresh could re-take
+  the row at a new fencing token. The heartbeat ignored that token, so it never
+  latched the fence, while every flush still presented the old token and was
+  refused as stale, retained and re-sent every 10 seconds; the session kept
+  accepting writes until it degraded, and other writers were refused the whole
+  time. The heartbeat now latches the fence when a refresh comes back at a
+  token other than the one the session holds, and stops refreshing, so the
+  re-taken lease lapses at its TTL. It also stops after latching on a lease
+  held by another writer, so a fenced handle can no longer re-take the lease
+  once that writer releases it. The Elasticsearch recall tier no longer adopts
+  a re-taken token as held, so a fenced handle's index repair stops at its
+  next fence check. In the flush loop a `StaleWrite` is now
+  terminal, as `StoreError::is_retryable` documents: it latches the fence and
+  the pending batch is dropped as a fenced handle's is, never retained or
+  re-sent. The loop also checks the fence after each drain and before each
+  retry, so no flush is issued once the fence is latched (it was seen one pass
+  late), and a stop that arrives after the fence drops the tail instead of
+  handing it back for `close`'s final flush. A fenced loop no longer publishes
+  its flush-stats row. Because the fence can now latch while `close` stops the
+  flush loop (a flush in flight comes back stale), `close` checks the fence
+  again after joining the loop, and reports the lease-lost error, answers
+  set-aside writes `close_unflushed` and keeps its hands off the lease,
+  instead of returning `Ok` over the dropped batch. The lease-lost error now
+  names every way the lease can be lost (expiry, a forced takeover, a flush
+  refused as stale). `formal/LamboProofs/Flush.lean` and `Lease.lean` model
+  the fixed heartbeat, loop and close and prove that after any takeover the
+  fence latches at the next heartbeat, that no flush is issued after it
+  latches, that a stale write is never re-sent, that the loop itself loses
+  nothing silently, and that `close` returns `Ok` only when every batch that
+  left the loop was committed or dead-lettered.
+- Write queue: a lane whose worker panicked is no longer stranded. The
+  panicked worker's finished handle stayed in the lane table, so admission
+  saw a worker and spawned none, and every later write of that agent stayed
+  `pending` for the rest of the serve. Admission now replaces a finished
+  handle with a new worker and logs an error; the write that was running
+  stays unsettled until the session closes (then `intent_durable`).
+- Write queue, re-review of the #295 hold. Held writes could be stranded:
+  they counted against admission while the only retry was the agent's next
+  admitted write, so a lane (or the whole queue) full of held writes refused
+  every write that could have retried them, and an agent waiting on its
+  `pending_replay` receipt never wrote again. An agent's worker now stays
+  alive while it has held writes and retries the oldest on a backoff timer:
+  1 s after the failed attempt, doubling per failed attempt, at most 30 s
+  (the embed budget). No new write is needed, and none starts a retry
+  sooner, admitted or refused, so an agent resubmitting in a loop costs no
+  extra embeds; a write that never embeds costs one attempt (itself up to
+  30 s) per cycle of at most a minute. A refusal caused by held writes says
+  they are retried in the background instead of telling the agent to wait on
+  receipts; it is a new `DropReason::HeldLane` variant, which breaks code
+  that matches `DropReason` exhaustively. Held writes now stay
+  counted until each settles: their bytes against the payload cap (they used
+  to leave it when taken off the queue), and the lane and queue counts during
+  a retry (a retry used to take every held write out of the count). The
+  worker takes one write at a time and checks the lease fence before each,
+  so a lease lost during a retry runs no later held write. A lookup timeout
+  in session follows the replay's rule: one settles its write `failed`, and
+  only a run of three in a row (the store slow for everyone) holds it; the
+  run counts first attempts only, so the held write's retry settles it
+  `failed` if the lookup times out again, and a lookup that is slow every
+  time for one input never holds a lane for the serve. A held write's
+  `pending_replay` detail, and the refusals held writes cause, now say it may
+  be held in this server, behind an embedder outage or a slow vector lookup,
+  not only owed by an earlier one. Counters: an embedder outage no longer counts
+  in `write_queue_failed`, and held writes count in `write_queue_outstanding`
+  until they settle. A replay halted by a lost lease or a closing session
+  with intents owed now reports `write_queue_replay_blocked = "other"`
+  instead of `null`. Only a receipt id in another version of the format
+  (`lwr<digits>.` other than `lwr1.`) is quarantined, and named once per row
+  at each start; any other unparseable id is settled `failed`. To clear a
+  quarantined row, serve the session with the build that wrote it, or delete
+  the row (dropping that write): `DELETE FROM write_intents WHERE session_id
+  = '<session>' AND receipt = '<receipt>';` in SQLite or Postgres.
+  `formal/LamboProofs/Drain.lean` adds an event model with admission, the
+  caps, retries and the fence, and proves that a retry of held writes needs
+  no admission and is always available while writes are held (that it comes
+  due is the timer, which the model does not cover), that the caps hold over
+  held writes and their bytes and are never read by a retry, that nothing
+  taken after the fence is applied, and that per-agent order holds from the
+  session through the next serve.
+- Write-queue replay, review follow-ups to #295. An agent the replay deferred
+  at a transient embedder answer now gets one more attempt at the end of the
+  pass, from its oldest owed intent, so a write that blinked once no longer
+  waits for the next serve; one that fails both attempts still holds its
+  agent's intents, in order, for the next serve (bounding a write that never
+  embeds is an open question). A durable intent whose receipt id is in
+  another format (an `lwrN.` prefix other than `lwr1`, as a newer build would
+  write) is no longer settled `failed`, which could not be undone: it is
+  quarantined, left owed and warned about at seeding and at replay, and its
+  agent's later intents wait behind it. Only a malformed `lwr1.` id is still
+  settled `failed`, and the seeding warning now says which of the two a row
+  is (and nothing about settling a row already consumed).
+  `write_queue_replay_blocked` is no longer `null` while a finished replay
+  leaves intents owed: `embedder` when an agent was deferred at an outage,
+  `other` when only quarantined intents hold others back.
+  `formal/LamboProofs/Drain.lean` models the retry pass, the quarantine and
+  the block reason, and proves the order still holds through both passes,
+  that a retry the embedder answers leaves nothing owed, and that the block
+  reason is never null while intents are owed.
+- Write queue: an embedder outage in session no longer lets one agent's later
+  write apply ahead of the write it left owed (#295, the in-session half). A
+  write the worker reaches during an outage is now held: its intent stays
+  owed, as before, and its receipt answers `pending_replay` instead of
+  `failed`, since it may still apply in this serve. The agent's later writes
+  are held behind it, also `pending_replay`, and the worker re-attempts the
+  held writes, oldest first, before the agent's next write: once the embedder
+  answers they apply in order (`applied`). Writes still held at close answer
+  `intent_durable` and the next serve replays them in order. Other agents are
+  not held. Held writes count against the lane and queue bounds at admission,
+  and each failed re-attempt logs a warning naming the attempt count, so a
+  write that never embeds is visible. `failed` now means this server wrote
+  nothing and will not try again (part of #302; a lease loss is the one case
+  where another server may still apply it). `formal/LamboProofs/Drain.lean`
+  models the hold and proves each agent's writes of one process apply in
+  admission order in session and across the next serve, whatever the embedder
+  answers.
+- Write-queue replay keeps one agent's writes in order and stops trusting the
+  wall clock for it (#295). A transient embedder answer at replay (below the
+  three-in-a-row threshold) used to leave that intent durable and go on to
+  the next, which could be the same agent's later write, so a later serve
+  applied the agent's writes out of order. Now it defers that agent for the
+  rest of the serve: its later intents wait too, other agents' intents still
+  apply, and the threshold still counts transients across them; the next
+  serve replays the agent's writes in order. Within one process, intents now
+  replay in `lane_seq` (admission) order even when its clock stepped back
+  between two admissions: the adapters still load by (`issued_ms`,
+  `lane_seq`), which decides how different processes' intents interleave, and
+  the replay puts each process's own intents in `lane_seq` order within that
+  (`writeq::replay::replay_order`; the rows carry no epoch column, so Postgres
+  and SQLite share the one ordering). An intent whose receipt id does not
+  parse is settled `failed` instead of being skipped on every serve and
+  counted in `write_queue_replay_owed` forever, and the seeding warning now
+  says so. (A write the in-session worker meets during an embedder outage is
+  covered by the later #295 entry above: it is held and answers
+  `pending_replay`.) `formal/LamboProofs/Drain.lean` models the fixed
+  replay and proves that, across serves and whatever the embedder answers,
+  each agent's writes of one process apply in admission order, with no clock
+  assumption.
+- Write-queue replay: a durable intent refused at replay because its input no
+  longer fits the graph now settles `failed` and the replay goes on, as a
+  cycle refusal already did and as the in-session worker does (#294). The
+  refusals are a second derive of one `Observation`, a second `Hierarchical`
+  parent for a child, and a `parent_of` pair whose ends resolve to one
+  canonical key or one concept. Two such writes acked back to back both pass
+  the ack; before, the second took the replay's stop arm (block reason
+  `other`), so it and every intent behind it stayed `pending_replay` on every
+  serve. They are marked by `StoreError::is_input_refusal` (a message prefix
+  on `StoreError::Invariant`, like `is_cycle_refusal`, which it includes); any
+  other `Invariant` still stops the replay. What a caller is told is unchanged
+  (`store error`). `formal/LamboProofs/Drain.lean` models the fixed step and
+  proves the replay settles every input refusal and still stops on every other
+  non-transient error.
+- Recall: an exact durable-name match now raises the named concept's
+  phase-1 keyword score to at least 1.0 instead of overwriting it with 1.0
+  (#288). BM25 is unnormalized and routinely above 1.0, so the overwrite could
+  drop the concept the query named below a weaker lexical neighbour under max
+  fusion. The per-hit keyword leg (`legs.keyword`, the ledger's per-hit
+  `legs.bm25`) for the named concept is now the higher of its BM25 and 1.0,
+  its BM25 read off the whole ranked search: a named concept whose hit ranks
+  beyond phase 1's keyword over-fetch cap (`top_k` times 4) keeps its BM25
+  too, where it used to get exactly 1.0, and no other node beyond the cap
+  joins the leg. `top_legs.bm25`, `top_legs.exact_name_match` and
+  `confidence` are unchanged. `formal/LamboProofs/Fusion.lean` models the
+  step and proves that, under max fusion, the named concept's phase-1 fused
+  score and its phase-1 rank can no longer fall, and that other nodes' leg
+  scores are untouched (RRF fusion is not modelled).
+- `lambo serve-web` gains opt-in store-wide session discovery (#276):
+  `[web] discover_sessions = true` or `--discover-sessions` (default off, so
+  existing configs serve exactly their allowlist). On, callers whose scope
+  already covers every served session (the unauthenticated loopback window,
+  `LAMBO_AUTH_TOKEN` / `--auth-token`, a `[[web.credential]]` `"*"`) also read
+  every live session in the store at `/s/<session>/`, including sessions
+  created after startup, without editing `lambo.toml` or restarting.
+  Exact-name, `session_prefix` and inherited `[[serve.credential]]` scopes are
+  unchanged. Each request probes existence and erasure before a lazy,
+  `max_loaded_sessions`-bounded load, so erased (`lambo:erased`) and unknown
+  sessions keep the uniform `404` (an erased startup session stays an empty
+  page, as without discovery); names outside the addressed-id charset are
+  skipped. On a loopback bind discovery also registers `GET /api/sessions`,
+  which lists the store's sessions (from `GraphStore::store_health`) after the
+  served ones; beyond loopback the listing still needs `list_sessions`. Every
+  listing comes from a store read that began after the request arrived, so a
+  discovered session erased before the request is never listed. The portal
+  issues one read at a time (a read it gave up on after a timeout may still
+  be running in the store), and requests that arrive during a read share the
+  next one rather than reuse it (`formal/LamboProofs/Discovery.lean`).
 - Durable display names now surface through layered recall, `lambo_inspect`,
   and MCP tool schemas (#285). Layered recall preserves `LayeredHit::names`
   across merged and single-session recalls, emits `names [...]` in rendered

@@ -12,7 +12,7 @@ use super::*;
 /// position is fixed before its lane position is. Two calls the same agent
 /// has in flight *simultaneously* are not covered — `begin_interaction_full`
 /// and `admit`'s `lanes.lock()` are two critical sections with no ordering
-/// between them across threads (J3-R1-10). So what this test has to prove
+/// between them across threads. So what this test has to prove
 /// is the other half: the *drain* order within a lane, which is what
 /// decides which of two identical concepts is `created` and which is
 /// `matched`.
@@ -85,7 +85,7 @@ async fn each_agents_writes_drain_in_that_agents_submission_order() {
 /// `a_burst_past_the_bound_drops_and_counts_it`, which named a property it
 /// skipped: sealing is not the count bound, and because `Closed` used to
 /// ride `dropped_queue_full`'s counter the assertion below passed without
-/// the bound ever binding (J3-R1-5). The real bounds are exercised by the
+/// the bound ever binding. The real bounds are exercised by the
 /// three tests that follow.
 #[tokio::test]
 async fn a_sealed_queue_refuses_and_counts_it() {
@@ -119,7 +119,7 @@ async fn a_sealed_queue_refuses_and_counts_it() {
     );
     let counters = rig.pipeline.counters();
     assert_eq!(counters.dropped(), 1);
-    // J3-R1-8: a closing refusal is counted apart from a bound refusal, and
+    // A closing refusal is counted apart from a bound refusal, and
     // `dropped()` is still their sum.
     assert_eq!(counters.dropped_closed(), 1);
     assert_eq!(counters.dropped_queue_full(), 0);
@@ -137,7 +137,7 @@ async fn a_sealed_queue_refuses_and_counts_it() {
     );
 }
 
-/// **`DropReason::LaneFull`, exercised for real** (J3-R1-5): one agent
+/// **`DropReason::LaneFull`, exercised for real**: one agent
 /// bursting past its own lane's measured depth, behind an embedder slow
 /// enough for the queue to hold, with the count bound doing the refusing.
 #[tokio::test]
@@ -200,9 +200,9 @@ async fn a_burst_past_the_lane_bound_drops_and_counts_it() {
     );
 }
 
-/// **`DropReason::QueueFull`, exercised for real** (J3-R1-5): enough lanes,
+/// **`DropReason::QueueFull`, exercised for real**: enough lanes,
 /// each inside its own bound, to reach the aggregate one. This is the
-/// condition that existed before J3-R1-1 and it still has a job — the
+/// condition that existed before the per-lane bound and it still has a job — the
 /// per-lane bound alone would let N agents queue N x lane_bound writes.
 #[tokio::test]
 async fn enough_lanes_together_reach_the_aggregate_bound_and_it_counts_them() {
@@ -250,7 +250,7 @@ async fn enough_lanes_together_reach_the_aggregate_bound_and_it_counts_them() {
 }
 
 /// **`DropReason::QueueBytes` and `WRITE_QUEUE_MAX_BYTES`, exercised at
-/// all** (J3-R1-5): before this test nothing touched `lanes.bytes`, and a
+/// all**: before this test nothing touched `lanes.bytes`, and a
 /// count is the wrong unit for memory — which is the whole reason the byte
 /// bound exists.
 #[tokio::test]
@@ -352,4 +352,53 @@ async fn a_fenced_pipeline_refuses_every_queued_write() {
         0,
         "a fenced pipeline must not write"
     );
+}
+
+/// An embedder that panics on content containing "boom", as a bug in an
+/// embedder or the apply path would.
+struct PanicsOnBoom(FixtureEmbedder);
+
+#[async_trait::async_trait]
+impl Embedder for PanicsOnBoom {
+    fn dimensions(&self) -> usize {
+        self.0.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+        assert!(!text.contains("boom"), "the embedder blew up");
+        self.0.embed(text).await
+    }
+}
+
+/// **A panicked worker does not strand its lane.** A lane's worker that
+/// panics leaves its finished handle in `Lanes::workers`; before, admission
+/// saw a worker and spawned none, so every later write of that agent stayed
+/// `pending` for the rest of the serve. Now a finished handle is replaced.
+#[tokio::test]
+async fn a_lane_whose_worker_panicked_gets_a_new_worker() {
+    let rig = Rig::hybrid(
+        "wq-panicked-worker",
+        Arc::new(PanicsOnBoom(FixtureEmbedder::new())),
+    );
+    let agent = AgentId::new("agent-a");
+    let boom = rig.derive(&agent, "boom").await;
+    assert!(!boom.dropped());
+    until(
+        || {
+            rig.pipeline
+                .lanes
+                .lock()
+                .workers
+                .get(&agent)
+                .is_none_or(|h| h.is_finished())
+        },
+        "the worker to panic",
+    )
+    .await;
+    let next = rig.derive(&agent, "a later fact").await;
+    assert!(!next.dropped());
+    until(
+        || rig.pipeline.lookup(&agent, next.receipt).tag() == "applied",
+        "the agent's next write to apply",
+    )
+    .await;
 }

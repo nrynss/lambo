@@ -422,3 +422,32 @@ async fn names_conformance_cockroach() {
     store.init_schema().await.unwrap();
     check_names_and_repair(&store).await;
 }
+
+/// #301: a stored name the current rule refuses or keys differently fails the
+/// load, and both refusals name the row: name, session, target and keys.
+#[test]
+fn a_stale_name_row_is_named_in_the_load_error() {
+    let node = NodeId::new();
+    for (name, key, derived) in [("''s-lease", " leas", Some("leas")), ("''s ''s", " ", None)] {
+        let row = ConceptName {
+            session_id: SessionId::from("dogfood"),
+            name: name.into(),
+            name_key: key.into(),
+            node_id: node,
+        };
+        let err = super::validate_name(&row).unwrap_err().to_string();
+        for part in [
+            format!("{name:?}"),
+            "session dogfood".to_string(),
+            node.to_string(),
+            format!("{key:?}"),
+        ] {
+            assert!(err.contains(&part), "{part} not in {err}");
+        }
+        if let Some(derived) = derived {
+            assert!(err.contains(&format!("derives {derived:?}")), "{err}");
+        } else {
+            assert!(err.contains("refuses the name"), "{err}");
+        }
+    }
+}

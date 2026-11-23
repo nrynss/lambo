@@ -109,9 +109,14 @@ pub(super) async fn healthz() -> Response {
 /// one for a scope over every served session; never a prefix expansion, never
 /// another credential's names), in allowlist order, `no-store`.
 ///
-/// Registered only with `[web] list_sessions = true`; otherwise the path is
-/// unrouted, so it is the uniform 404 on every method. In memory only: no
-/// store call. Reached only through the gate, which attaches the caller's
+/// With `[web] discover_sessions` (#276), a grant discovery reaches also
+/// gets the store's live, non-erased, addressable sessions after the served
+/// ones (`super::discovery`), read on the request.
+///
+/// Registered only with `[web] list_sessions = true`, or discovery on a
+/// loopback bind; otherwise the path is unrouted, so it is the uniform 404
+/// on every method. Without discovery, in memory only: no store call.
+/// Reached only through the gate, which attaches the caller's
 /// grant; a request without one (never, behind the gate) is the uniform 404.
 /// So is a request that arrived scoped (`/s/{session}/api/sessions`, which
 /// `scope::scoped` already refuses before routing): the listing is the
@@ -124,15 +129,28 @@ pub(super) async fn api_sessions(
     let (Some(axum::Extension(Caller(grant))), None) = (caller, scoped) else {
         return crate::surface::session::not_found_response();
     };
-    json(
-        StatusCode::OK,
-        SessionList {
-            sessions: listable(&grant, &state.sessions)
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        },
-    )
+    let mut sessions: Vec<String> = listable(&grant, &state.sessions)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    // #276: a grant discovery reaches also gets the store's live sessions,
+    // after the served ones. A failed read lists the served ones only:
+    // never more than without discovery.
+    if state.discovery.reaches(&grant) {
+        match state.discovery.sessions(state.store()).await {
+            Ok(found) => sessions.extend(
+                found
+                    .iter()
+                    .map(|id| id.as_str())
+                    .filter(|id| !state.sessions.iter().any(|s| s.as_str() == *id))
+                    .map(str::to_string),
+            ),
+            Err(failure) => {
+                tracing::warn!(reason = %failure, "serve-web: listing served sessions only");
+            }
+        }
+    }
+    json(StatusCode::OK, SessionList { sessions })
 }
 
 /// `GET /api/session`: who this session is, which backends read it, and
@@ -144,8 +162,9 @@ pub(super) async fn api_session(
 ) -> Response {
     // Every request that reaches a data route carries its grant (the gate
     // or the scoped resolution attached it); without one, no picker.
+    // #276: a grant discovery reaches may switch to sessions created later.
     let switchable = caller.is_some_and(|axum::Extension(Caller(grant))| {
-        switchable(&state.authority, &grant, &state.sessions)
+        switchable(&state.authority, &grant, &state.sessions) || state.discovery.reaches(&grant)
     });
     let view = match state.view(&ctx.session).await {
         Ok(view) => view,
@@ -603,8 +622,9 @@ pub(super) async fn api_graph(State(state): State<Arc<AppState>>, ctx: SessionCt
 /// every unscoped path, where it has always been, and gives the aliases
 /// the default session.
 ///
-/// `/api/sessions` is registered only with `[web] list_sessions` (#4 PR 3):
-/// off, the path is unrouted, so every method gets the uniform 404 rather
+/// `/api/sessions` is registered only with `[web] list_sessions` (#4 PR 3),
+/// or `[web] discover_sessions` on a loopback bind (#276): off, the path is
+/// unrouted, so every method gets the uniform 404 rather
 /// than a 405 that would say the route exists.
 pub(super) fn router(state: Arc<AppState>) -> Router {
     let mut routes = Router::new();

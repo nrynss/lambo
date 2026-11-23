@@ -115,6 +115,10 @@ mod stages;
 mod transport;
 mod watchdog;
 
+/// The registry's constants for `crate::formal_constants_tests` (#291).
+#[cfg(test)]
+pub(crate) use registry::formal_pins as registry_formal_pins;
+
 pub use authority::check_serve_credentials;
 pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;

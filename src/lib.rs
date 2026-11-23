@@ -64,7 +64,7 @@
 //! Backends are **Level B** pluggable: Cargo features compile adapters in, and
 //! `lambo.toml` or the environment selects among them at runtime. One binary
 //! carries every adapter it was built with. See
-//! `dev-diary/notes/level-b-pluggability.md`.
+//! `docs/reference/config.mdx` ("Features").
 //!
 //! Implement [`GraphStore`] for durable storage and [`Embedder`] for vectors.
 //! A store declares what it can do through [`Capabilities`]: only a store
@@ -86,6 +86,10 @@ pub mod daemon;
 pub mod embed;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
+#[cfg(test)]
+mod formal_constants_tests;
+#[cfg(test)]
+mod formal_oracle_tests;
 // Shared Google OAuth: the Gemini embedder's Vertex calls and the Postgres store's
 // Cloud SQL IAM login are one identity and one code path (2026-08-24).
 #[cfg(any(feature = "embed-gemini", feature = "store-postgres"))]

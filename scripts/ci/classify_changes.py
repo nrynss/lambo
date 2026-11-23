@@ -13,6 +13,13 @@ import sys
 RUST_PREFIXES = (
     "src/", "tests/", "migrations/", "fixtures/", "examples/", "web/",
     ".cargo/", ".github/workflows/", "scripts/ci/",
+    # The Lean models: src/formal_constants_tests.rs include_str!s them (#291).
+    "formal/LamboProofs/",
+    # The differential-oracle vectors: src/formal_oracle_tests.rs include_str!s
+    # them (#291). Nothing else under formal/ is read by the Rust build or
+    # tests (formal/OracleExport/ writes these vectors; a change there that
+    # changes them changes this directory too, or check-oracle.sh fails).
+    "formal/oracle/",
 )
 RUST_FILES = {
     "Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", "build.rs",
@@ -25,14 +32,24 @@ RUST_FILES = {
     "evidence/issue-221/repro-8concept-qwen3-4b-2560.json",
     "evidence/issue-221/repro-8concept-qwen3-4b-1024.json",
     "evidence/issue-237/calibration-elastic-jina-v3-1024.json",
+    "evidence/157-layer-tuning/README.md",
+    "evidence/issue-221/runs/qwen3-4b-2560.json",
+    "evidence/issue-221/runs/qwen3-4b-1024.json",
+    "evidence/issue-237/runs/elastic-jina-v3-1024.json",
 }
-MIRROR_FILES = {
-    "docs/reference/cli.mdx", "docs/reference/mcp.mdx",
-    "docs/reference/installation.mdx", "docs/reference/config.mdx",
-    "site/src/content/docs/cli.mdx", "site/src/content/docs/mcp.mdx",
-    "site/src/content/docs/installation.mdx", "site/src/content/docs/config.mdx",
-    "scripts/docs/check-mirror-drift.sh",
-}
+# The `mirror` output starts the docs job: the mirror drift check and the
+# docs' source checks (scripts/docs/check-doc-anchors.py and
+# check-doc-examples.py). Those read every docs page and what the pages'
+# anchors cite: the Lean models, the oracle vectors, the constant pins in
+# src/formal_constants_tests.rs, any file a `code:` anchor names (under
+# src/, and migrations/ for the SQL schema) and any test file a `test:`
+# anchor names (under src/ and tests/), so a renamed or deleted test fails
+# the docs job.
+MIRROR_PREFIXES = (
+    "site/src/content/docs/", "docs/reference/", "scripts/docs/",
+    "formal/LamboProofs/", "formal/oracle/",
+    "src/", "tests/", "migrations/",
+)
 
 
 def classify_paths(paths):
@@ -40,8 +57,9 @@ def classify_paths(paths):
     paths = set(paths)
     rust = any(path in RUST_FILES or path.startswith(RUST_PREFIXES) for path in paths)
     # Workflow/classifier changes validate both branches of the classifier.
-    mirror = bool(paths & MIRROR_FILES) or any(
-        path.startswith((".github/workflows/", "scripts/ci/")) for path in paths
+    mirror = any(
+        path.startswith(MIRROR_PREFIXES + (".github/workflows/", "scripts/ci/"))
+        for path in paths
     )
     return {"rust": rust, "mirror": mirror}
 

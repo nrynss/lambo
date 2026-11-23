@@ -80,7 +80,7 @@ enum Commands {
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
-        /// I1 — append one JSON line per MCP tool call to this path
+        /// Append one JSON line per MCP tool call to this path
         /// (append-only JSONL, created if absent). Off by default.
         ///
         /// Never affects a tool call: the write is buffered onto a dedicated
@@ -93,7 +93,7 @@ enum Commands {
         /// repo (`~/lambo-dogfood/`), export only through the curated path.
         #[arg(long, value_name = "PATH")]
         ledger: Option<std::path::PathBuf>,
-        /// I2 — also append a `stats` heartbeat line to the ledger every N
+        /// Also append a `stats` heartbeat line to the ledger every N
         /// seconds: the `lambo_stats` payload plus process uptime and the
         /// binary's version and git sha. Requires --ledger. Off by default.
         #[arg(long, value_name = "SECS")]
@@ -140,7 +140,7 @@ enum Commands {
         /// inherit_serve_credentials. It reads
         /// every served session; [[web.credential]] entries read only their
         /// own.
-        #[arg(long, value_name = "TOKEN")]
+        #[arg(long, value_name = "TOKEN", value_parser = WebAuthTokenParser)]
         auth_token: Option<lambo::cli::serve_web::AuthToken>,
         /// A Host (name or address, optionally :port) the portal also
         /// answers while no credential is configured, beside localhost,
@@ -162,6 +162,16 @@ enum Commands {
             help = "Never load the embedder (as lambo.toml [web] embedder = false): recall runs on its keyword and recent legs and says the vector leg is off. Without it the embedder loads on the first recall that needs one, never at startup."
         )]
         no_embedder: bool,
+        /// Also serve every live, non-erased session in the store, including
+        /// ones created after startup, to callers whose scope covers every
+        /// served session (no credential on loopback, LAMBO_AUTH_TOKEN, a
+        /// [[web.credential]] "*"). Same as lambo.toml [web]
+        /// discover_sessions = true. Off by default.
+        #[arg(
+            long = "discover-sessions",
+            help = "Also serve every live, non-erased session in the store, including ones created after startup, to callers whose scope covers every served session (no credential on loopback, LAMBO_AUTH_TOKEN, a [[web.credential]] \"*\"). Same as [web] discover_sessions = true. Off by default."
+        )]
+        discover_sessions: bool,
     },
     /// Scripted two-agent demo scenario (spec §13): two agents build one REST API, `user schema` earns Canonical, and the second agent's recall carries the blast-radius and conflict warnings.
     Demo {
@@ -312,11 +322,11 @@ enum Commands {
     /// store selection so a misconfigured `kind` fails closed early.
     Provision {
         /// Re-check every concept's canonical key even if the store records that
-        /// a previous provision already re-keyed it (#148, #171). Use it after a
+        /// a previous provision already re-keyed it (#148, #171, #301). Use it after a
         /// pre-0.7.0 binary has written to a Postgres or Cockroach store.
         #[arg(
             long,
-            help = "Re-check every concept's canonical key even if the store records that a previous provision already re-keyed it (#148, #171). Use it after a pre-0.7.0 binary has written to a Postgres or Cockroach store."
+            help = "Re-check every concept's canonical key even if the store records that a previous provision already re-keyed it (#148, #171, #301). Use it after a pre-0.7.0 binary has written to a Postgres or Cockroach store."
         )]
         rekey: bool,
     },
@@ -574,7 +584,7 @@ enum Commands {
         #[arg(long)]
         allow_embedding_mismatch: bool,
     },
-    /// Migrate a session to the configured embedder: re-embed EVERY concept into the live space and swap the session's contract atomically (K2).
+    /// Migrate a session to the configured embedder: re-embed EVERY concept into the live space and swap the session's contract atomically.
     ///
     /// Run with the NEW embedder configured (e.g. LAMBO_EMBEDDER=candle) after
     /// stopping the serve process that holds the session. Every concept is
@@ -602,6 +612,12 @@ enum Commands {
         /// Full migration only: null the vector of every image concept instead of refusing on it. An image vector cannot be recomputed from its caption; each image concept keeps its caption and source, and deriving the same image again under the new embedder restores its vector.
         #[arg(long)]
         drop_image_vectors: bool,
+        /// Full rewrite of a session that already carries the live embedding contract: re-embed every text concept in place, keep the contract, and pin the canary again. This is the repair for an embedder canary drift (the same contract name, different vectors). Refused unless the session carries the live contract and holds a vector; a plain re-embed refuses such a session.
+        #[arg(long)]
+        rewrite_same_contract: bool,
+        /// Full rewrite only: allow replacing the store's canary pin for the live contract when the live embedder does not reproduce it (it drifted, or the check could not run). Other sessions in the store under that contract keep vectors from the pinned embedder, and after the re-pin the canary no longer flags them. A check that could not run is usually transient: retry first, and pass this only for a pin known to be from another build. A usage error under [embedder] canary = "off", which neither checks nor pins.
+        #[arg(long)]
+        repin_canary: bool,
     },
 }
 
@@ -1088,7 +1104,7 @@ impl Commands {
     }
 }
 
-/// Single construction site for store + embedder (T8.x must reuse this, not rebuild).
+/// Single construction site for store + embedder (commands reuse this, never rebuild).
 enum Resolved {
     Classification(lambo::resolve::ClassificationSource),
     Split(Box<lambo::resolve::SplitIo>),
@@ -1101,14 +1117,14 @@ enum Resolved {
         /// The resolved `store.dsn` (file overlaid with the kind's DSN
         /// environment variable). `provision`'s Cockroach arm hands it to
         /// `scripts/provision.sh` so the config file, not the ambient
-        /// environment, names the cluster that receives the DDL (E2E-1).
+        /// environment, names the cluster that receives the DDL.
         dsn: Option<String>,
         /// The promotion policy `lambo.toml` and `LAMBO_PROMOTION_POLICY`
         /// select, which `inspect` explains the focus's next canonization
         /// hop under (#36 PR 3). A reader resolves its own, like `serve-web`.
         promotion_policy: lambo::canon::PromotionPolicy,
         /// `lambo.toml`'s `canonization_supersede`, so `inspect` explains
-        /// the Stage 3 hold a writer with it on applies (#20 review M2).
+        /// the Stage 3 hold a writer with it on applies (#20).
         supersede: bool,
     },
 }
@@ -1235,7 +1251,7 @@ struct ServePlan {
     transport: Transport,
     pinned: PinnedSessions,
     file: LamboFile,
-    /// The legacy token, `LAMBO_AUTH_TOKEN` over `--auth-token` (T8.7).
+    /// The legacy token, `LAMBO_AUTH_TOKEN` over `--auth-token`.
     auth_token: Option<lambo::mcp::SecretToken>,
     /// The resolved `[[serve.credential]]` entries (#32 PR 5); HTTP only.
     credentials: Vec<lambo::config::ServeCredential>,
@@ -1268,8 +1284,8 @@ fn serve_preflight(
             return Err(ExitCode::from(2));
         }
     };
-    // `--auth-token` is checked only where it is used, HTTP (#32 PR 5
-    // review S3), and before the file is read, as clap checked it before.
+    // `--auth-token` is checked only where it is used, HTTP (#32 PR 5), and
+    // before the file is read, as clap checked it before.
     let auth_token = if transport == Transport::Http {
         http_auth_token_flag(auth_token)?
     } else {
@@ -1277,7 +1293,7 @@ fn serve_preflight(
     };
     // A usage error is reported before the file is read, so a stdio serve
     // given several `--session`s exits 2 whatever state the file is in
-    // (#32 PR 8 Sonnet review L1).
+    // (#32 PR 8).
     if transport == Transport::Stdio && session.len() > 1 {
         return Err(too_many_stdio_sessions(session.len()));
     }
@@ -1299,7 +1315,7 @@ fn serve_preflight(
     // Stdio: the one session chosen above. HTTP: the ordered union of
     // `--session` and `[serve] sessions`. Either way checked against `serve`'s own
     // rules (every name addressable by URL once more than one is pinned),
-    // here, before any backend is built (#32 review L3).
+    // here, before any backend is built (#32).
     let pinned = match lambo::mcp::pin_sessions(session, &file.serve, transport) {
         Ok(p) => p,
         Err(e) => {
@@ -1318,9 +1334,9 @@ fn serve_preflight(
             return Err(ExitCode::from(2));
         }
     };
-    // Env beats flag (T8.7), resolved before any of it reaches a log line.
+    // Env beats flag, resolved before any of it reaches a log line.
     // A set-but-empty LAMBO_AUTH_TOKEN is a usage error, not a silent
-    // fallback to the flag. HTTP only (#32 PR 5 review S3): a stdio serve
+    // fallback to the flag. HTTP only (#32 PR 5): a stdio serve
     // authenticates nobody and ignores the token, so a stray exported one
     // it would refuse must not stop it from starting.
     let auth_token = if transport == Transport::Http {
@@ -1352,7 +1368,7 @@ fn serve_preflight(
         Vec::new()
     };
     // `[serve]`: the keys this serve does not enforce yet are named once
-    // (#32 PR 1 review L3); never a value.
+    // (#32 PR 1); never a value.
     file.serve.warn_if_unenforced(transport == Transport::Stdio);
     let bounds = lambo::mcp::SessionBounds::from_config(&file.serve);
     Ok(ServePlan {
@@ -1651,9 +1667,9 @@ fn run_async_result<T>(
 /// [`Debug`] is redacted like [`lambo::mcp::SecretToken`]'s, since
 /// `Commands` derives `Debug`).
 ///
-/// Checked by [`http_auth_token_flag`] only for `--transport http` (#32 PR 5
-/// review S3): stdio ignores the flag, so a value no request could present
-/// must not stop a stdio serve from starting.
+/// Checked by [`http_auth_token_flag`] only for `--transport http` (#32 PR 5):
+/// stdio ignores the flag, so a value no request could present must not stop
+/// a stdio serve from starting.
 #[derive(Clone)]
 struct AuthTokenArg(std::ffi::OsString);
 
@@ -1681,45 +1697,212 @@ impl clap::builder::TypedValueParser for AuthTokenArgParser {
     }
 }
 
-/// `--auth-token` for an HTTP serve: [`lambo::mcp::SecretToken::new`], with
-/// clap's usage error (exit 2) that never quotes the value (#32 PR 5 review
-/// L3).
+/// `serve-web --auth-token`'s parser (#315): checks the token when clap
+/// parses it, as `AuthToken: FromStr` did (`serve-web` is HTTP only, so no
+/// transport waits to decide), but refuses through [`auth_token_refusal`],
+/// so clap never adds the value to its error. The kind
+/// (`ValueValidation`), hence the exit code (2), and the rule named are the
+/// ones the `FromStr` parser gave.
+#[derive(Clone)]
+struct WebAuthTokenParser;
+
+impl clap::builder::TypedValueParser for WebAuthTokenParser {
+    type Value = lambo::cli::serve_web::AuthToken;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        check_auth_token(value).map_err(|why| {
+            auth_token_refusal(cmd, arg, clap::error::ErrorKind::ValueValidation, &why)
+        })
+    }
+}
+
+/// An `--auth-token` value as a token of type `T`: UTF-8, then `T`'s own
+/// rule (its `FromStr`, whose error names the rule and never the value).
+/// Shared by `lambo serve` ([`http_auth_token_flag`]) and `lambo serve-web`
+/// ([`WebAuthTokenParser`]) so the two cannot drift.
+fn check_auth_token<T: std::str::FromStr<Err = String>>(
+    raw: &std::ffi::OsStr,
+) -> Result<T, String> {
+    raw.to_str()
+        .ok_or_else(|| "auth token is not valid UTF-8".to_string())?
+        .parse()
+}
+
+/// The usage error for a refused `--auth-token` (#32, #315):
+/// a clap error of `kind` on `cmd` that names the flag and the rule `why`,
+/// never the value.
 ///
 /// clap's own error for a rejected value repeats the value ("invalid value
 /// '<it>' for ..."), and for a token with a stray trailing space that is the
-/// secret on stderr. This reports the reason alone.
+/// secret on stderr. Both `--auth-token` refusals are built here instead;
+/// `Resolve/Auth.lean` models the text as `render`'s `flagRefusal` and
+/// `webFlagRefusal` (`web_flag_refusal_eq_serve`).
+fn auth_token_refusal(
+    cmd: &clap::Command,
+    arg: Option<&clap::Arg>,
+    kind: clap::error::ErrorKind,
+    why: &str,
+) -> clap::Error {
+    let flag = arg.map_or_else(|| "--auth-token".to_string(), ToString::to_string);
+    cmd.clone().error(
+        kind,
+        format!("invalid value for '{flag}': {why} (the value is not shown)"),
+    )
+}
+
+/// `--auth-token` for an HTTP serve: [`lambo::mcp::SecretToken::new`], with
+/// clap's usage error (exit 2) from [`auth_token_refusal`], which never
+/// quotes the value. The error is printed here; [`http_auth_token_check`]
+/// builds it.
 fn http_auth_token_flag(
     flag: Option<AuthTokenArg>,
 ) -> Result<Option<lambo::mcp::SecretToken>, ExitCode> {
-    let Some(AuthTokenArg(raw)) = flag else {
-        return Ok(None);
-    };
-    let checked = match raw.to_str() {
-        Some(raw) => lambo::mcp::SecretToken::new(raw),
-        None => Err("auth token is not valid UTF-8".to_string()),
-    };
-    checked.map(Some).map_err(|why| {
-        let mut command = Cli::command();
-        command.build();
-        let err = match command.find_subcommand_mut("serve") {
-            Some(serve) => {
-                let flag = serve
-                    .get_arguments()
-                    .find(|a| a.get_id() == "auth_token")
-                    .map_or_else(|| "--auth-token".to_string(), ToString::to_string);
-                serve.error(
-                    clap::error::ErrorKind::InvalidValue,
-                    format!("invalid value for '{flag}': {why} (the value is not shown)"),
-                )
-            }
-            None => command.error(
-                clap::error::ErrorKind::InvalidValue,
-                format!("invalid value for '--auth-token': {why} (the value is not shown)"),
-            ),
-        };
+    http_auth_token_check(flag).map_err(|err| {
         let _ = err.print();
         ExitCode::from(2)
     })
+}
+
+/// [`http_auth_token_flag`]'s check, returning the error it prints.
+fn http_auth_token_check(
+    flag: Option<AuthTokenArg>,
+) -> Result<Option<lambo::mcp::SecretToken>, clap::Error> {
+    let Some(AuthTokenArg(raw)) = flag else {
+        return Ok(None);
+    };
+    check_auth_token(&raw).map(Some).map_err(|why| {
+        let mut command = Cli::command();
+        command.build();
+        let kind = clap::error::ErrorKind::InvalidValue;
+        match command.find_subcommand("serve") {
+            Some(serve) => {
+                let flag = serve.get_arguments().find(|a| a.get_id() == "auth_token");
+                auth_token_refusal(serve, flag, kind, &why)
+            }
+            None => auth_token_refusal(&command, None, kind, &why),
+        }
+    })
+}
+
+/// What a parse error shows in place of an argv element it would quote.
+const ARGV_REDACTED: &str = "<redacted>";
+
+/// The tip that replaces clap's suggestions on a redaction.
+const ARGV_REDACTED_TIP: &str =
+    "an argument after --auth-token is not shown (it may be part of the \
+     token); check the arguments after it, and quote a token that contains a space";
+
+/// clap's parse error with every argv element it quotes that may be part
+/// of an `--auth-token` value replaced by [`ARGV_REDACTED`] (#315).
+///
+/// An unquoted token split by a space leaves its tail in argv, and a token
+/// that starts with `-` is read as a flag (`--auth-token` takes no hyphen
+/// values, so a flag after it is never silently the token); clap's
+/// "unexpected argument '<it>' found", "invalid value '<it>' for ..." and
+/// "unrecognized subcommand '<it>'" would print them.
+///
+/// The rule is narrow: an element clap quotes is shown only when it occurs
+/// in an argv element before the first `--auth-token` (or `--auth-token=`)
+/// and in none from that flag on; anything else is redacted, so an element
+/// it cannot place is redacted (fail closed). Two quoted values are never
+/// redacted: an empty one, which is clap's missing value ("a value is
+/// required for ..."), and `--auth-token` itself (`lambo --auth-token x
+/// serve-web`), which is the flag, not a value.
+///
+/// With a redaction, clap's suggestions, which can repeat the element or
+/// hint at it, are replaced by one fixed tip ([`ARGV_REDACTED_TIP`]), and
+/// its usage line, which can name its did-you-mean flag for the element, by
+/// the subcommand's plain usage. The kind, hence the exit code (2), is
+/// clap's. Without `--auth-token` in argv the error is unchanged.
+///
+/// Not redacted: a value parser's own message after an invalid value
+/// (": invalid digit found in string"). That is safe today because the
+/// parsers of every flag `serve` and `serve-web` accept (`u16`, `u32`,
+/// `usize`, `IpAddr`, strings, paths) never echo their input there; a new
+/// flag whose parser does would need this revisited.
+fn redact_auth_token_echo(mut err: clap::Error, argv: &[std::ffi::OsString]) -> clap::Error {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let args: Vec<String> = argv
+        .iter()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let Some(flag) = args
+        .iter()
+        .position(|a| a == "--auth-token" || a.starts_with("--auth-token="))
+    else {
+        return err;
+    };
+    let (before, from_flag) = args.split_at(flag);
+    let shown = |quoted: &str| {
+        quoted.is_empty()
+            || quoted == "--auth-token"
+            || (before.iter().any(|a| a.contains(quoted))
+                && !from_flag.iter().any(|a| a.contains(quoted)))
+    };
+    let mut quoting = vec![ContextKind::InvalidValue, ContextKind::InvalidSubcommand];
+    if err.kind() == ErrorKind::UnknownArgument {
+        // For other kinds `InvalidArg` is the defined flag, not argv.
+        quoting.push(ContextKind::InvalidArg);
+    }
+    let mut redacted = false;
+    for kind in quoting {
+        let quoted = match err.get(kind) {
+            Some(ContextValue::String(q)) => q.clone(),
+            _ => continue,
+        };
+        if !shown(&quoted) {
+            err.insert(kind, ContextValue::String(ARGV_REDACTED.to_owned()));
+            redacted = true;
+        }
+    }
+    if redacted {
+        for kind in [
+            ContextKind::SuggestedArg,
+            ContextKind::SuggestedValue,
+            ContextKind::SuggestedSubcommand,
+        ] {
+            err.remove(kind);
+        }
+        let mut tip = clap::builder::StyledStr::new();
+        tip.push_str(ARGV_REDACTED_TIP);
+        err.insert(ContextKind::Suggested, ContextValue::StyledStrs(vec![tip]));
+        if let Some(ContextValue::StyledStr(usage)) = err.get(ContextKind::Usage) {
+            let plain = plain_usage(&usage.to_string());
+            err.insert(ContextKind::Usage, ContextValue::StyledStr(plain));
+        }
+    }
+    err
+}
+
+/// The plain usage of the (sub)command clap was parsing, read off clap's
+/// own usage line for the error (`Usage: lambo serve-web --port <PORT>`):
+/// the words after the binary name that name a subcommand path, then that
+/// command's usage with no arguments. The same for every argv after the
+/// flag, whatever flag clap's line suggested. clap's generated `help`
+/// subcommand is not found this way, so its errors get `lambo`'s usage.
+fn plain_usage(clap_usage: &str) -> clap::builder::StyledStr {
+    let mut command = Cli::command();
+    command.build();
+    let words = clap_usage
+        .trim_start()
+        .strip_prefix("Usage:")
+        .unwrap_or(clap_usage)
+        .split_whitespace()
+        .skip(1);
+    let mut current = &mut command;
+    for word in words {
+        if current.find_subcommand(word).is_none() {
+            break;
+        }
+        current = current.find_subcommand_mut(word).expect("found just above");
+    }
+    current.render_usage()
 }
 
 /// The missing-session refusal, rendered the way clap rendered a missing
@@ -1774,7 +1957,12 @@ fn log_session_source(selected: &lambo::config::SelectedSession) {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // `Cli::parse` with the parse error's `--auth-token` echo redacted (#315).
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&argv) {
+        Ok(cli) => cli,
+        Err(err) => redact_auth_token_echo(err, &argv).exit(),
+    };
     let config = cli.config.as_deref();
 
     let Some(cmd) = cli.command else {
@@ -1841,6 +2029,7 @@ fn main() -> ExitCode {
             allowed_host,
             auth_token,
             no_embedder,
+            discover_sessions,
             ..
         } => match LamboFile::load_resolved(config) {
             Ok(file) => {
@@ -1850,6 +2039,9 @@ fn main() -> ExitCode {
                 if *no_embedder {
                     web.embedder = Some(false);
                 }
+                // #276: the flag turns discovery on; it never turns a
+                // configured `discover_sessions = true` off.
+                web.discover_sessions |= *discover_sessions;
                 // #4 PR 3: the credentials too, so an unset variable or a
                 // shared token costs no model load.
                 let planned = lambo::cli::serve_web::plan_sessions(session, &web).and_then(|s| {
@@ -2073,7 +2265,7 @@ fn main() -> ExitCode {
             };
             let result = runtime.block_on(lambo::mcp::serve(opts, *backends));
 
-            // Do not let the runtime's `Drop` wait for blocking tasks (R1/T82-1).
+            // Do not let the runtime's `Drop` wait for blocking tasks.
             // The stdio transport parks a **blocking** read on stdin, and
             // `Runtime::drop` waits for blocking tasks to return — so after a
             // SIGINT/SIGTERM the process sat there with its session already
@@ -2091,7 +2283,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        // T8.5 — the read-only demo window. Reader path: `run_async` owns the
+        // The read-only demo window. Reader path: `run_async` owns the
         // runtime exactly as it does for `recall`, and the command body takes
         // the single `ResolvedBackends` from `resolve_for_command` above.
         (
@@ -2102,6 +2294,7 @@ fn main() -> ExitCode {
                 auth_token,
                 allowed_host: _,
                 no_embedder: _,
+                discover_sessions: _,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -2481,6 +2674,8 @@ fn main() -> ExitCode {
                 allow_embedding_mismatch: _,
                 missing_only,
                 drop_image_vectors,
+                rewrite_same_contract,
+                repin_canary,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -2496,6 +2691,8 @@ fn main() -> ExitCode {
                     allow_embedding_mismatch,
                     missing_only,
                     drop_image_vectors,
+                    rewrite_same_contract,
+                    repin_canary,
                 },
             ),
         ),
@@ -2784,8 +2981,8 @@ mod tests {
         walk(&Cli::command());
     }
 
-    /// E2E-F6: `provision --help` names every kind it provisions. `postgres`
-    /// has been a shipped, tested provision path since B1/B2, and it is exactly
+    /// `provision --help` names every kind it provisions. `postgres` has
+    /// long been a shipped, tested provision path, and it is exactly
     /// the verb the DSN-precedence findings are about, so the operator most in
     /// need of the sentence is the one reading this line.
     #[test]
@@ -2949,5 +3146,499 @@ dim = 1024
         assert_eq!(full.embedding.dim, 1024);
         assert!(full.store.vector_dimensions().is_none());
         let _ = resolve_store_only(Some(&path)).expect("store only");
+    }
+
+    /// `lambo serve-web --auth-token` never echoes a malformed token (#315).
+    ///
+    /// Before the fix the flag was parsed through `AuthToken: FromStr`, and
+    /// clap's `ValueValidation` error quoted the refused value, so a stray
+    /// trailing space put the secret on stderr. Mirrors `Resolve/Auth.lean`:
+    /// `render_noninterference` at `PrintPath.webFlagRefusal` (the refusal
+    /// depends on the token only through its verdict),
+    /// `serve_web_flag_refusal_fixed` (the issue's `'x '` and
+    /// `'NOTASECRET-probe '` print the same line, naming the rule), and
+    /// `web_flag_refusal_keeps_reason` (the rule is still named); the
+    /// previous version is `serve_web_flag_refusal_leaks`. The refusal is
+    /// still clap's `ValueValidation` usage error (exit 2) at parse time.
+    ///
+    /// Mutation: parse the flag through `AuthToken: FromStr` again -> red.
+    #[test]
+    fn serve_web_auth_token_refusal_never_quotes_the_value() {
+        // Sentinels at both ends, so an echo of only a prefix or only a
+        // suffix is caught too.
+        let too_long = format!("NOTASECRET{}TERCESATON", "Z".repeat(4096));
+        let cases: [(&str, &str); 4] = [
+            ("x ", "leading or trailing whitespace"),
+            (
+                "NOTASECRET-probe-TERCESATON ",
+                "leading or trailing whitespace",
+            ),
+            ("NOTASECRET\u{1}probe-TERCESATON", "outside printable ASCII"),
+            (&too_long, "longer than 4096 bytes"),
+        ];
+        for (token, reason) in cases {
+            let err = Cli::try_parse_from(["lambo", "serve-web", "--auth-token", token])
+                .expect_err("a malformed --auth-token must be refused at parse time");
+            let text = err.render().to_string();
+            for piece in [
+                format!("'{token}'").as_str(),
+                "NOTASECRET",
+                "TERCESATON",
+                "probe",
+                "ZZZZ",
+            ] {
+                assert!(
+                    !text.contains(piece),
+                    "the refused value must not be shown ({piece}): {text:?}"
+                );
+            }
+            // What the fix keeps: clap's kind and exit code from the
+            // `FromStr` parser, the flag and the rule.
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{text}"
+            );
+            assert_eq!(err.exit_code(), 2, "{text}");
+            assert!(
+                text.contains("--auth-token <TOKEN>"),
+                "names the flag: {text}"
+            );
+            assert!(text.contains(reason), "names the rule ({reason}): {text}");
+        }
+        // Two tokens refused for the same reason print the same error.
+        let line = |token: &str| {
+            Cli::try_parse_from(["lambo", "serve-web", "--auth-token", token])
+                .expect_err("refused")
+                .render()
+                .to_string()
+        };
+        assert_eq!(line("x "), line("NOTASECRET-probe-TERCESATON "));
+    }
+
+    /// `serve-web`'s `--auth-token` refusal says what `serve`'s says, word
+    /// for word (#315): `serve` driven through clap and
+    /// [`http_auth_token_check`], the check `lambo serve --transport http`
+    /// runs and prints. Mirrors `Resolve/Auth.lean`'s `web_flag_refusal_eq_serve`.
+    #[test]
+    fn serve_web_auth_token_refusal_line_is_serves() {
+        let web = Cli::try_parse_from(["lambo", "serve-web", "--auth-token", "x "])
+            .expect_err("refused")
+            .render()
+            .to_string();
+        let parsed = Cli::try_parse_from([
+            "lambo",
+            "serve",
+            "--transport",
+            "http",
+            "--auth-token",
+            "x ",
+        ])
+        .expect("serve takes the value as given and checks it later");
+        let Some(Commands::Serve { auth_token, .. }) = parsed.command else {
+            panic!("parsed as serve");
+        };
+        let serve = http_auth_token_check(auth_token)
+            .expect_err("an HTTP serve refuses it")
+            .render()
+            .to_string();
+        let first = |s: &str| s.lines().next().unwrap_or_default().to_string();
+        assert_eq!(first(&web), first(&serve));
+        assert!(first(&web).ends_with("(the value is not shown)"), "{web}");
+        assert!(serve.contains("Usage: lambo serve "), "{serve}");
+        assert!(web.contains("Usage: lambo serve-web "), "{web}");
+    }
+
+    /// The argv of `lambo <sub> [pre..] --auth-token <tail..>`.
+    fn argv_with_token(sub: &str, pre: &[&str], tail: &[&str]) -> Vec<std::ffi::OsString> {
+        let mut argv = vec!["lambo", sub];
+        if sub == "serve" {
+            argv.extend(["--transport", "http"]);
+        }
+        argv.extend(pre);
+        argv.push("--auth-token");
+        argv.extend(tail);
+        argv.into_iter().map(Into::into).collect()
+    }
+
+    /// The parse error `main` prints for `argv`.
+    fn parse_error_text(argv: &[std::ffi::OsString]) -> (clap::Error, String) {
+        let err = redact_auth_token_echo(
+            Cli::try_parse_from(argv).expect_err("refused at parse"),
+            argv,
+        );
+        let text = err.render().to_string();
+        (err, text)
+    }
+
+    /// The `serve` or `serve-web` behind a parsed `--auth-token` value, as
+    /// the raw string it was given (`serve-web`'s `AuthToken` is compared
+    /// through a fresh check, its `Debug` being redacted).
+    fn parsed_token_is(cli: Cli, token: &str) -> bool {
+        match cli.command {
+            Some(Commands::Serve {
+                auth_token: Some(AuthTokenArg(raw)),
+                ..
+            }) => raw == std::ffi::OsStr::new(token),
+            Some(Commands::ServeWeb {
+                auth_token: Some(t),
+                ..
+            }) => {
+                let again: lambo::cli::serve_web::AuthToken =
+                    check_auth_token(std::ffi::OsStr::new(token)).expect("valid");
+                t == again
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A spaced `--auth-token` followed by something that looks like a flag
+    /// is refused at parse time (exit 2, so nothing starts), never taken as
+    /// the token, and never shown, on `serve` and `serve-web` (#315). With
+    /// `allow_hyphen_values` (a26ffd30) each of these was the token and the
+    /// server started. Mirrors `Resolve/Auth.lean`'s
+    /// `authFlagValue_spaced_none_iff` and `re_review_fixed` (previous
+    /// version: `b1_fail_open`).
+    #[test]
+    fn auth_token_followed_by_a_flag_is_refused() {
+        let tails: [&[&str]; 7] = [
+            &["-h"],
+            &["--session"],
+            &["--port=7718"],
+            &["--allow-embedding-mismatch"],
+            &["-NOTASECRET-TERCESATON"],
+            &["--NOTASECRET-TERCESATON"],
+            &["-h", "--session", "s"],
+        ];
+        for sub in ["serve", "serve-web"] {
+            for tail in tails {
+                let argv = argv_with_token(sub, &[], tail);
+                let (err, text) = parse_error_text(&argv);
+                assert_eq!(err.exit_code(), 2, "{sub} {tail:?}: {text}");
+                assert!(
+                    !matches!(
+                        err.kind(),
+                        clap::error::ErrorKind::DisplayHelp
+                            | clap::error::ErrorKind::DisplayVersion
+                    ),
+                    "{sub} {tail:?}: {text}"
+                );
+                for piece in ["NOTASECRET", "TERCESATON"] {
+                    assert!(!text.contains(piece), "{sub} {tail:?}: {text}");
+                }
+            }
+            // A known flag right after it: clap's missing value, unredacted.
+            let (_, text) = parse_error_text(&argv_with_token(sub, &[], &["-h"]));
+            assert!(
+                text.contains("a value is required for '--auth-token <TOKEN>'"),
+                "{text}"
+            );
+        }
+    }
+
+    /// `--auth-token=<v>` takes a value starting with `-`, as the base did
+    /// (#315 re-review). Mirrors `Resolve/Auth.lean`'s `authFlagValue_eq_form`.
+    #[test]
+    fn auth_token_eq_form_takes_a_hyphen_value() {
+        for sub in ["serve", "serve-web"] {
+            for token in ["-abc", "--abc"] {
+                let mut argv = vec!["lambo", sub];
+                if sub == "serve" {
+                    argv.extend(["--transport", "http"]);
+                }
+                let flag = format!("--auth-token={token}");
+                argv.push(&flag);
+                let cli = Cli::try_parse_from(&argv)
+                    .unwrap_or_else(|e| panic!("{sub} {flag}: {}", e.render()));
+                assert!(parsed_token_is(cli, token), "{sub}: {token}");
+            }
+        }
+    }
+
+    /// A missing value keeps clap's "a value is required" message, with no
+    /// redaction and no tip (#315). Mirrors `Resolve/Auth.lean`'s
+    /// `missing_value_kept`.
+    #[test]
+    fn missing_value_keeps_clap_message() {
+        for sub in ["serve", "serve-web"] {
+            for (argv, flag) in [
+                (argv_with_token(sub, &[], &[]), "--auth-token <TOKEN>"),
+                (argv_with_token(sub, &[], &["-h"]), "--auth-token <TOKEN>"),
+                (
+                    argv_with_token(sub, &[], &["tok", "--session"]),
+                    "--session <SESSION>",
+                ),
+            ] {
+                let (err, text) = parse_error_text(&argv);
+                assert_eq!(err.exit_code(), 2, "{text}");
+                assert!(
+                    text.contains(&format!(
+                        "a value is required for '{flag}' but none was supplied"
+                    )),
+                    "{text}"
+                );
+                assert!(!text.contains(ARGV_REDACTED), "{text}");
+                assert!(!text.contains("tip:"), "{text}");
+            }
+        }
+    }
+
+    /// An invalid value of an accepted flag after `--auth-token` is
+    /// redacted: it may be a piece of the token (#315, the
+    /// `InvalidValue` branch). Mirrors `Resolve/Auth.lean`'s
+    /// `quotedRender_noninterference` and `re_review_fixed`.
+    #[test]
+    fn invalid_value_after_auth_token_is_redacted() {
+        for sub in ["serve", "serve-web"] {
+            let argv = argv_with_token(sub, &[], &["a", "--port", "NOTASECRET-TERCESATON"]);
+            let raw = Cli::try_parse_from(&argv)
+                .expect_err("not a port")
+                .render()
+                .to_string();
+            assert!(raw.contains("NOTASECRET"), "previous version leaked: {raw}");
+            let (err, text) = parse_error_text(&argv);
+            assert_eq!(err.exit_code(), 2, "{text}");
+            assert!(
+                text.contains("invalid value '<redacted>' for '--port <PORT>'"),
+                "{text}"
+            );
+            for piece in ["NOTASECRET", "TERCESATON"] {
+                assert!(!text.contains(piece), "{sub}: {text}");
+            }
+        }
+    }
+
+    /// An unrecognized subcommand quoted after `--auth-token` is redacted
+    /// (#315, the `InvalidSubcommand` branch): clap's real one
+    /// for `lambo help --auth-token=<v>`, and one built here with a value
+    /// that is only a later element.
+    #[test]
+    fn unrecognized_subcommand_after_auth_token_is_redacted() {
+        let argv: Vec<std::ffi::OsString> = ["lambo", "help", "--auth-token=NOTASECRET"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let raw = Cli::try_parse_from(&argv).expect_err("not a subcommand");
+        assert_eq!(raw.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert!(raw.render().to_string().contains("NOTASECRET"));
+        let (err, text) = parse_error_text(&argv);
+        assert_eq!(err.exit_code(), 2, "{text}");
+        assert!(
+            text.contains("unrecognized subcommand '<redacted>'"),
+            "{text}"
+        );
+        assert!(!text.contains("NOTASECRET"), "{text}");
+
+        use clap::error::{ContextKind, ContextValue, ErrorKind};
+        let mut command = Cli::command();
+        command.build();
+        let mut err = clap::Error::new(ErrorKind::InvalidSubcommand).with_cmd(&command);
+        err.insert(
+            ContextKind::InvalidSubcommand,
+            ContextValue::String("NOTASECRET-sub".to_owned()),
+        );
+        let argv: Vec<std::ffi::OsString> = ["lambo", "--auth-token", "NOTASECRET-sub"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let raw = err.render().to_string();
+        assert!(raw.contains("NOTASECRET"), "{raw}");
+        let text = redact_auth_token_echo(err, &argv).render().to_string();
+        assert!(
+            text.contains("unrecognized subcommand '<redacted>'"),
+            "{text}"
+        );
+        assert!(!text.contains("NOTASECRET"), "{text}");
+    }
+
+    /// clap's "unexpected value '<it>' for '--flag' found; no more were
+    /// expected" (`TooManyValues`, a value given to a flag that takes none)
+    /// quotes it through `InvalidValue` and is redacted after
+    /// `--auth-token` (#315 re-review). Mirrors `Resolve/Auth.lean`'s
+    /// `Quote.tooManyValues`.
+    #[test]
+    fn unexpected_value_after_auth_token_is_redacted() {
+        let argv = argv_with_token(
+            "serve",
+            &[],
+            &["a", "--allow-embedding-mismatch=NOTASECRET"],
+        );
+        let raw = Cli::try_parse_from(&argv).expect_err("a boolean flag takes no value");
+        assert_eq!(raw.kind(), clap::error::ErrorKind::TooManyValues);
+        assert!(raw.render().to_string().contains("NOTASECRET"));
+        let (err, text) = parse_error_text(&argv);
+        assert_eq!(err.exit_code(), 2, "{text}");
+        assert!(
+            text.contains(
+                "unexpected value '<redacted>' for '--allow-embedding-mismatch' found; \
+                 no more were expected"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("NOTASECRET"), "{text}");
+    }
+
+    /// The redacted usage line is that of the subcommand clap was parsing,
+    /// even when an earlier element is a flag's value that names another
+    /// subcommand (#315 re-review).
+    #[test]
+    fn redacted_usage_is_the_parsed_subcommands() {
+        let argv: Vec<std::ffi::OsString> = [
+            "lambo",
+            "--config",
+            "serve",
+            "serve-web",
+            "--session",
+            "s",
+            "--auth-token",
+            "abc",
+            "NOTASECRET",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        let (_, text) = parse_error_text(&argv);
+        assert!(text.contains("Usage: lambo serve-web [OPTIONS]"), "{text}");
+        assert!(!text.contains("NOTASECRET"), "{text}");
+    }
+
+    /// `lambo --auth-token x serve-web` names the misplaced flag: its own
+    /// spelling is never redacted (#315).
+    #[test]
+    fn a_misplaced_auth_token_flag_is_named() {
+        let argv: Vec<std::ffi::OsString> = ["lambo", "--auth-token", "NOTASECRET", "serve-web"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let (err, text) = parse_error_text(&argv);
+        assert_eq!(err.exit_code(), 2, "{text}");
+        assert!(
+            text.contains("unexpected argument '--auth-token' found"),
+            "{text}"
+        );
+        assert!(!text.contains("NOTASECRET"), "{text}");
+    }
+
+    /// An unquoted token split by a space leaves its tail in argv; clap's
+    /// "unexpected argument" error must not print it, or hint at it, on
+    /// `serve` or `serve-web` (#315). The raw clap error did (pinned here as
+    /// the previous version, `Resolve/Auth.lean`'s `unexpected_arg_leaked`);
+    /// `main` prints it through [`redact_auth_token_echo`], whose output,
+    /// usage line included, is the same for every tail
+    /// (`quotedRender_noninterference`, `quotedRender_unexpected_is_render`).
+    /// Covers `--auth-token=`, the review probes, and a mistyped flag in the
+    /// tail, whose did-you-mean clap put in its usage line.
+    #[test]
+    fn unexpected_argument_after_auth_token_is_not_shown() {
+        let probes: [&[&str]; 6] = [
+            &["NOTASECRET-a", "NOTASECRET-extra-TERCESATON"],
+            &["NOTASECRET-a", "--NOTASECRET-TERCESATON"],
+            &["NOTASECRET-a", "-NOTASECRET-TERCESATON"],
+            &["--NOTASECRET-a", "NOTASECRET-extra-TERCESATON"],
+            &["NOTASECRET-a", "b", "NOTASECRET-extra-TERCESATON"],
+            &["NOTASECRET-a", "--porr", "5"],
+        ];
+        for sub in ["serve", "serve-web"] {
+            let mut texts = Vec::new();
+            for tail in probes {
+                let argv = argv_with_token(sub, &[], tail);
+                let raw = Cli::try_parse_from(&argv)
+                    .expect_err("an extra argument is refused")
+                    .render()
+                    .to_string();
+                // A piece of the tail is quoted; `-NOTASECRET...` as its
+                // first short flag, `-N`.
+                assert!(
+                    tail.iter().any(|p| raw.contains(&format!("'{p}'"))) || raw.contains("'-N'"),
+                    "previous version leaked: {raw}"
+                );
+                let (err, text) = parse_error_text(&argv);
+                assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+                assert_eq!(err.exit_code(), 2, "{text}");
+                for piece in ["NOTASECRET", "TERCESATON", "extra", "porr", "--port"] {
+                    assert!(
+                        !text.contains(piece),
+                        "{sub} {tail:?} shows {piece}: {text}"
+                    );
+                }
+                assert!(
+                    text.contains("unexpected argument '<redacted>' found"),
+                    "{text}"
+                );
+                assert!(text.contains(ARGV_REDACTED_TIP), "{text}");
+                texts.push(text);
+            }
+            assert!(texts.windows(2).all(|w| w[0] == w[1]), "{sub}: {texts:#?}");
+        }
+        // The `=` form: the split tail is redacted too.
+        let argv: Vec<std::ffi::OsString> = [
+            "lambo",
+            "serve-web",
+            "--auth-token=NOTASECRET-a",
+            "NOTASECRET-b",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        let (_, text) = parse_error_text(&argv);
+        assert!(!text.contains("NOTASECRET"), "{text}");
+    }
+
+    /// The narrow rule: an argument clap cannot place before `--auth-token`
+    /// is still shown, with clap's suggestion, and an error with no
+    /// `--auth-token` in argv is clap's own (#315).
+    #[test]
+    fn unexpected_argument_before_auth_token_is_still_shown() {
+        for sub in ["serve", "serve-web"] {
+            let argv = argv_with_token(sub, &["--sesion", "s"], &["NOTASECRET-tok"]);
+            let (_, text) = parse_error_text(&argv);
+            assert!(
+                text.contains("unexpected argument '--sesion' found"),
+                "{text}"
+            );
+            assert!(
+                text.contains("--session"),
+                "keeps clap's suggestion: {text}"
+            );
+            assert!(!text.contains("NOTASECRET"), "{text}");
+        }
+        let argv: Vec<std::ffi::OsString> = ["lambo", "serve-web", "--bogus"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let raw = Cli::try_parse_from(&argv).expect_err("refused");
+        let raw_text = raw.render().to_string();
+        let (_, text) = parse_error_text(&argv);
+        assert_eq!(text, raw_text);
+    }
+
+    /// A non-UTF-8 `serve-web --auth-token` is refused without the value
+    /// (#315), like `lambo serve`'s.
+    #[cfg(unix)]
+    #[test]
+    fn serve_web_auth_token_non_utf8_never_quotes_the_value() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = std::ffi::OsStr::from_bytes(b"NOTASECRET\xff");
+        let err = Cli::try_parse_from([
+            std::ffi::OsStr::new("lambo"),
+            std::ffi::OsStr::new("serve-web"),
+            std::ffi::OsStr::new("--auth-token"),
+            raw,
+        ])
+        .expect_err("a non-UTF-8 --auth-token must be refused");
+        let text = err.render().to_string();
+        assert_eq!(err.exit_code(), 2, "{text}");
+        assert!(!text.contains("NOTASECRET"), "{text:?}");
+    }
+
+    /// A valid `serve-web --auth-token` parses, and `Commands`' `Debug`
+    /// (derived) does not print it.
+    #[test]
+    fn serve_web_valid_auth_token_parses_and_debug_redacts() {
+        let cli = Cli::try_parse_from(["lambo", "serve-web", "--auth-token", "NOTASECRET-ok"])
+            .expect("a valid token parses");
+        let shown = format!("{:?}", cli.command);
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(!shown.contains("NOTASECRET"), "{shown}");
     }
 }

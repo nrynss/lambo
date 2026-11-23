@@ -3,13 +3,23 @@
 use crate::types::GraphSnapshot;
 use crate::types::{ConceptName, RetiredAlias, StoreError};
 
+/// Check a stored name against the current name rules. Both refusals name
+/// the row (name, session, target node and keys), so an operator whose
+/// session no longer loads can find it (#301).
 pub(crate) fn validate_name(name: &ConceptName) -> Result<(), StoreError> {
-    let expected = crate::graph::names::name_key(&name.name)
-        .map_err(|error| StoreError::Invariant(error.to_string()))?;
+    let expected = crate::graph::names::name_key(&name.name).map_err(|error| {
+        StoreError::Invariant(format!(
+            "concept name {:?} of session {} (bound to {}) has key {:?}, but the current \
+             rule refuses the name: {error}",
+            name.name, name.session_id, name.node_id, name.name_key
+        ))
+    })?;
     if name.name_key != expected {
-        return Err(StoreError::Invariant(
-            "concept name has an invalid normalized key".into(),
-        ));
+        return Err(StoreError::Invariant(format!(
+            "concept name {:?} of session {} (bound to {}) has key {:?}, but the current \
+             rule derives {:?}",
+            name.name, name.session_id, name.node_id, name.name_key, expected
+        )));
     }
     Ok(())
 }

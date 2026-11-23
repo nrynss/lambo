@@ -19,14 +19,14 @@ impl Graph {
     /// mutations (the history is already durable) and verifies every §5.7
     /// invariant before returning.
     ///
-    /// A zero-interaction snapshot is a valid **empty** graph (adve-review
-    /// GRAPH-6 — "expected exactly one chain head, found 0" was rejecting
-    /// fresh sessions), and duplicate natural-key edges are rejected rather than
-    /// silently merged via reinforcement (GRAPH-7 — the loaded graph must equal
-    /// the stored snapshot; reinforcement is a write-path semantic, not a load
-    /// one). For the same reason a node id that appears twice (two
-    /// interactions, two concepts, or a concept reusing an interaction's id) is
-    /// rejected rather than loaded last-wins.
+    /// A zero-interaction snapshot is a valid **empty** graph ("expected
+    /// exactly one chain head, found 0" was rejecting fresh sessions), and
+    /// duplicate natural-key edges are rejected rather than silently merged via
+    /// reinforcement (the loaded graph must equal the stored snapshot;
+    /// reinforcement is a write-path semantic, not a load one). For the same
+    /// reason a node id that appears twice (two interactions, two concepts, or
+    /// a concept reusing an interaction's id) is rejected rather than loaded
+    /// last-wins.
     ///
     /// The mutation epoch **resumes** from [`GraphSnapshot::mutation_epoch`]
     /// (issue #17): the counter is durable accounting, not process state.
@@ -50,7 +50,7 @@ impl Graph {
                     i.id, i.session_id, sid
                 )));
             }
-            // GRAPH-7: the loaded graph must equal the snapshot, so a node id
+            // The loaded graph must equal the snapshot, so a node id
             // that appears twice is refused, not loaded last-wins.
             if g.nodes.insert(i.id, Node::Interaction(i.clone())).is_some() {
                 return Err(invariant(format!(
@@ -106,7 +106,7 @@ impl Graph {
             }
         }
         if snap.interactions.is_empty() {
-            // GRAPH-6: a zero-interaction snapshot is a valid empty graph, not a
+            // A zero-interaction snapshot is a valid empty graph, not a
             // malformed chain. A non-empty snapshot with a forked/absent chain
             // still fails below; concepts without Derives edges still fail
             // assert_invariants.
@@ -141,7 +141,7 @@ impl Graph {
             g.temporal_chain = chain;
         }
 
-        // GRAPH-7: duplicate (source, target, edge_type) in one snapshot must be
+        // Duplicate (source, target, edge_type) in one snapshot must be
         // rejected up front — record_edge would silently reinforce, leaving a
         // loaded graph that disagrees with the stored snapshot.
         let mut seen_edge_keys: HashSet<EdgeKey> = HashSet::with_capacity(snap.edges.len());
@@ -189,18 +189,37 @@ impl Graph {
             }
         }
         for name in &snap.names {
-            let key = super::names::name_key(&name.name)?;
+            // Name the binding, so an operator can find the stored row: a name
+            // whose key the current rule derives differently (#301) refuses
+            // the whole load.
+            let key = super::names::name_key(&name.name).map_err(|e| {
+                invariant(format!(
+                    "stored name {:?} of session {} (bound to {}) is refused by the current \
+                     name rules: {e}",
+                    name.name, name.session_id, name.node_id
+                ))
+            })?;
+            if key != name.name_key {
+                return Err(invariant(format!(
+                    "stored name {:?} of session {} (bound to {}) has key {:?}, but the \
+                     current rule derives {key:?}",
+                    name.name, name.session_id, name.node_id, name.name_key
+                )));
+            }
             if name.session_id != sid
-                || key != name.name_key
                 || matches!(g.node(name.node_id), Some(Node::Interaction(_)))
                 || g.retired_alias(name.node_id).is_some()
                 || g.concepts()
                     .any(|c| c.canonical_key == key && c.id != name.node_id)
                 || g.names.insert(key, name.clone()).is_some()
             {
-                return Err(invariant(
-                    "invalid, conflicting or duplicate name in snapshot",
-                ));
+                return Err(invariant(format!(
+                    "stored name {:?} of session {} (bound to {}, key {:?}) is invalid, \
+                     conflicting or a duplicate in this snapshot: another session's, bound \
+                     to an interaction or a retired alias, its key held by another concept, \
+                     or a second name with the same key",
+                    name.name, name.session_id, name.node_id, name.name_key
+                )));
             }
         }
         for r in &snap.reservations {
@@ -219,7 +238,7 @@ impl Graph {
                     ev.session_id, sid
                 )));
             }
-            // #20 review L7: an event whose reason the write gate would refuse
+            // #20: an event whose reason the write gate would refuse
             // (a reason on a promotion, a self-supersession, an unknown
             // reason) loads as an unknown reason with a warning; the snapshot
             // still loads.
@@ -280,8 +299,8 @@ impl Graph {
             })
             .collect();
         // Interactions were collected in temporal chain order above — do NOT sort
-        // them by id (adve-review T2.1 S4): the chain order is the documented
-        // contract, and random v4 UUIDs would silently destroy it.
+        // them by id: the chain order is the documented contract, and random
+        // v4 UUIDs would silently destroy it.
         concepts.sort_by_key(|c| c.id.0);
         edges.sort_by_key(|e| e.id.0);
         synonyms.sort_by(|a, b| a.source_key.cmp(&b.source_key));
