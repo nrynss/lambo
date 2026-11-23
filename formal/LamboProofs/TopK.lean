@@ -81,12 +81,6 @@ covered).
   (`radii.get(&c.id)`), is not shown; only the kept copy's count and an
   `also <id>` label remain (test `canonical_first_order_is_kept`).
 
-The last section applies #280's gated order (`Order.gatedRankMembers`, a
-design model) to emission: a forced pillar is shown whatever the order, and
-behind the gate `skipped_canonical_kept_canonical` fails (a `decide`
-counterexample, which needs a redundant pair whose relevance falls on both
-sides of the gate).
-
 Boundary: `forced` is an input (`Hotlist/Recall.lean` derives it); the
 redundancy signals are not modelled (`red` and `warns` are parameters), nor
 is the companion step after emission, which can bring a skipped member back as
@@ -1486,55 +1480,5 @@ example : [1, 2, 3].Pairwise (fun a b =>
     emitR (fun _ => true) (fun _ => false) (fun _ => false) exCanonDup 2 (window 2) windowMax
       0 0 [] [1, 2, 3] = [1, 3] ∧
     exCanon 1 = true ∧ exCanon 2 = true := by decide
-
-/-! ## #280's gate against emission (design model)
-
-Two consequences of gating only the order (`Order.gatedRankMembers`), using
-the dogfood shape of `Order.lean`'s examples: direct matches `1`, `2` and a
-Canonical pillar `3` reached by expansion.
-
-1. **A forced pillar is shown whatever the order.** #280's example pillar
-   carried a conflict banner, a hot-list `Conflict` payload, which `forces`
-   force-includes past `top_k`. `forced_mem_emit` and `forced_mem_emitR` hold
-   for every ranked order, so a gate on the order moves such a member down but
-   cannot remove it, or its banners, from the hits. Only an unforced pillar is
-   cut by the gate.
-2. **The gate breaks `skipped_canonical_kept_canonical`.** Behind the gate a
-   below-gate Canonical member can be ranked after a non-Canonical copy that
-   is redundant with it and be skipped for it, and the ⚑ line, which `warns`
-   does not count, goes with it: no ⚑ banner is left. This needs a redundant
-   pair whose query relevance falls on opposite sides of the gate. The
-   default same-content signal rarely produces one (identical texts score
-   alike in phase 1); it becomes realistic under `similar_signals = true`,
-   where a `Semantic` edge or cosine joins differently worded texts, or when
-   one copy misses the phase-1 cap or has no vector.
--/
-
-/-- `top_k = 2`, pillar not forced: today it takes the first slot; behind the
-gate it is cut. -/
-example : emit (fun _ => true) (fun _ => false) 2 0 [3, 1, 2] = [3, 1] ∧
-    emit (fun _ => true) (fun _ => false) 2 0 [1, 2, 3] = [1, 2] := by decide
-
-/-- `top_k = 2`, pillar forced (a conflict payload): shown in either order. -/
-example : emit (fun _ => true) (fun i => i == 3) 2 0 [3, 1, 2] = [3, 1, 2] ∧
-    emit (fun _ => true) (fun i => i == 3) 2 0 [1, 2, 3] = [1, 2, 3] := by decide
-
-/-- `1` and the pillar `3` hold the same text. -/
-def exSame (a b : Nat) : Bool := (a == 1 && b == 3) || (a == 3 && b == 1)
-
-/-- `top_k = 3`: today the Canonical copy ranks first and the plain copy is
-skipped for it; behind the gate the Canonical copy is skipped for the plain
-one. The example's relevances (pillar 0, plain copy 90) put the pair on
-opposite sides of the gate, which identical texts rarely are; see item 2
-above. -/
-example : skipsR (fun _ => true) (fun _ => false) (fun _ => false) exSame 3 (window 3) windowMax
-    0 0 [] [3, 1, 2] = [(3, 1)] ∧
-    skipsR (fun _ => true) (fun _ => false) (fun _ => false) exSame 3 (window 3) windowMax
-    0 0 [] [1, 2, 3] = [(1, 3)] := by decide
-
-/-- That second list is in gated order (gate 10), and its skipped member is
-Canonical while its kept one is not. -/
-example : [1, 2, 3].Pairwise (fun a b => Order.ex280Order Order.ex280Rel (some 10) a b = .lt) ∧
-    Order.ex280Canonical 3 = true ∧ Order.ex280Canonical 1 = false := by decide
 
 end Lambo.TopK

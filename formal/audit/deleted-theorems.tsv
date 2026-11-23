@@ -1,12 +1,15 @@
-# Theorems deleted from the models on purpose, after the audit in
-# formal/audit/unreferenced-theorems.md found nothing referencing them (no
-# proof in the dump's `uses`, no other declaration naming them, no example,
+# Theorems deleted from the models on purpose, in three groups. First, those
+# the audit in formal/audit/unreferenced-theorems.md found nothing referencing
+# (no proof in the dump's `uses`, no other declaration naming them, no example,
 # docs anchor, claims ledger row, Rust comment, oracle or README mention, and
-# no Audit.lean line except `Drain.orderInv_nil`'s, removed with it). The last
-# block failed the purpose review recorded in reviewed-theorems.tsv: their
-# model headers named some of them, and those mentions went with them.
-# Tab-separated: name, reason, the kept theorem that states the same thing or
-# more (`-` when there is none). Read by
+# no Audit.lean line except `Drain.orderInv_nil`'s, removed with it). Second,
+# the rows marked "purpose review", which failed the review recorded in
+# reviewed-theorems.tsv (header mentions went with them). Third, the #280
+# rows: that unimplemented design model, removed at the owner's request with
+# its six Audit.lean lines, its README and header mentions, and the
+# definitions only it used (a definition is listed only when nothing left
+# mentions it). Tab-separated: name, reason, the kept theorem that states the
+# same thing or more (`-` when there is none). Read by
 # scripts/formal/check-decl-equivalence.py --deletions and by
 # scripts/formal/audit-theorems.py.
 Lambo.BatchQueue.lengthChunks_nil	dead helper: an undocumented rfl unfolding of lengthChunks on [] that nothing uses or names	-
@@ -79,3 +82,20 @@ Lambo.Order.gatedRankMembers_unreachable	purpose review: about the issue 280 gat
 Lambo.Order.gatedRankMembers_canonical_first	purpose review: about the issue 280 gated order, a design not in the Rust	-
 Lambo.Order.gatedRankMembers_below_gate	purpose review: about the issue 280 gated order, a design not in the Rust	-
 Lambo.Order.promoted_zero	cascade: used only by the deleted gatedRankMembers_zero; about the issue 280 gated order, a design not in the Rust	-
+Lambo.Order.promoted_off	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_off	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_lawful	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_separating	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_sorted_unique	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_promoted_first	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_unpromoted	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers_below_gate_score	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.clearsGate	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.promoted	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.gatedRankMembers	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.ex280Canonical	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.ex280Rel	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.ex280RelHit	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.ex280Score	#280 unimplemented design; recoverable from git history	-
+Lambo.Order.ex280Order	#280 unimplemented design; recoverable from git history	-
+Lambo.TopK.exSame	#280 unimplemented design; recoverable from git history	-

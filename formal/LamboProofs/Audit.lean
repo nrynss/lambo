@@ -157,13 +157,6 @@ open Lambo
 #print axioms TopK.skipsR_not_emitted
 #print axioms TopK.skipsR_length_le
 #print axioms TopK.skipped_canonical_kept_canonical
--- Gated Canonical-first (#280, design)
-#print axioms Order.gatedRankMembers_off
-#print axioms Order.gatedRankMembers_lawful
-#print axioms Order.gatedRankMembers_separating
-#print axioms Order.gatedRankMembers_promoted_first
-#print axioms Order.gatedRankMembers_below_gate_score
-#print axioms Order.gatedRankMembers_sorted_unique
 -- Recall confidence
 #print axioms Confidence.provisional_inUnit
 #print axioms Confidence.keywordTerm_half

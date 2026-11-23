@@ -8,8 +8,8 @@ tests. It has no dependencies beyond Lean itself (no Mathlib).
 
 `lake build` passes on Lean `v4.36.0` with no errors, no warnings and no
 `sorry`, and the axiom audit in `LamboProofs/Audit.lean` reports only Lean's
-standard axioms (`propext`, `Quot.sound`, and `Classical.choice` for 359
-theorems); 36 of the 843 audited theorems use no axioms at all.
+standard axioms (`propext`, `Quot.sound`, and `Classical.choice` for 358
+theorems); 36 of the 837 audited theorems use no axioms at all.
 
 What the models prove is in the table below, file by file, led by each model's
 end results: the theorems that state a property of the Rust, or, for a
@@ -46,7 +46,7 @@ oracle" below). It keeps
 module is not rebuilt. Besides the checkout pin `ci.yml` already uses, the only
 action is `actions/cache`, pinned by commit.
 
-[^count]: For the record: 2,398 theorems across 55 model files, and 18 shared
+[^count]: For the record: 2,390 theorems across 55 model files, and 18 shared
     lemmas about lists in `LamboProofs/Lib/List.lean`. The count is of `theorem`
     declarations in the model files (every `.lean` file under `LamboProofs/`,
     subdirectories included, other than `Audit.lean` and the shared lemmas under
@@ -107,7 +107,7 @@ the lemmas they rest on are in the files and not listed here.
 | File | End results | Rust source |
 | --- | --- | --- |
 | `Score.lean` | The composite is in `[0, 1 + MAX_BONUS]` for every input and weight set (`score_range`). With weights summing to at most 1 the upper clamp never fires (`rawScore_le`). The score is monotone in every dimension (`score_mono`). GC's eviction composite equals the live score at zero frequency and never falls below it (`livePlusFrequency_of_frequency_zero`, `live_le_livePlusFrequency`). The two recency formulas agree in exact arithmetic (`historical_eq_floor`). Max-normalized dimensions are at most 1 (`le_listMax`). | `src/daemon/score.rs`, `ScoringWeights::sanitized` |
-| `Order.lean` | `then_with` of lawful comparators is lawful (`lawful_lex`). The three ranking comparators are strict total orders (`rankMembers_lawful`, `rankMembers_separating`). A sorted list is determined by its set of members, so the output does not depend on input order (`sorted_unique`). Canonical members order first whatever the scores (`rankMembers_canonical_first`). Design model of #280's relevance-gated order (not yet in Rust): off is today's order (`gatedRankMembers_off`), a Canonical member at or above the gate still orders first (`gatedRankMembers_promoted_first`), one below it orders by score (`gatedRankMembers_below_gate_score`), and the order stays lawful and deterministic (`gatedRankMembers_lawful`, `gatedRankMembers_sorted_unique`). | `tie_break_by_key`, `rescore`, `rank` (candidates), `rank_members`; design model of #280 |
+| `Order.lean` | `then_with` of lawful comparators is lawful (`lawful_lex`). The three ranking comparators are strict total orders (`rankMembers_lawful`, `rankMembers_separating`). A sorted list is determined by its set of members, so the output does not depend on input order (`sorted_unique`). Canonical members order first whatever the scores (`rankMembers_canonical_first`). | `tie_break_by_key`, `rescore`, `rank` (candidates), `rank_members` |
 | `Expand.lean` | The expansion is exactly the set of nodes within `depth` traversable edges of a candidate (`expand_sound`, `expand_complete`), each recorded once on any graph, cyclic or not (`expand_nodup`), candidates first in input order (`expand_prefix`). | `expand` in `src/recall/expand.rs` |
 | `TopK.lean` | Forced members are never cut and take no slot (`forced_mem_emit`, `emit_free_le_topK`). The ordinary hits are exactly the first `top_k` ordinary concepts in rank order (`emit_free_eq_take`). Emission keeps rank order (`emit_sublist`). With the redundancy skip: order and forced members are kept (`emitR_sublist`, `forced_mem_emitR`), skipped members take no slot (`emitR_free_count`), at most `window top_k` are skipped (`skipsR_length_le`), no redundant pair means the no-skip result (`emitR_eq_emit_of_no_redundant_pair`, `emitR_eq_emit_of_no_redundant_distinct_pair`), the copy ranked first is kept (`skipsR_pairwise`), and a skipped Canonical member is skipped for a Canonical copy, whose ⚑ banner is shown instead of its own (`skipped_canonical_kept_canonical`). | `emitted` in `src/recall/assemble.rs`, with the #181 rule of `src/recall/redundancy.rs` |
 | `Fit.lean` | Every accepted prefix fits the budget for any estimator (`fit_prefix_ok`). The cut stops at the first block that does not fit (`fit_stops_at_first_miss`). With a monotone estimator it is the longest fitting prefix (`fit_longest`). With the oversize-first-block truncation (#130), whatever is rendered fits the budget for any estimator (`fitBlocks_fits`), a first block that fits gives exactly the whole-block result (`fitBlocks_of_first_fits`), the context is non-empty whenever there is a block and the marker alone fits (`fitBlocks_context_ne_nil`), and a truncated context is a content prefix, `…`, a prefix of the label and warnings, and a marker counting exactly the text left out (`fitBlocks_truncated_prefix`). For the default and byte estimators with the real marker the head is the longest that fits and the first fitting form wins (`rust_default_steady`, `rust_default_longest`); that does not hold for every estimator monotone in bytes (`rust_jump_skips_a_fitting_form`, on a real block), while rule 3 does, on blocks of the Rust's sizes (`rust_rule3_of_mono`). | `fit_blocks`, `truncate_first`, `content_cuts` in `src/recall/format/fit.rs` |
@@ -179,8 +179,6 @@ header, and it is only as good as that reading. In particular:
   that does not affect the stated results; each header lists what it leaves
   out. Where a model's statement holds only in exact arithmetic, the header
   says so (`Confidence.lean`, `Policy/Score.lean`, `Fit.lean`).
-* Some files model behaviour the Rust does not have yet: `Order.lean`'s gated
-  order is a design model of #280.
 * Predicates whose inputs are measured by store queries (Stage 2 coverage,
   blast radius, eviction score) are modelled from those inputs onward.
 

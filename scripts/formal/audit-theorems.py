@@ -684,8 +684,10 @@ def main(argv=None):
         w("## Deleted\n")
         w("Each was referenced by nothing when it was deleted (no proof in the dump, no other declaration "
           "naming it, no example, docs anchor, claims ledger row, Rust comment, oracle or README, and no "
-          "`Audit.lean` line but `Drain.orderInv_nil`'s, removed with it); those marked \"purpose review\" "
-          f"failed the review recorded in `{REVIEWED}`.\n")
+          "`Audit.lean` line but `Drain.orderInv_nil`'s, removed with it), except two groups: those marked "
+          f"\"purpose review\" failed the review recorded in `{REVIEWED}`, and the #280 rows remove that "
+          f"unimplemented design model (with its `Audit.lean` lines, and the definitions only it used) at the "
+          f"owner's request.\n")
         for name, reason, kept in deleted:
             w(f"- `{name.removeprefix('Lambo.')}`: {reason}"
               + (f"; kept: `{kept.removeprefix('Lambo.')}`" if kept != "-" else "") + ".")

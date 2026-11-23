@@ -153,14 +153,19 @@ class Equivalence(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Lambo.A.t: theorem at the base, not declared at HEAD", out)
 
-    def test_listed_deletion_must_be_gone_and_a_theorem_and_keep_its_counterpart(self):
+    def test_listed_deletion_must_be_gone_unused_and_keep_its_counterpart(self):
         code, out = self.run_check(BASE, BASE, deletions="Lambo.B.helper\tr\t-\n")
         self.assertEqual(code, 1)
         self.assertIn("listed as deleted, but still declared", out)
-        head = [d for d in BASE if d["name"] != "Lambo.A.f"]
+        # An unused definition can be deleted; one a kept declaration
+        # mentions cannot.
+        head = [d for d in BASE if d["name"] not in ("Lambo.A.f", "Lambo.A.f.match_1")]
         code, out = self.run_check(BASE, head, deletions="Lambo.A.f\tr\t-\n")
+        self.assertEqual(code, 0, out)
+        uses = decl("Lambo.A.uses_f", type_="Eq.{1} Nat (Lambo.A.f 0) 0")
+        code, out = self.run_check(BASE + [uses], head + [uses], deletions="Lambo.A.f\tr\t-\n")
         self.assertEqual(code, 1)
-        self.assertIn("only theorems can be deleted", out)
+        self.assertIn("Lambo.A.uses_f at HEAD still mentions", out)
         head = [d for d in BASE if d["name"] not in ("Lambo.A.helper", "Lambo.B.helper")]
         code, out = self.run_check(BASE, head,
                                    deletions="Lambo.B.helper\tr\tLambo.A.helper\nLambo.A.helper\tr\t-\n")

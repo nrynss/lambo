@@ -26,8 +26,9 @@ not the source text), and compares the two by fully qualified name:
   comment; a reason may contain `#`, as in an issue number): NAME is a
   theorem at the base and not at HEAD, REASON says why it went, and KEPT is
   the theorem at HEAD that states the same thing or more (`-` when there is
-  none, as for a dead helper). Only theorems can be listed: a definition's
-  deletion would change what the others state;
+  none, as for a dead helper). A definition (or other non-theorem) can be
+  listed only when no declaration left at HEAD mentions it in its type or
+  value, so its deletion changes nothing the others state;
 * no declaration is added at HEAD other than a NEW of FILE;
 * every theorem at HEAD rests on `propext`, `Quot.sound` and
   `Classical.choice` at most.
@@ -198,6 +199,13 @@ def read_deletions(path):
     return deletions
 
 
+def mentioned_by(dump, name):
+    """The declarations of `dump` whose type or value mentions `name`."""
+    pat = re.compile(r"(?<![\w.'])" + re.escape(name) + r"(?![\w'])")
+    return sorted(n for n, d in dump.all.items()
+                  if pat.search(d["type"] or "") or pat.search(str(d["value"] or "")))
+
+
 def compare(bd, hd, renames, deletions=None):
     base, head = bd.user, hd.user
     deletions = deletions or {}
@@ -208,7 +216,10 @@ def compare(bd, hd, renames, deletions=None):
         if b is None:
             errors.append(f"{name}: listed as deleted, but not declared at the base")
         elif b["kind"] != "theorem":
-            errors.append(f"{name}: listed as deleted, but a {b['kind']}: only theorems can be deleted")
+            users = mentioned_by(hd, name)
+            if users:
+                errors.append(f"{name}: listed as deleted, but a {b['kind']} that {users[0]} at HEAD "
+                              f"still mentions: only an unused definition can be deleted")
         if name in head:
             errors.append(f"{name}: listed as deleted, but still declared")
         if kept is not None and kept not in head:

@@ -14,12 +14,14 @@
   models, which Rust, its end results and what it does not cover. Every
   theorem is used by another proof or has a doc comment stating what it
   guarantees about which Rust behaviour, and CI checks that rule
-  (`scripts/formal/audit-theorems.py --check`). The 70 theorems that met
+  (`scripts/formal/audit-theorems.py --check`). The 78 theorems that met
   neither, or whose doc comment did not hold up against the Rust on review
   (pure order theory or arithmetic, a design not in the Rust), are deleted,
-  each listed with its reason in `formal/audit/deleted-theorems.tsv`. A
-  theorem nothing else references keeps its place only with a reviewed verdict
-  in `formal/audit/reviewed-theorems.tsv`, and `--check` fails on one without.
+  each listed with its reason in `formal/audit/deleted-theorems.tsv`. They
+  include the whole #280 gated-order design model, which the Rust does not
+  implement, removed with the nine definitions only it used. A theorem nothing
+  else references keeps its place only with a reviewed verdict in
+  `formal/audit/reviewed-theorems.tsv`, and `--check` fails on one without.
   `scripts/formal/check-decl-equivalence.py` compares the Lean environments of
   two trees and confirms that every other theorem is stated exactly as before,
   with the moved helpers in `formal/audit/moved-helpers.tsv`. Earlier entries
