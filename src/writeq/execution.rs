@@ -12,7 +12,9 @@
 //!   function.
 //! * **No graph lock across `.await`**, and **no `.await` between a completed
 //!   graph write and its settle**, so an aborted worker always means "not
-//!   written".
+//!   written". (Test builds only: a worker waiting at an armed test pause is
+//!   the exception, and `abort_workers` refuses to run then; see
+//!   `test_pause`.)
 //! * **Per-job fence check**: a lane drained after a lost lease refuses each
 //!   job and leaves its durable intent for the session's current holder.
 
@@ -608,6 +610,37 @@ pub(crate) fn held_retry_backoff(attempts: u32) -> std::time::Duration {
         .map_or(max, |d| d.min(max))
 }
 
+/// Test-only: wait at `point` if a test armed a pause there (#346), else
+/// return at once without awaiting.
+///
+/// **What it costs.** While a worker waits here, a test build has an
+/// `.await` between a committed graph write and its settle, so the worker's
+/// rule "no `.await` between a completed graph write and its settle"
+/// ("aborted means not written") does not hold for that worker: aborted
+/// there, it would leave a write that applied with an unsettled receipt,
+/// which a close would set aside and answer `intent_durable` or
+/// `close_unflushed`. So `Lanes::test_paused` is set for the wait, and
+/// `WritePipeline::abort_workers` panics while it is set: a test must notify
+/// `resume` before it closes the session. Unarmed (every other test, and
+/// every non-test build, which has no pause at all), nothing here awaits.
+#[cfg(test)]
+async fn test_pause(lanes: &parking_lot::Mutex<super::Lanes>, point: super::admission::PausePoint) {
+    let pause = {
+        let mut l = lanes.lock();
+        if l.test_pause.as_ref().is_some_and(|p| p.point == point) {
+            l.test_paused = true;
+            l.test_pause.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        pause.reached.notify_one();
+        pause.resume.notified().await;
+        lanes.lock().test_paused = false;
+    }
+}
+
 /// What the worker does next (one write at a time).
 enum Next {
     /// Run this write (boxed: a `Job` dwarfs the other variants).
@@ -625,12 +658,22 @@ enum Next {
 impl WritePipeline {
     /// Test-only (#346): arm a one-shot pause. The next worker whose write
     /// commits notifies the first `Notify` and waits for the second before
-    /// its settle block.
+    /// its settle block. The test must notify `resume` before it closes the
+    /// session: see [`test_pause`].
     #[cfg(test)]
     pub(crate) fn pause_before_settle(&self) -> (Arc<Notify>, Arc<Notify>) {
+        self.arm_test_pause(super::admission::PausePoint::BeforeSettle)
+    }
+
+    #[cfg(test)]
+    fn arm_test_pause(&self, point: super::admission::PausePoint) -> (Arc<Notify>, Arc<Notify>) {
         let reached = Arc::new(Notify::new());
         let resume = Arc::new(Notify::new());
-        self.lanes.lock().pause_before_settle = Some((reached.clone(), resume.clone()));
+        self.lanes.lock().test_pause = Some(super::admission::TestPause {
+            point,
+            reached: reached.clone(),
+            resume: resume.clone(),
+        });
         (reached, resume)
     }
 
@@ -898,16 +941,11 @@ impl WritePipeline {
                 }
 
                 // Test-only (#346): hold a committed write here, between its
-                // commit and its settle block, while another worker runs.
-                // Armed by `pause_before_settle` alone; unarmed, nothing here
-                // awaits, so the rule below holds outside that test.
+                // commit and its settle block, while another worker runs. See
+                // `test_pause` for what that costs and how it is guarded.
                 #[cfg(test)]
                 if outcome.is_ok() {
-                    let pause = lanes.lock().pause_before_settle.take();
-                    if let Some((reached, resume)) = pause {
-                        reached.notify_one();
-                        resume.notified().await;
-                    }
+                    test_pause(&lanes, super::admission::PausePoint::BeforeSettle).await;
                 }
 
                 // No `.await` from here to the end of the iteration: an

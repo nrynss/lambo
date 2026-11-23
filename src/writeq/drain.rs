@@ -154,6 +154,14 @@ impl WritePipeline {
     /// whether its final flush made the intents durable (#117).
     /// Returns how many receipts this set aside.
     pub(crate) async fn abort_workers(&self) -> usize {
+        // Test builds only: a worker waiting at a test pause has committed a
+        // write it has not settled, so aborting it would break "aborted means
+        // not written" (`execution::test_pause`).
+        #[cfg(test)]
+        assert!(
+            !self.lanes.lock().test_paused,
+            "abort_workers ran while a worker waits at a test pause: resume it before the close"
+        );
         self.seal();
         let (handles, orphans) = {
             let mut lanes = self.lanes.lock();

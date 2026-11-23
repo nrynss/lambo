@@ -650,16 +650,35 @@ pub(super) struct Lanes {
     /// (#346), so a timeout another lane meets after that commit starts a new
     /// run.
     pub(super) lookup_streak: usize,
-    /// Test-only, one-shot: the next worker whose write committed signals the
-    /// first `Notify` and waits on the second before its settle block, so a
-    /// test can put another worker's step between a commit and its settle
-    /// (#346). Taken by that worker; `None` otherwise, and then the worker
-    /// does not await there.
+    /// Test-only, one-shot: the next worker whose write committed and that
+    /// reaches the pause's point signals `reached` and waits on `resume`, so a
+    /// test can put another worker's step between a commit and a later step
+    /// of the same iteration (#346). Taken by that worker; `None` otherwise,
+    /// and then the worker does not await there. See
+    /// `execution::test_pause` for what holds while a worker waits.
     #[cfg(test)]
-    pub(super) pause_before_settle: Option<(
-        std::sync::Arc<tokio::sync::Notify>,
-        std::sync::Arc<tokio::sync::Notify>,
-    )>,
+    pub(super) test_pause: Option<TestPause>,
+    /// Test-only: `true` while a worker waits at a test pause, between a
+    /// commit and its settle. [`WritePipeline::abort_workers`] refuses to run
+    /// then (it panics), so no test can close over a paused worker.
+    #[cfg(test)]
+    pub(super) test_paused: bool,
+}
+
+/// Where a test pause stops a worker whose write committed (test-only).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PausePoint {
+    /// Before the worker's settle block.
+    BeforeSettle,
+}
+
+/// An armed test pause (test-only): see [`Lanes::test_pause`].
+#[cfg(test)]
+pub(super) struct TestPause {
+    pub(super) point: PausePoint,
+    pub(super) reached: std::sync::Arc<tokio::sync::Notify>,
+    pub(super) resume: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl Lanes {
