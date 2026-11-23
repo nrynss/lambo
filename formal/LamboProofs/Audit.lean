@@ -51,6 +51,7 @@ import LamboProofs.Resolve.Args
 import LamboProofs.Tiered.Pure
 import LamboProofs.Tiered.Machine
 import LamboProofs.Tiered.Runs
+import LamboProofs.Tiered.History
 import LamboProofs.Discovery
 
 /-

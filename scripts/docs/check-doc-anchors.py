@@ -26,11 +26,11 @@ The rules:
   namespace prefixes are dropped: `Canon.Status.rank` matches `def
   Status.rank` inside `namespace Lambo.Canon`, and `Canon.rank` does not.
   A model split into a directory (`formal/LamboProofs/Drain/*.lean`, one
-  namespace `Lambo.Drain`) resolves across its files, except its
-  `History.lean` and `Examples.lean`: the history layer describes no current
-  Rust, and every theorem in the examples file is a finding about the Rust
-  before a fix, so a page citing either would present superseded behaviour
-  as current.
+  namespace `Lambo.Drain`) resolves across its files, except a
+  `History.lean` or `Examples.lean` in it (`Drain/`, `Tiered/`): a history
+  layer describes no current Rust, and every theorem in an examples file is
+  a finding about the Rust before a fix, so a page citing either would
+  present superseded behaviour as current.
 * `const:` a comma-separated list of names, each pinned by
   `src/formal_constants_tests.rs`: every identifier in the name (split at
   `::`, `.` and `()`) must appear there as a whole word in code, not in a

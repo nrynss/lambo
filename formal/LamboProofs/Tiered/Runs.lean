@@ -8,22 +8,14 @@ mirror the tests in `src/store/tiered/tests.rs`: the mirror and served leg,
 the contract refusal, the mirror failure and repair, the #18 cases
 (overtaken repair, lost lease, erase, ahead marker, unleased flush), the #293
 re-take, and the #319 migration and relabel; and the runs that show what the
-Rust does wrong or did before a fix.
+current Rust does wrong. The same batches before #319, and the fixes #319 did
+not take, are `History.lean`, which the docs may not cite.
 
-Results about the Rust: before #319 (pinned on `Pprev`, the previous mirror)
-a re-embed migration drains every `UpsertNode` before the trailing
-`SetEmbedding`, so the new vectors went into the old contract's index, the
-new one got nothing and the session stayed in sync
-(`project_reembed_into_old_index`, `reembed_migration_misindexed`), and a lone
-`SetEmbedding` relabel left the new index empty in sync
-(`relabel_leaves_new_index_empty`); since #319 the batch is held back and
-repaired (`reembed_migration_held_back`, `reembed_migration_repaired`). Of the
-other fixes the issue offered, projecting the `SetEmbedding` first misses the
-relabel and on a first stamp indexes vectors the durable store has just
-quarantined (`projectFinal_misses_relabel`, `projectFinal_ahead_of_durable`),
-and reordering `reembed_all` changes what the durable store keeps
-(`reorder_changes_durable`; #322 fixed the durable side,
-`Contract.reembedOrdered_contractless_durable`). An in-place re-embed lets a
+Results about the Rust: a re-embed migration (`Graph::reembed_all`, every
+`UpsertNode` before the trailing `SetEmbedding`) switches the contract, so
+the mirror holds it back and a repair re-indexes it from the durable snapshot
+(`reembed_migration_held_back`, `reembed_migration_repaired`). An in-place
+re-embed lets a
 read rank two builds together while the bulk lands
 (`inplace_reembed_mixes_builds`). `sync_for_read` re-checks only `Unknown` and
 `Stale`, so a reader that once found the marker in sync trusts the index until
@@ -191,11 +183,7 @@ example :
     s.tier.sync = .stale ∧ s.log = [] ∧
       (run Pt s (attachEvs ++ steps .repStep 20)).tier.sync = .inSync := by decide
 
-/-! ### What the model shows about the Rust -/
-
-/-- The previous mirror (before the #319 fix), with the tests' backoff: the
-pinned runs below are statements about it. -/
-def Pprev : Params := { Pt with switchRepairs := false }
+/-! ### The #319 re-embed batch -/
 
 /-- **A re-embed migration through the tier wrote its new vectors into the
 old contract's index** (the previous version, #319). `Graph::reembed_all`
@@ -210,51 +198,6 @@ since the marker is in sync no load ever repairs it (only
 vectors under contract 1's name, which a reader still holding contract 1 ranks
 a contract-1 probe against. `project` itself is unchanged by the fix. -/
 def reembedBatch : List Mut := [.upsert 1 (some (1, 11)), .upsert 2 (some (1, 21)), .setContract (some 2)]
-
-/-- Before #319, `project` placed a re-embed batch's new vectors under the old
-contract's index, because its `SetEmbedding` comes last. -/
-theorem project_reembed_into_old_index :
-    project reembedBatch (some 1) = ([(1, 1, some (1, 11)), (1, 2, some (1, 21))], some 2) := by
-  decide
-
-def migrated : St := run Pprev seeded ([.write reembedBatch] ++ steps .mirStep 4 ++ [.read 2])
-
-/-- Before #319, a re-embed migration through the tiered store wrote its new
-vectors into the old contract's index while the mirror reported in sync, so
-reads under the new contract found nothing. -/
-theorem reembed_migration_misindexed :
-    migrated.d.contract = some 2 ∧ lookup 1 migrated.d.vecs = some (1, 11) ∧
-      migrated.tier.sync = .inSync ∧ markerEpoch migrated = some 2 ∧
-      answerAt migrated [1, 2] = some [none, none] ∧
-      docAt migrated 1 1 = some (1, 11) ∧ docAt migrated 1 2 = some (1, 21) ∧
-      (run Pprev migrated ([.loadBegin, .loadEnd] ++ steps .repStep 20 ++ [.read 2])).rep = .idle ∧
-      answerAt (run Pprev migrated ([.loadBegin, .loadEnd] ++ steps .repStep 20 ++ [.read 2])) [1, 2]
-        = some [none, none] := by decide
-
-/-- The same switch with `SetEmbedding` first (the order `project`'s table and
-`a_contract_mismatch_is_refused_and_a_switch_queries_only_the_new_index`
-used) landed in the new index under the previous version. -/
-example :
-    answerAt (run Pprev seeded ([.write [.setContract (some 2), .upsert 1 (some (1, 11)),
-      .upsert 2 (some (1, 21))]] ++ steps .mirStep 4 ++ [.read 2])) [1, 2]
-      = some [some (1, 11), some (1, 21)] := by decide
-
-/-- **An operator relabel left the new contract's index empty** (the previous
-version; the same bug as #319 with `SetEmbedding` first, found by modelling
-the fix). `--allow-embedding-mismatch` flushes a lone `SetEmbedding`
-(`Graph::replace_embedding_with_operator_override`, a same-kind model rename
-that keeps the vectors). The projection writes nothing, the marker advances
-and the session stays in sync, so the vectors the durable store now holds
-under contract 2 are in no contract-2 document. -/
-def relabeled : St := run Pprev seeded ([.write [.setContract (some 2)]] ++ steps .mirStep 2 ++ [.read 2])
-
-/-- Before #319, an operator relabel (`SetEmbedding` alone) through the tiered
-store left the new contract's index empty while the mirror reported in sync.
--/
-theorem relabel_leaves_new_index_empty :
-    relabeled.d.contract = some 2 ∧ lookup 1 relabeled.d.vecs = some (0, 10) ∧
-      relabeled.tier.sync = .inSync ∧ markerEpoch relabeled = some 2 ∧
-      answerAt relabeled [1, 2] = some [none, none] := by decide
 
 /-! ### The fix for #319 -/
 
@@ -342,45 +285,6 @@ example : Matches (run Pt migratedAtLoad (steps .repStep (2 * 2 + 9))) ∧
   rw [hl] at hm hd
   refine ⟨hm, ?_, ?_⟩ <;> rw [hd] <;> decide
 
-/-! ### The candidates the fix did not take -/
-
-/-- Candidate 1: project the whole batch under its final contract (apply the
-batch's `SetEmbedding` before its upserts). -/
-def projectFinal (ms : List Mut) (before : Option Nat) : List Op × Option Nat :=
-  projectGo (ms.filter fun m => match m with | .setContract _ => false | _ => true)
-    (project ms before).2 []
-
-/-- It places the issue's batch... -/
-example : projectFinal reembedBatch (some 1) =
-    ([(2, 1, some (1, 11)), (2, 2, some (1, 21))], some 2) := by decide
-
-/-- ... but a relabel writes nothing while the durable session keeps its
-vectors under the new contract, -/
-theorem projectFinal_misses_relabel :
-    projectFinal [.setContract (some 2)] (some 1) = ([], some 2) ∧
-      (applyBatch seeded.d [.setContract (some 2)]).vecs = [(2, 0, 20), (1, 0, 10)] ∧
-      (applyBatch seeded.d [.setContract (some 2)]).contract = some 2 := by decide
-
-/-- A session with vectors and no contract (a legacy session; the vectors
-here stand for any the batch writes before its first stamp). -/
-def legacy : Durable := { vecs := [(2, 0, 20), (1, 0, 10)] }
-
-/-- ... and on a first stamp it indexes vectors the durable store has just
-quarantined: the stores apply the stamp's legacy quarantine to the batch's
-own earlier upserts, so the index would serve vectors the authority does not
-hold. -/
-theorem projectFinal_ahead_of_durable :
-    projectFinal reembedBatch none = ([(2, 1, some (1, 11)), (2, 2, some (1, 21))], some 2) ∧
-      (applyBatch legacy reembedBatch).vecs = [] := by decide
-
-/-- Candidate 3: reorder `reembed_all`'s emit order. The durable stores are
-not order-insensitive here: with the `SetEmbedding` last, a first stamp
-quarantines the batch's vectors; with it first, they survive. Reordering
-changes what the durable store holds, so it is not a mirror fix. -/
-theorem reorder_changes_durable :
-    (applyBatch legacy reembedBatch).vecs = [] ∧
-      (applyBatch legacy [.setContract (some 2), .upsert 1 (some (1, 11)),
-        .upsert 2 (some (1, 21))]).vecs = [(2, 1, 21), (1, 1, 11)] := by decide
 /-- **The #296 review's case: an in-place re-embed briefly mixes two builds.**
 `--rewrite-same-contract` drains `UpsertNode`s only; the durable store takes
 them in one transaction, but the index takes the bulk item by item (and a

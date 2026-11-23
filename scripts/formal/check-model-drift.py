@@ -79,8 +79,8 @@ case it is 1.
 The manifest itself is checked on every run, and a broken manifest fails
 (exit 3) even without `--strict`: every `.lean` file under
 `formal/LamboProofs/` (subdirectories included) other than the top-level
-`Audit.lean`, the drain model's history layer and concrete cases
-(`Drain/History.lean`, `Drain/Examples.lean`) and the shared lemma libraries
+`Audit.lean`, the history layers and concrete cases (`Drain/History.lean`,
+`Drain/Examples.lean`, `Tiered/History.lean`) and the shared lemma libraries
 under `Lib/` must have exactly one entry, every Lean file and Rust path an
 entry names must exist, every `#item` must be found, `read_digest` must be
 `v<N>:sha256:` and 64 lowercase hex digits (a bare `sha256:` is scheme 1) with
@@ -116,11 +116,12 @@ import tomllib
 MANIFEST = "formal/models.toml"
 MODEL_DIR = "formal/LamboProofs"
 # Relative to MODEL_DIR, the Lean files that read no Rust of their own and so
-# have no entry: the audit index; the drain model's history layer (the worker
-# before #295 and the replay before #294, kept as the evidence for their
-# findings; docs do not cite it); and its concrete cases, evaluated by
-# `decide` over the definitions of the other drain files, which have entries.
-SKIP_MODELS = {"Audit.lean", "Drain/History.lean", "Drain/Examples.lean"}
+# have no entry: the audit index; the history layers (the drain worker before
+# #295 and the replay before #294; the tiered mirror before #319 and the fixes
+# it did not take), kept as the evidence for their findings, which docs do not
+# cite; and the drain model's concrete cases, evaluated by `decide` over the
+# definitions of the other drain files, which have entries.
+SKIP_MODELS = {"Audit.lean", "Drain/History.lean", "Drain/Examples.lean", "Tiered/History.lean"}
 # Relative to MODEL_DIR, directories of shared lemma libraries: generic facts
 # about lists and the like, which describe no Rust.
 SKIP_DIRS = ("Lib/",)

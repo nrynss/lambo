@@ -14,7 +14,7 @@ Precedence: a same-statement twin (b); a review verdict (a); a superseding count
 
 ## Summary
 
-2398 theorems in 54 model files; 252 unreferenced: 252 (a), 0 (b), 0 (c).
+2398 theorems in 55 model files; 252 unreferenced: 252 (a), 0 (b), 0 (c).
 
 | File | Theorems | Used by a proof | Unreferenced | (a) | (b) | (c) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -68,9 +68,10 @@ Precedence: a same-statement twin (b); a review verdict (a); a superseding count
 | `Supersession/Pass.lean` | 41 | 24 | 5 | 5 | 0 | 0 |
 | `Supersession/Recall.lean` | 13 | 5 | 1 | 1 | 0 | 0 |
 | `Supersession/Suspected.lean` | 58 | 37 | 9 | 9 | 0 | 0 |
+| `Tiered/History.lean` | 6 | 0 | 0 | 0 | 0 | 0 |
 | `Tiered/Machine.lean` | 96 | 74 | 3 | 3 | 0 | 0 |
 | `Tiered/Pure.lean` | 14 | 4 | 1 | 1 | 0 | 0 |
-| `Tiered/Runs.lean` | 17 | 1 | 0 | 0 | 0 | 0 |
+| `Tiered/Runs.lean` | 11 | 1 | 0 | 0 | 0 | 0 |
 | `TopK.lean` | 55 | 40 | 5 | 5 | 0 | 0 |
 | **Total** | 2398 | 1441 | 252 | 252 | 0 | 0 |
 
@@ -221,15 +222,15 @@ Theorems with the same statement (up to binder names) under two names; one of ea
 
 ## `Dispatch.lean`
 
-- (a) `classify_general_iff` (line 232): reviewed against the rule: `classify` (`src/recall/dispatch.rs`) is General exactly when no marker occurs.
-- (a) `classify_each_marker` (line 262): reviewed against the rule: `classify` answers Structural for each of `STRUCTURAL_MARKERS`.
-- (a) `unsafe_to_delete_structural` (line 290): reviewed against the rule: `classify` on "unsafe to delete": a harmless substring match before #299.
-- (a) `somewhat_uses_structural` (line 300): reviewed against the rule: `classify` matched markers as substrings before #299: a false positive.
-- (a) `ranked_concepts` (line 1063): reviewed against the rule: every dependent `dependents_of` returns is a concept, so `try_structural_with`'s `?` never fires.
-- (a) `anchor_not_mem_ranked` (line 1069): reviewed against the rule: `dependents_of` never lists the anchor (its doc quoted).
-- (a) `ranked_weight_desc` (line 1117): reviewed against the rule: the doc states what `dependents_of` does, no more broadly than the statement.
-- (a) `traversal_sorted` (line 1232): reviewed against the rule: `try_structural_with`'s hits are strictly in `rank_members` order.
-- (a) `general_blends` (line 1485): reviewed against the rule: the doc states what `recall_routed` does, no more broadly than the statement.
+- (a) `classify_general_iff` (line 234): reviewed against the rule: `classify` (`src/recall/dispatch.rs`) is General exactly when no marker occurs.
+- (a) `classify_each_marker` (line 264): reviewed against the rule: `classify` answers Structural for each of `STRUCTURAL_MARKERS`.
+- (a) `unsafe_to_delete_structural` (line 292): reviewed against the rule: `classify` on "unsafe to delete": a harmless substring match before #299.
+- (a) `somewhat_uses_structural` (line 302): reviewed against the rule: `classify` matched markers as substrings before #299: a false positive.
+- (a) `ranked_concepts` (line 1065): reviewed against the rule: every dependent `dependents_of` returns is a concept, so `try_structural_with`'s `?` never fires.
+- (a) `anchor_not_mem_ranked` (line 1071): reviewed against the rule: `dependents_of` never lists the anchor (its doc quoted).
+- (a) `ranked_weight_desc` (line 1119): reviewed against the rule: the doc states what `dependents_of` does, no more broadly than the statement.
+- (a) `traversal_sorted` (line 1234): reviewed against the rule: `try_structural_with`'s hits are strictly in `rank_members` order.
+- (a) `general_blends` (line 1487): reviewed against the rule: the doc states what `recall_routed` does, no more broadly than the statement.
 
 ## `Drain/History.lean`
 
