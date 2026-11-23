@@ -382,6 +382,16 @@ impl WritePipeline {
         self.abort_probe();
         self.abort_replay_sync();
         let mut lanes = self.lanes.lock();
+        // Test builds only, as in `abort_workers`: never abort a worker
+        // waiting at a test pause. Skipped while a test is already
+        // panicking, where a second panic would abort the process.
+        #[cfg(test)]
+        if !std::thread::panicking() {
+            assert!(
+                !lanes.test_paused,
+                "a Memory was dropped while a worker waits at a test pause: resume it first"
+            );
+        }
         lanes.sealed = true;
         for (_, handle) in lanes.workers.drain() {
             handle.abort();

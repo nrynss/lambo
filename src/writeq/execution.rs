@@ -678,8 +678,9 @@ pub(crate) fn held_retry_backoff(attempts: u32) -> std::time::Duration {
 /// there, it would leave a write that applied with an unsettled receipt,
 /// which a close would set aside and answer `intent_durable` or
 /// `close_unflushed`. So `Lanes::test_paused` is set for the wait, and
-/// `WritePipeline::abort_workers` panics while it is set: a test must notify
-/// `resume` before it closes the session. Unarmed (every other test, and
+/// `WritePipeline::abort_workers` (a close) and `abort_all_sync` (a dropped
+/// `Memory`, unless the test is already panicking) panic while it is set: a
+/// test must notify `resume` before it closes or drops the session. Unarmed (every other test, and
 /// every non-test build, which has no pause at all), nothing here awaits.
 #[cfg(test)]
 async fn test_pause(lanes: &parking_lot::Mutex<super::Lanes>, point: super::admission::PausePoint) {

@@ -2891,8 +2891,8 @@ async fn submit_until_answered(
 
 /// Two lookup timeouts settle `failed`; agent b's write commits and its
 /// worker is held at the test pause `arm` sets; agent c's first attempt then
-/// times out. Returns c's answer; when it is `failed`, b is resumed and
-/// checked applied, and the session closed.
+/// times out. Returns c's answer, after resuming b, checking it applied and
+/// closing the session.
 async fn timeout_after_a_paused_commit(
     session: &str,
     arm: impl Fn(&crate::writeq::WritePipeline) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>),
@@ -2944,15 +2944,15 @@ async fn timeout_after_a_paused_commit(
     slow.store(true, Ordering::SeqCst);
     let after = submit_until_answered(&mem, &c, "slow lookup fact after a commit").await;
     let answer = mem.pipeline().lookup(&c, after);
-    if answer.tag() == "failed" {
-        // Resume b before the close: `abort_workers` refuses a paused worker.
-        resume.notify_one();
-        until_mem(&mem, "agent b's write to settle", |m| {
-            m.pipeline().lookup(&b, applied).tag() == "applied"
-        })
-        .await;
-        mem.close().await.expect("clean close");
-    }
+    // Resume b whatever c answered, before anything can fail and drop the
+    // session with a paused worker: `abort_workers` and `abort_all_sync`
+    // refuse one.
+    resume.notify_one();
+    until_mem(&mem, "agent b's write to settle", |m| {
+        m.pipeline().lookup(&b, applied).tag() == "applied"
+    })
+    .await;
+    mem.close().await.expect("clean close");
     answer
 }
 

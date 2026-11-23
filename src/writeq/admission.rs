@@ -660,8 +660,10 @@ pub(super) struct Lanes {
     #[cfg(test)]
     pub(super) test_pause: Option<TestPause>,
     /// Test-only: `true` while a worker waits at a test pause, between a
-    /// commit and its settle. [`WritePipeline::abort_workers`] refuses to run
-    /// then (it panics), so no test can close over a paused worker.
+    /// commit and its settle. [`WritePipeline::abort_workers`] and
+    /// `abort_all_sync` refuse to run then (they panic; the latter not while
+    /// a test is already panicking), so no test can close or drop a session
+    /// over a paused worker.
     #[cfg(test)]
     pub(super) test_paused: bool,
     /// Test-only, one-shot: the next worker whose write committed panics
