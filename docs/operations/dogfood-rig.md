@@ -144,7 +144,7 @@ systemctl --user status lambo-dogfood.service
 <rig dir>/bin/lambo-<version> --config <rig dir>/lambo.toml stats --store | grep -E "^session|lease:"
 ```
 
-Each pinned session's `lease:` line must name a holder of the form `http-shared-writer@<host>#<pid>`, with the writer's pid (`src/store/lease.rs`, `LeaseHolder::token`). `no writer` means the session is not held. A holder with another agent name means a client is still starting its own stdio `serve`; move that client to its URL (see [Client wiring](#client-wiring)). With a binary older than 0.14.0, read the table directly and filter out expired rows, which persist until the next acquire overwrites them (`migrations/sqlite/001_init.sql`):
+Each pinned session's `lease:` line must name a holder that starts `http-shared-writer@<host>#<pid>`, with the writer's pid (`src/store/lease.rs`, `LeaseHolder::token`). Where the platform reports them, `;boot=…;pidns=…` follows, so match the prefix, not the whole string. `no writer` means the session is not held. A holder with another agent name means a client is still starting its own stdio `serve`; move that client to its URL (see [Client wiring](#client-wiring)). With a binary older than 0.14.0, read the table directly and filter out expired rows, which persist until the next acquire overwrites them (`migrations/sqlite/001_init.sql`):
 
 ```sh
 sqlite3 "<store path>" "select session_id, holder, expires_at from session_leases where expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now') order by session_id;"
@@ -190,7 +190,7 @@ The `embed` line loads candle on the Metal device with the new binary and prints
 
 ### CUDA rig: build from the release tag
 
-No CUDA asset is published. Build the tag in a separate, clean worktree:
+No CUDA asset is published. Build the tag in a separate, clean worktree, on the CUDA rig itself: a binary built on one rig is never copied to the other.
 
 ```sh
 cd <lambo checkout>
@@ -302,7 +302,7 @@ echo "mcp port answered HTTP $code"   # 000: never came up; read serve.log or th
 Then check, in order:
 
 1. The writer stays up: `launchctl print gui/$(id -u)/dev.lambo.dogfood` shows `state = running` and the pid does not change over a minute (Linux: `systemctl --user status` shows `active (running)` with a stable main pid). A crash at start with a pinned `device` is the accelerator backend, not the store.
-2. Every pinned session is held by the new process: `"$RIG/bin/lambo-$V" --config "$RIG/lambo.toml" stats --store | grep -E "^session|lease:"` shows `http-shared-writer@<host>#<new pid>` on every session. A session still answering `503` or showing no writer usually means the old writer did not release its lease; it clears when the 45-second TTL runs out.
+2. Every pinned session is held by the new process: `"$RIG/bin/lambo-$V" --config "$RIG/lambo.toml" stats --store | grep -E "^session|lease:"` shows a holder starting `http-shared-writer@<host>#<new pid>` on every session. A session still answering `503` or showing no writer usually means the old writer did not release its lease; it clears when the 45-second TTL runs out.
 3. The ledger names the new binary. The first heartbeat is written as soon as a session attaches, one `stats` line per session (`src/mcp/serve/heartbeat.rs`):
 
 ```sh
@@ -310,6 +310,7 @@ jq -r 'select(.kind=="stats") | [.ts, .session, .version, .git_sha] | @tsv' "$RI
 ```
 
 The newest lines must show `<version>` and the release commit's 7-character sha. `unknown` means the binary was built without `LAMBO_GIT_SHA`; an older version means the unit still names the old binary.
+
 4. The log since the restart (`serve.log`, or `journalctl --user -u lambo-dogfood.service --since "<restart time>"`) has no `WARN` or `ERROR` line, in particular no embedder canary drift and no `missing_vectors` warning.
 5. From an agent connected to a project URL: `lambo_stats` names that session on its first line (`session '<name>' (owner agent 'http-shared-writer')`), reports `embedded=N/N` with both numbers equal, and `degraded=false`; `lambo_recall` on a topic the session holds returns hits with a non-null `top_legs.vector_cosine` and no embedder warning. A broken embedder degrades recall to keyword-only with a warning; that warning is the failure signal.
 
@@ -457,6 +458,7 @@ lambo session classify --session <source session> --database <backup copy> \
 ```
 
 The rules map projects by folder, agent-id pattern and keyword (`docs/reference/cli.mdx`, "Classify a session before splitting"). Resolve the low-confidence items with the owner through `--reviewed-assignments` or audited `--overrides`, and regenerate the plan; a plan cannot be edited by hand.
+
 3. **Split and verify, offline.**
 
 ```sh
@@ -470,6 +472,7 @@ lambo --config <serving lambo.toml> session verify --session <source session> \
 ```
 
 Pass `--reviewed-assignments` and `--overrides` to `split` exactly when the plan used them. Run `split` with `--dry-run` first. The split report must account for every source row and list every dropped cross-session edge; review the dropped edges and the low-confidence and general-provenance notices with the owner. Run `split` a second time: it must write nothing. `verify` needs the serving `lambo.toml` (with `[store] kind = "sqlite"` set explicitly and the new `[serve]` table) and compares each project's layered recall with the old mixed recall; stop on any loss the owner has not accepted. Pass `--aggregate-only <session>` for a session whose figures must not appear in the report.
+
 4. **Start the new serve.** Point `[store] path` at the split output, add the `[serve]` table, remove any `--session` from the unit, run `lambo --config <rig dir>/lambo.toml provision`, and start the writer. Before rewiring any client, check the log for contract or credential refusals, check that every pinned session's lease is held (`stats --store`), and check that `/mcp` serves `general-usage`.
 5. **Validate every URL.** `lambo_stats` at each URL reports the addressed session. `lambo_recall` without `scope` shows project and `general` hits, each with its session; a query with no relevant `general` hit need not show one, because the layer floor still applies. Recall with `scope` set to the project or to `general` reads that session alone. `lambo_inspect` of a `general` hit works with its id and `scope: "general"`; a `scope` naming another project is refused.
 6. **Check writes without mixing scopes.** In a disposable test session the owner approves, a derive without `scope` lands only in the addressed session, with no copy in `general`. With `scope: "general"` it lands only in `general`, its receipt answers at the project URL, and a relative file path is refused.

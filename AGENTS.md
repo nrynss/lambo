@@ -31,13 +31,15 @@
 - Authority, highest first: the source, then the reference docs (`docs/reference/`, mirrored in `site/src/content/docs/`; keep each pair in sync with `scripts/docs/check-mirror-drift.sh`), then memory. Operational runbooks live in `docs/operations/`.
 - The v0.1 hackathon spec (`lambo-hackathon-spec-v0.1.md`) and the `dev-diary/` tree were removed from the repo because Lambo has outgrown them; they are history, never authority. Code comments, migrations, the CHANGELOG and `evidence/` still cite `spec §N` and `dev-diary/` paths, which name those retired files. To read one, run `git show v0.15.0:lambo-hackathon-spec-v0.1.md` (or `git show v0.15.0:<dev-diary path>`). Where a retired file disagrees with the code, the code is right; do not restore either file or cite it as a rule.
 - Never commit `.env`. Cockroach DSN uses `sslmode=verify-full&sslrootcert=system`.
-- Single-writer deployment model: each session has exactly one writer, enforced by a store lease (see `docs/reference/api.mdx#the-single-writer-lease`).
+- Single-writer deployment model: each session has at most one writer at a time, enforced by a store lease (see `docs/reference/api.mdx#the-single-writer-lease`).
 - **Level B pluggability** (rules: `docs/reference/config.mdx`, "Features"):
   - Cargo **features** compile adapters in (`store-*`, `embed-*`, `recall-elastic`).
-  - **`lambo.toml` / env** select among compiled kinds. Each process builds its store
-    and embedder once, through a resolver in `src/resolve.rs` (`resolve_backends` /
-    `resolve_from_config_path` -> `ResolvedBackends` for commands that embed).
-    Commands never call `build_store` / `build_embedder` or resolve twice.
+  - **`lambo.toml` / env** select among compiled kinds. Each process builds the
+    configured store and embedder once, through a resolver in `src/resolve.rs`
+    (`resolve_backends` / `resolve_from_config_path` -> `ResolvedBackends` for
+    commands that need both; store-only, embedder-only and session split/verify/
+    classify have their own). Commands never call `build_store` /
+    `build_embedder` or resolve twice.
   - Selecting an uncompiled kind or an unknown TOML key is a **hard error**.
   - New backend: follow "Adding a backend" in that section (adapter module, feature,
     registry arm, the formal `EmbedderKind.implemented` table for embedders, docs).

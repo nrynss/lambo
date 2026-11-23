@@ -56,7 +56,8 @@
 //! | `replay` | the durable-intent replay spawned at attach |
 //!
 //! The review chronology behind these rules (three review rounds, the
-//! estimator redesign) is in #27 and the J3 durability redesign.
+//! estimator redesign) is in #27 and in the J3 durability
+//! redesign.
 
 use std::collections::HashMap;
 use std::fmt;

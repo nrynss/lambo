@@ -154,7 +154,8 @@ pub struct MemoryBuilder {
     pub(super) endpoint: Option<String>,
     /// An optional call ledger this process appends its own conflict and
     /// write-intent **completion** lines to (pre-lease startup, lease refusals,
-    /// proxying/degraded, and durable-intent completion). `None` for every
+    /// proxying/degraded, and durable-intent completion, all from the
+    /// J multi-client work). `None` for every
     /// writer that is not a `serve` and for a `serve` run without `--ledger`.
     /// Set only by [`crate::mcp::serve()`]; every ordinary writer keeps the
     /// default.

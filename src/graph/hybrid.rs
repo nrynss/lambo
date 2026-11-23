@@ -2,7 +2,8 @@
 //!
 //! On a canonical-key miss ([`CanonicalizeResult::Unmatched`]) under
 //! `MatchStrategy::Hybrid`, this module embeds the concept **with context**
-//! (name + origin interaction text — the live BGE-M3 calibration rule), queries [`GraphStore::vector_candidates_checked`],
+//! (name + origin interaction text — the live BGE-M3 calibration rule, set in
+//! phase 7), queries [`GraphStore::vector_candidates_checked`],
 //! and — when a candidate sits at or above `semantic_match_threshold` — records
 //! the merge as a decaying [`EdgeType::Semantic`] edge to the matched concept.
 //! Below the threshold, or when the **store capability** is absent, it degrades

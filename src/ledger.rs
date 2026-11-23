@@ -5,7 +5,8 @@
 //! post-hoc SQL question) and was blind to **flow**: nothing recorded the calls
 //! agents actually make, so "agent X recalled, then derived, and a blast-radius
 //! warning rendered" existed only in the conversation that received it. This
-//! module is the serve-side record of that.
+//! module is the serve-side record of that (workstream I,
+//! observability).
 //!
 //! # The two rules that shape every line of this file
 //!

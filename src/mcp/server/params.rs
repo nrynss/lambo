@@ -862,7 +862,8 @@ impl LamboServer {
         // it: measured (J1-R2-3), a 256-char holder still evicts the block it
         // annotates below ~160 `max_tokens`, and the reservation line renders
         // outside the budget entirely. The remainder is a rendering-side
-        // question, an open J2 residual, not closed here.
+        // question, an open J2 residual (a losing serve proxies to the
+        // holder), not closed here.
         // The divergence from
         // `--agent` and from `AgentId` (both uncapped) is deliberate: this
         // door is where unauthenticated remote identity is policed; trusted

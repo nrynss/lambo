@@ -6,7 +6,8 @@
 //! associated const or an associated function, so a dialect call costs nothing
 //! at runtime and a missing dialect is a compile error rather than a panic.
 //!
-//! **The surface starts as workstream B's §B3 table**: the DDL, two casts, the
+//! **The surface starts as workstream B's §B3 table** (the PostgreSQL
+//! store design): the DDL, two casts, the
 //! distance operator and its score conversion, and the width authority. B0
 //! shipped one working dialect. B1 adds `PostgresDialect` as a named,
 //! fail-closed stub (no Cockroach SQL). B2 fills its DDL and splits the

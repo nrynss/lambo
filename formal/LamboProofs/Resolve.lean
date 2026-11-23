@@ -98,14 +98,14 @@ its backends, all in `src/main.rs` at `65fce2a9` (plus #315's fix to
 
 ## Results
 
-Loading (Level B rule 2):
+Loading (Level B: the file or environment selects):
 * `load_refuses_unknown`, `load_unknownKey`: an unknown key, or a kind
   spelled as no adapter, in the file or the environment, refuses the load.
 * `load_store_no_fallback`, `load_embed_no_fallback`: a loaded kind is the
   environment's, else the file's, else (nothing spelled) the default.
 
-What each command needs, and the single construction site (Level B rule 4,
-Level B's single construction site, #273's second Track 1 constraint):
+What each command needs, and the single construction site (Level B's
+single construction site, #273's second Track 1 constraint):
 * `needsEmbedder_table`, `mismatchFlag_writer`, `readers_no_mismatch_flag`
   (the tests `saints_stats_inspect_provision_resolve_store_only` and
   `h1_embedding_mismatch_override_is_explicit_and_writer_only`).
@@ -136,7 +136,7 @@ Level B's single construction site, #273's second Track 1 constraint):
   it first (its body builds SQLite stores over its copied file, outside the
   model).
 
-Hard errors, never a fallback (Level B rule 1):
+Hard errors, never a fallback (Level B: features compile adapters in):
 * `full_ok`, `storeOnly_ok`, `resolveEmbed_ok`: a successful resolve hands
   the command exactly the configured kinds, compiled (embedder implemented,
   tier compiled when configured), with a positive width; so an uncompiled
@@ -147,7 +147,7 @@ Hard errors, never a fallback (Level B rule 1):
   only what it needs, so a store-only command starts whatever `[embedder]`
   says, and `embed` whatever `[store]` says.
 
-Width (store-authoritative, invariant 2):
+Width (store-authoritative):
 * `full_ok`: pin and store width agree with the embedder width.
 * `cockroach_width_refused`: Cockroach's `VECTOR(n)` refuses another width;
   `memory_any_dim`: the test `vector_compat_none_store_accepts_any_positive_dim`;
@@ -349,7 +349,7 @@ def EmbedderKind.implemented : EmbedderKind → Bool
   | .bedrock => false
   | _ => true
 
-/-- The Cargo features of one build (Level B rule 1): which store and
+/-- The Cargo features of one build (Level B: features compile adapters in): which store and
 embedder adapters are compiled in (`StoreKind::is_compiled`,
 `EmbedderKind::is_compiled`), whether the `[recall]` tier is
 (`recall-elastic`), and the width the Cockroach migration's `VECTOR(n)`
@@ -883,7 +883,7 @@ def resolveForCommand (f : Features) (file : Nat → Raw) (inv : Inv) (cmd : Cmd
     if cmd.needsEmbedder then resolveFull f file loaded
     else resolveStoreRun f file (cmd == .stats true)
 
-/-! ## Results: loading (Level B rule 2, the hard errors) -/
+/-! ## Results: loading (Level B selection, the hard errors) -/
 
 theorem pick_unknown_file {α : Type} (env : Spelled α) (d : α) :
     pick .unknown env d = none := by
@@ -1304,7 +1304,7 @@ theorem shape_allowed {cmd : Cmd} {L : List (Site × Built)} (h : Shape cmd L) {
     cases ht : c.tiered <;> simp [ht] at hb <;> rcases hb with rfl | rfl | rfl <;>
       first | rfl | simp [allowed, Cmd.isStoreOnly, Cmd.needsEmbedder, Cmd.isSession]
 
-/-- The single construction site (Level B rule 4, #273's constraint): every
+/-- The single construction site (Level B, #273's constraint): every
 object any command's resolve builds comes from the `src/resolve.rs` entry
 point that command's `Resolved` variant names, and is one that command may
 build: a writer or reader with full backends builds through

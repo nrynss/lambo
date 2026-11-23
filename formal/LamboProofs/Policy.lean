@@ -30,7 +30,8 @@ Model of
   `dependentOrigins` models.
 
 The design is spec §3.2's formula, with the valid-action term replaced by
-dependent interactions in #36 PR 3, over event time (`src/canon/event_time.rs`).
+dependent interactions in #36 PR 3, over the event time of
+`src/canon/event_time.rs`.
 
 ## Model
 

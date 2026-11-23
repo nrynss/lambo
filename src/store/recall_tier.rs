@@ -25,7 +25,8 @@
 //! under `[store]`. `StoreConfig` is a public struct with public fields that
 //! dozens of call sites (and library consumers) build literally, so a new field
 //! there breaks every one of them; a top-level `LamboFile` section does not, and
-//! it reads the same to an operator. Decided in #18.
+//! it reads the same to an operator. Decided in #18 (the Elasticsearch
+//! recall tier).
 
 use serde::{Deserialize, Deserializer, Serialize};
 

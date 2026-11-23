@@ -5,8 +5,9 @@ DOGFOOD question, each printing a small human-readable report (`--json` for
 piping). No dashboards: `serve-web` already renders *state*, and these answer
 questions about *flow*.
 
-The ledger these read is written by `lambo serve --ledger`; see the `--ledger` row in
-[the CLI reference](../../docs/reference/cli.mdx) for its line kinds.
+The ledger these read is written by `lambo serve --ledger`; see the
+`--ledger` row in [the CLI reference](../../docs/reference/cli.mdx)
+for its line kinds.
 
 ---
 

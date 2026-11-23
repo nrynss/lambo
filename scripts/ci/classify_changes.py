@@ -32,6 +32,7 @@ RUST_FILES = {
     "evidence/issue-221/repro-8concept-qwen3-4b-2560.json",
     "evidence/issue-221/repro-8concept-qwen3-4b-1024.json",
     "evidence/issue-237/calibration-elastic-jina-v3-1024.json",
+    "evidence/157-layer-tuning/README.md",
 }
 # The `mirror` output starts the docs job: the mirror drift check and the
 # docs' source checks (scripts/docs/check-doc-anchors.py and

@@ -2,9 +2,8 @@
 # fetch-bge-m3.sh — download BGE-M3 GGUF weights for llama.cpp (P7 T7.0).
 #
 # Weights are large and gitignored (`models/`). Never commit them.
-# The repo, file, revision and SHA-256 below are pinned so a download is
-# reproducible. LAMBO_BGE_M3_DIR changes where it goes; switching to another
-# file also means updating EXPECTED_SHA256, or the checksum check fails.
+# Repo, file, revision and SHA-256 below are pinned for reproducibility. Another
+# file also needs EXPECTED_SHA256 updated (LAMBO_BGE_M3_DIR just moves it).
 #
 # Usage:
 #   ./scripts/fetch-bge-m3.sh              # default repo/file below

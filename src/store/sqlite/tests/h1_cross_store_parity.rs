@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 /// Cockroach) and H3 (pgvector, once B3 lands) all produce ONE shape,
 /// diffable across runs and across whichever adapters happened to be
 /// reachable in a given run. Exact-scan and ANN adapters are attributed
-/// differently.
+/// differently: an exact scan has no index to miss with,
+/// while an ANN adapter can miss, so a gap there is
+/// attributed to the index.
 ///
 /// **Why this shape survives a third adapter untouched.** Nothing
 /// here names a specific backend in a field: `adapters` and every
@@ -78,7 +80,8 @@ struct AdapterRun {
     /// Whether an index served the answer for this adapter in this
     /// run (vs. a full/forced-exact scan). Always `false` for H1:
     /// SQLite and the memory oracle are both linear scans by
-    /// construction: SQLite has no vector index.
+    /// construction: SQLite has no vector index, so
+    /// there is no plan to compare.
     index_present: bool,
 }
 

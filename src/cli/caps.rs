@@ -109,7 +109,8 @@ impl From<crate::types::LamboError> for CliError {
 /// themselves, and tightening it would change `AgentId`'s semantics for every
 /// library caller. So this is an operator poisoning their own graph — P3 — but
 /// it is the one residual that outlives the process, and it stays open
-/// because shared HTTP serving (J2) is where clients stop being local.
+/// because multi-client serving (J2: a losing serve proxies to the holder)
+/// is where clients stop being local.
 pub fn check_size_cli(field: &str, value: &str) -> Result<(), CliError> {
     check_size(field, value).map_err(CliError::Usage)
 }

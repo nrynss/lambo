@@ -10,7 +10,8 @@
 //! renders it — so the HTTP payload can present cards and annotations without
 //! parsing `context` text or re-reading the store.
 //!
-//! The wire contract (pinned by hardening task H3) is exactly this module's `Serialize`
+//! The wire contract (pinned by hardening task H3) is exactly this
+//! module's `Serialize`
 //! shape: every hit carries `node_id` (added 2026-10-06, issue #9, beside the
 //! originally pinned fields), `content`, `concept_type`, `status` (absent only
 //! for `None`), `score`, `blast_radius` (when present),

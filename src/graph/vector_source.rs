@@ -218,7 +218,8 @@ fn concept_of<'g>(graph: &'g Graph, id: &NodeId) -> Option<&'g Concept> {
 /// into permanent near-duplicates. Ranking every graph vector fixed that but
 /// cost O(n * dim) per probe, synchronously, on the backend recommended for
 /// large sessions: 98 ms per probe at 100,000 concepts at d = 1024, about
-/// 6 s for a 64-concept derive (release, measured for #60). The union costs the
+/// 6 s for a 64-concept derive (release build, measured
+/// for #60). The union costs the
 /// pre-#60 indexed database query plus O(unflushed), about 0.8 ms per probe
 /// with 1,000 concepts unflushed whatever the session size, and misses
 /// nothing the store could see or the holder wrote since:

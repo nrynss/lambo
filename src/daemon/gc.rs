@@ -241,7 +241,8 @@ pub const GC_IDLE_FLOOR: u64 = 100;
 /// keeps resetting its own clock.
 ///
 /// The window started at 90 days (measured on the rig snapshot in #29,
-/// whose sensitivity table is the 90-day-era measurement) and was widened to a year by operator decision once
+/// whose sensitivity table is the 90-day-era measurement) and was widened
+/// to a year by operator decision once
 /// Observations left the cut.
 pub const GC_RECENCY_WINDOW: ChronoDuration = ChronoDuration::days(365);
 
