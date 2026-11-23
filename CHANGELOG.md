@@ -4,6 +4,24 @@
 
 ### Changes
 
+- `lambo serve-web` no longer loads the embedder at startup (#247). Browsing
+  (the page, counts, the canonization feed, inspect, the graph and
+  `/api/session`) never loads it; the first `/api/recall` that needs a query
+  vector loads it once, concurrent recalls share that load, and the model is
+  kept for the life of the process. With an in-process candle BGE-M3 this
+  keeps a portal nobody recalls on about 1.3 GB lighter. A failed load
+  degrades that recall to the keyword and recent legs with the usual
+  `query embedding failed ...; vector leg skipped` line and is retried by the
+  next recall. The new `[web] embedder = false` key and the `--no-embedder`
+  flag never load it: recall runs on its keyword and recent legs and, on a
+  store that can search by vector, carries a `vector_degraded` line saying
+  the vector leg is off by configuration; `/api/session` and `/api/pulse`
+  report `vector_search: false`, and recall's `confidence` has the
+  `keyword-only-v0` basis, as after a failed embed. The portal's recall
+  reads one session and never merges a layer, so no layer hit is lost.
+  Startup prints which of the two applies. The configured embedder is still
+  resolved (identity and width, no weights), so the embedding-contract
+  status is unchanged.
 - Formal models are reorganized; no kept theorem's statement changes. The
   large models are split along their Rust seams into directories in the same
   namespace (`Drain/`, `Conflict/`, `Policy/`, `Contract/`, `Supersession/`,
@@ -80,6 +98,23 @@
 
 ### Fixed
 
+- **A bind beyond loopback with no credential, and a misused
+  `--ledger-heartbeat`, are refused before anything is built, with exit 2
+  (#316).** `lambo serve --transport http --bind 0.0.0.0` with no token and
+  no `[[serve.credential]]` passed `serve_preflight`, built the store and
+  the embedder, and was then refused with exit 1, while `lambo serve-web`
+  refused the same bind with exit 2, also after the build. Both now refuse
+  it before any backend is built, with exit 2, the code of every other
+  credential refusal. `--ledger-heartbeat` without `--ledger`, or `0`, is
+  refused the same way, before `lambo.toml` is read (it was exit 1 after
+  the build). `lambo::mcp::serve` and `serve_web::run` keep their own
+  checks for library callers, and the pure checks are public:
+  `lambo::mcp::check_bind`, `lambo::mcp::check_ledger` and
+  `serve_web::plan_bind`. Modelled first in
+  `formal/LamboProofs/Resolve/Serve.lean` (`preflight_ok_start_allowed`,
+  `exposed_bind_refused_before_build`,
+  `heartbeat_without_ledger_refused_before_build`; the two theorems that
+  described the old order are deleted).
 - **A close no longer answers `intent_durable` for a write whose intent a
   dead letter dropped (#345).** A background flush the store refuses with a
   constraint violation (or a value it cannot hold) drops its whole batch

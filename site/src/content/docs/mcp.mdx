@@ -18,9 +18,11 @@ Lambo serves over stdio by default, and over HTTP when you ask for it. {/* code:
 
 {/* code: src/main.rs Commands::Serve port bind (defaults 7700 and 127.0.0.1), src/mcp/serve.rs ServeOptions::new */}
 
-On loopback the HTTP transport is unauthenticated by default. Binding anywhere else fails closed and requires a credential: a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`) or a `[[serve.credential]]`. It also applies a rate limit per credential, a ceiling on concurrently open MCP connections (transport sessions, not Lambo sessions), and a request-body limit. See [Configuration](/lambo/config/#http-transport) for the knobs. One HTTP serve can also hold several sessions, each at its own URL, `/mcp/s/<session>`; `/mcp` serves the default one. See [Several sessions in one serve](/lambo/cli/#several-sessions-in-one-serve).
+On loopback the HTTP transport is unauthenticated by default. Binding anywhere else fails closed and requires a credential: a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`) or a `[[serve.credential]]`; without one `lambo serve` exits `2` before it builds anything. It also applies a rate limit per credential, a ceiling on concurrently open MCP connections (transport sessions, not Lambo sessions), and a request-body limit. See [Configuration](/lambo/config/#http-transport) for the knobs. One HTTP serve can also hold several sessions, each at its own URL, `/mcp/s/<session>`; `/mcp` serves the default one. See [Several sessions in one serve](/lambo/cli/#several-sessions-in-one-serve).
 
-{/* code: src/mcp/serve/http_guards.rs authorize_bind; src/mcp/serve/transport.rs session_router */}
+{/* code: src/mcp/serve/http_guards.rs authorize_bind check_bind; src/mcp/serve/transport.rs session_router */}
+{/* lean: Resolve.exposed_bind_refused_before_build, Resolve.preflight_ok_start_allowed */}
+{/* test: tests/serve_bind_preflight.rs an_exposed_bind_without_a_credential_is_refused_before_any_backend */}
 {/* test: src/mcp/serve/tests/http_guards.rs loopback_and_stdio_do_not_require_a_token, an_unauthenticated_server_still_serves_loopback, a_non_loopback_bind_without_a_token_refuses_to_start, each_credential_has_its_own_rate_bucket, one_credential_flooding_does_not_rate_limit_another, the_thirty_third_session_is_refused_honestly, a_concurrent_initialize_cannot_overshoot_the_cap, an_oversized_request_body_is_refused_before_the_service, an_oversized_chunked_body_is_refused_before_the_service; src/mcp/serve/tests/refuses_to_start.rs serve_refuses_an_unauthenticated_non_loopback_bind; tests/serve_multi_session.rs one_hub_serves_two_pinned_sessions_fenced_proxied_and_released */}
 
 <Warning>

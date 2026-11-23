@@ -830,8 +830,9 @@ open Lambo
 #print axioms Lambo.Resolve.preflight_env_wins
 #print axioms Lambo.Resolve.preflight_ok_stdio
 #print axioms Lambo.Resolve.preflight_ok_http
-#print axioms Lambo.Resolve.bind_refused_after_build
-#print axioms Lambo.Resolve.heartbeat_without_ledger_after_build
+#print axioms Lambo.Resolve.preflight_ok_start_allowed
+#print axioms Lambo.Resolve.exposed_bind_refused_before_build
+#print axioms Lambo.Resolve.heartbeat_without_ledger_refused_before_build
 #print axioms Lambo.Resolve.serve_preflight_refusal_builds_nothing
 #print axioms Lambo.Resolve.render_noninterference
 #print axioms Lambo.Resolve.parseAuthArg_total

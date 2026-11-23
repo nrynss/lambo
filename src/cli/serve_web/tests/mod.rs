@@ -55,6 +55,13 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
         )),
     ),
     (
+        "serve_web/embedder.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/embedder.rs"
+        )),
+    ),
+    (
         "serve_web/headers.rs",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -210,6 +217,7 @@ fn router_source() -> &'static str {
 mod auth;
 mod credentials;
 mod discovery;
+mod embedder;
 mod feeds;
 mod graph;
 mod host;

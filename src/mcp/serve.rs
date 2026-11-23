@@ -121,7 +121,7 @@ pub(crate) use registry::formal_pins as registry_formal_pins;
 
 pub use authority::check_serve_credentials;
 pub use builder::{build_memory, resolve_serve_backends};
-pub use heartbeat::authorize_ledger;
+pub use heartbeat::{authorize_ledger, check_ledger};
 pub use layers::plan_layers;
 pub use pinned::{pin_sessions, PinnedSessions};
 
@@ -133,7 +133,8 @@ use builder::{explain_startup_failure, serve_builder};
 use heartbeat::serve_startup_line;
 use http_guards::authorize_bind;
 pub use http_guards::{
-    resolve_auth_token, SecretToken, AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS, DEFAULT_RATE_LIMIT_RPS,
+    check_bind, resolve_auth_token, SecretToken, AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS,
+    DEFAULT_RATE_LIMIT_RPS,
 };
 use pinned::check_pinned;
 use process::ProcessTasks;

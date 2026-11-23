@@ -227,6 +227,23 @@ pub(super) fn authorize_bind(
     bind: IpAddr,
     token: Option<&SecretToken>,
 ) -> Result<(), LamboError> {
+    check_bind(transport, bind, token, &[])
+}
+
+/// The bind rule over a serve's whole credential set: the legacy token
+/// (`LAMBO_AUTH_TOKEN` over `--auth-token`, as [`resolve_auth_token`]
+/// resolved it) and the `[[serve.credential]]` entries. Any one of them is
+/// a credential. Pure: the CLI runs it in `serve_preflight`, before any
+/// backend is built (#316), and [`serve`](super::serve) runs it again
+/// through `authorize_bind` for library callers.
+/// `formal/LamboProofs/Resolve/Serve.lean` models it as `bindStep`.
+pub fn check_bind(
+    transport: Transport,
+    bind: IpAddr,
+    token: Option<&SecretToken>,
+    credentials: &[crate::config::ServeCredential],
+) -> Result<(), LamboError> {
+    let token = token.or_else(|| credentials.first().map(|c| &c.token));
     if transport != Transport::Http || bind.is_loopback() || token.is_some() {
         return Ok(());
     }

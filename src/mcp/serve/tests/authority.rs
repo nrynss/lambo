@@ -225,7 +225,9 @@ fn the_startup_refuses_ambiguous_credentials_without_quoting_a_token() {
 
 /// The bind rule counts a configured credential as a credential: a
 /// non-loopback serve with only `[[serve.credential]]` starts, and one with
-/// none at all is still refused.
+/// none at all is still refused. `check_bind`, the form `serve_preflight`
+/// runs before any backend is built (#316), agrees with `serve`'s own check
+/// in both states.
 #[test]
 fn a_configured_credential_satisfies_the_non_loopback_bind_rule() {
     let mut opts = http_opts(&["pin-a"], "203.0.113.7");
@@ -234,6 +236,10 @@ fn a_configured_credential_satisfies_the_non_loopback_bind_rule() {
         .expect_err("no credential off loopback")
         .to_string();
     assert!(err.contains("[[serve.credential]]"), "{err}");
+    let preflight = check_bind(opts.transport, opts.bind, None, &opts.credentials)
+        .expect_err("preflight refuses it too")
+        .to_string();
+    assert_eq!(preflight, err);
     assert!(
         serve_authority(&opts).is_err(),
         "never implicit off loopback"
@@ -242,6 +248,8 @@ fn a_configured_credential_satisfies_the_non_loopback_bind_rule() {
     opts.credentials = vec![credential("agents", &["pin-a"], None)];
     authorize_bind(opts.transport, opts.bind, any_credential(&opts))
         .expect("a configured credential satisfies the rule");
+    check_bind(opts.transport, opts.bind, None, &opts.credentials)
+        .expect("and satisfies preflight's check");
     assert!(authority_for(&opts).requires_bearer());
 }
 

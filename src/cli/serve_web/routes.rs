@@ -183,7 +183,8 @@ pub(super) async fn api_session(
                 .store
                 .capabilities()
                 .contains(Capabilities::VECTOR_SEARCH)
-                && embedding_status.vector_search_trusted(),
+                && embedding_status.vector_search_trusted()
+                && state.embedder.enabled(),
             embedding_contract: embedding_status,
             mode: "reader",
             read_only: true,
@@ -227,7 +228,8 @@ pub(super) async fn api_pulse(
                 .store()
                 .capabilities()
                 .contains(Capabilities::VECTOR_SEARCH)
-                && read.embedding_status.vector_search_trusted();
+                && read.embedding_status.vector_search_trusted()
+                && state.embedder.enabled();
             json(
                 StatusCode::OK,
                 Pulse {
@@ -283,13 +285,17 @@ pub(super) async fn api_recall(
         return recall_busy();
     };
     let query_cache = state.views.queries(&ctx.session);
-    let result = super::recall::run_detailed_on(
-        &state.backends,
-        &view.reader,
-        &request,
-        query_cache.as_deref(),
-    )
-    .await;
+    // #247: the embedder loads here, on the first recall that embeds a
+    // query, or never (`[web] embedder = false`).
+    let result = state
+        .embedder
+        .recall(
+            &state.backends,
+            &view.reader,
+            &request,
+            query_cache.as_deref(),
+        )
+        .await;
 
     match result {
         Ok(cli) => json(

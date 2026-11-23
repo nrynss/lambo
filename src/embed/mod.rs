@@ -174,8 +174,8 @@ pub(crate) fn deadline_passed() -> EmbedError {
 /// A copy of `e` with the same variant and message, for an error that
 /// answers several batch slots at once (#125). `EmbedError` is not `Clone`
 /// because it is public and `#[non_exhaustive]`; inside the crate every
-/// variant is known.
-#[cfg(feature = "embed-candle")]
+/// variant is known. Also used by `lambo serve-web` to answer every recall
+/// that joined one failed embedder load (#247).
 pub(crate) fn same_error(e: &EmbedError) -> EmbedError {
     match e {
         EmbedError::Unavailable(m) => EmbedError::Unavailable(m.clone()),

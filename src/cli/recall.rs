@@ -298,7 +298,10 @@ pub async fn run_reported_with_text_vector(
         ));
     }
     let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
-    let input = VectorInput::Text(Some(Arc::from(vector)));
+    let input = VectorInput::Text(
+        Some(Arc::from(vector)),
+        QueryLeg::Embed(backends.embedder.as_ref()),
+    );
     Ok(run_on(backends, &loaded, &request, input, None)
         .await?
         .into_output())
@@ -459,12 +462,47 @@ pub(crate) async fn run_detailed_on(
     request: &RecallRequest,
     queries: Option<&Mutex<QueryEmbeddingCache>>,
 ) -> Result<CliRecall, CliError> {
-    run_on(backends, loaded, request, VectorInput::Text(None), queries).await
+    let leg = QueryLeg::Embed(backends.embedder.as_ref());
+    run_detailed_on_leg(backends, loaded, request, queries, leg).await
+}
+
+/// How a text recall's vector leg gets its query vector (#247).
+pub(crate) enum QueryLeg<'a> {
+    /// Embed the query with this adapter: `ResolvedBackends::embedder`, or
+    /// the portal's handle on it that loads the model on first use. It must
+    /// embed in the space of `ResolvedBackends::embedding`.
+    Embed(&'a dyn crate::embed::Embedder),
+    /// The vector leg is off by configuration: nothing is embedded, and when
+    /// the store could have searched by vector, the recall carries this line
+    /// as its `vector_degraded` annotation. The keyword and recent legs run
+    /// as they do after a failed embed.
+    Off(&'a str),
+}
+
+/// [`run_detailed_on`], with the caller choosing how the query is embedded
+/// ([`QueryLeg`]): the portal's lazily loaded embedder, or none at all
+/// (#247). Everything else is the same pipeline.
+pub(crate) async fn run_detailed_on_leg(
+    backends: &ResolvedBackends,
+    loaded: &LoadedReader,
+    request: &RecallRequest,
+    queries: Option<&Mutex<QueryEmbeddingCache>>,
+    leg: QueryLeg<'_>,
+) -> Result<CliRecall, CliError> {
+    run_on(
+        backends,
+        loaded,
+        request,
+        VectorInput::Text(None, leg),
+        queries,
+    )
+    .await
 }
 
 enum VectorInput<'a> {
-    /// Text recall. An exported vector can replace just the embed step.
-    Text(Option<Arc<[f32]>>),
+    /// Text recall. An exported vector can replace just the embed step;
+    /// otherwise the [`QueryLeg`] says how the query is embedded.
+    Text(Option<Arc<[f32]>>, QueryLeg<'a>),
     /// An image or client vector is the search input rather than the text.
     ByVector(QueryBy<'a>),
 }
@@ -513,22 +551,21 @@ async fn run_on(
         traversal_depth: request.traversal_depth,
     };
     let mut detail = match input {
-        VectorInput::Text(saved) => {
-            let embedded = match (saved, queries) {
-                (Some(vector), _) => Ok(Some(vector)),
-                (None, Some(cache)) => {
-                    embed_query_cached(
-                        cache,
-                        vectors,
-                        backends.embedder.as_ref(),
-                        &backends.embedding,
-                        query,
-                    )
-                    .await
+        VectorInput::Text(saved, leg) => {
+            let embedded = match (saved, leg, queries) {
+                (Some(vector), _, _) => Ok(Some(vector)),
+                // #247: no vector leg to skip on a store without vector
+                // search, so nothing to say there either.
+                (None, QueryLeg::Off(line), _) if vectors.available() => Err(line.to_string()),
+                (None, QueryLeg::Off(_), _) => Ok(None),
+                (None, QueryLeg::Embed(embedder), Some(cache)) => {
+                    embed_query_cached(cache, vectors, embedder, &backends.embedding, query).await
                 }
-                (None, None) => candidates::embed_query(vectors, backends.embedder.as_ref(), query)
-                    .await
-                    .map(|vector| vector.map(Arc::from)),
+                (None, QueryLeg::Embed(embedder), None) => {
+                    candidates::embed_query(vectors, embedder, query)
+                        .await
+                        .map(|vector| vector.map(Arc::from))
+                }
             };
             let embedding: Option<Arc<[f32]>> = match embedded {
                 Ok(vector) => vector,
