@@ -92,6 +92,14 @@ lambo --config lambo.toml serve --session work --agent claude-opus --transport h
 On first use, Candle fetches BGE-M3 weights (~1.1 GB) once from Hugging Face into the local
 cache (~60 s first fetch, ~1.5–3 s warm start thereafter).
 
+To run that as personal memory for every coding agent and project on the Mac, follow the
+[macOS multi-session setup](https://nrynss.github.io/lambo/macos/): a starter
+[`lambo.toml`](https://github.com/nrynss/lambo/blob/main/examples/macos-solo/lambo.toml)
+(`Solo`, one session per repository plus a shared `general` layer), a
+[LaunchAgent](https://github.com/nrynss/lambo/blob/main/examples/macos-solo/local.lambo.serve.plist)
+that keeps one warm HTTP writer running, client wiring for Claude Code, Cursor and Codex,
+and a single prompt your coding agent can run to do the whole setup.
+
 ### Standard install (Linux and macOS)
 
 ```bash
@@ -325,6 +333,10 @@ against `store_meta` to catch silent model or quantization drift behind an uncha
 agent pre-flight protocol: recall before modifying shared state, treat load-bearing
 warnings as blocking, cite relied-on rulings by ID or durable name, and write back
 decisions rather than activity logs.
+[`skills/lambo-dev/SKILL.md`](https://github.com/nrynss/lambo/blob/main/skills/lambo-dev/SKILL.md)
+is the same protocol for everyday software development: recall at task start, derive
+decisions with their why, record actions when work lands, and keep cross-project
+preferences in the shared `general` layer.
 
 The protocol surface is compact enough for very small models as well as frontier coding
 agents. In a recorded 3-agent run over 151 seconds against a minimal 4-tool subset,
@@ -345,6 +357,7 @@ calibration benchmarks, and negative research results are summarized on the
 |---|---|
 | [Quickstart](https://nrynss.github.io/lambo/quickstart/) | Install Lambo, configure SQLite, and run your first recall in 30 seconds |
 | [Installation](https://nrynss.github.io/lambo/installation/) | Prebuilt binaries, Apple Silicon Metal build, MCP client setup, and Cargo features |
+| [macOS multi-session setup](https://nrynss.github.io/lambo/macos/) | One LaunchAgent-supervised writer shared by every agent and project on an Apple Silicon Mac, with a single-prompt setup |
 | [MCP tools](https://nrynss.github.io/lambo/mcp/) | All nine MCP tools (eight always-on plus `lambo_derive_image`), arguments, receipts, and limits |
 | [Command line](https://nrynss.github.io/lambo/cli/) | Deterministic one-shot CLI verbs, multi-session serving, `names`, `embed`, and `stats --store` |
 | [Configuration](https://nrynss.github.io/lambo/config/) | Every `lambo.toml` table, environment override, credentials, layers, calibration, and fusion |

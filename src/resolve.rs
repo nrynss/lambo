@@ -220,19 +220,28 @@ impl ResolvedBackends {
     }
 }
 
-/// Store vector width vs embedder output dim.
+/// Store vector width vs embedder output dim, at resolve.
 ///
 /// * `None` store width (MemoryStore) → any positive embedder dim OK.
 /// * `Some(n)` → embedder must emit exactly `n`. Cockroach's `n` is its `VECTOR(n)`
 ///   DDL — a real schema authority, so this is a real check for Cockroach.
 ///
-/// **For a width-agnostic store this can be a self-comparison** (F-R1-2). SQLite's
-/// `BLOB` has no width of its own, so unless the operator sets
-/// [`crate::store::StoreConfig::vector_dim`] it reports the very embedder width this
-/// function is handed, and `store_dim != embedder_dim` is unreachable. The check that
-/// bites on that path is the explicit pin comparison in [`resolve_backends`]; the
-/// authority that attests the stored vectors' space is the session's durable contract,
-/// enforced per candidate read inside the adapter.
+/// **For SQLite and Postgres this is a self-comparison and never refuses**
+/// (F-R1-2, #317). At resolve, `vector_dimensions()` for either is the operator's
+/// [`crate::store::StoreConfig::vector_dim`] pin when one is set, and otherwise the
+/// very embedder width this function is handed: SQLite's `BLOB` has no width of its
+/// own, and Postgres's construction width is config until its live `vector(n)` probe
+/// runs at init or attach. Either way `store_dim != embedder_dim` is unreachable here.
+/// The width is checked in layers instead. The first two refuse before a session is
+/// served; the last refuses the attach, read or write it guards:
+///
+/// * at resolve, the explicit pin comparison in [`resolve_backends`] (every kind), and
+///   this function for Cockroach;
+/// * for Postgres, the live `vector(n)` probe at init and at attach (the schema
+///   preflight);
+/// * for every store, the session's durable embedding contract, checked against the
+///   embedder at writer attach and on vector reads, and for SQLite also at the write
+///   gate.
 pub fn check_vector_compatibility(
     store_vector_dim: Option<usize>,
     embedder_dim: usize,

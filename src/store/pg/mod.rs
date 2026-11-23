@@ -385,9 +385,17 @@ impl<D: Dialect> GraphStore for PgStore<D> {
     }
 
     fn vector_dimensions(&self) -> Option<usize> {
-        // Construction width. For Postgres, [`Self::assert_live_schema_width`]
-        // has checked this against live `vector(n)` on init and attach, so
-        // the number is the schema's, not an unchecked echo of config.
+        // Construction width. For Cockroach it is the `VECTOR(n)` parsed from
+        // the shipped DDL: the width this build's schema declares, not a probe
+        // of the live column (`assert_live_schema_width` skips Cockroach), so
+        // a column provisioned at another width does not show here. For
+        // Postgres it is the `[store] vector_dim` pin, else the embedder width
+        // the resolver threads in, else 1024: config, not the schema, until
+        // [`Self::assert_live_schema_width`] compares it with the live
+        // `vector(n)` at init and at attach. At resolve, before either, it
+        // echoes the pin or the embedder, so the resolve-time compatibility
+        // check cannot refuse on it; the live probe is what binds it to the
+        // schema, and it fails closed before a session is served (#317).
         Some(self.vector_dim)
     }
 

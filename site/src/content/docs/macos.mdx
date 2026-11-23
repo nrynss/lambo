@@ -1,0 +1,392 @@
+---
+title: "macOS multi-session setup"
+description: "One warm Lambo writer on an Apple silicon Mac, shared by every coding agent and every project"
+---
+import Note from '../../components/MdxNote.astro';
+import Warning from '../../components/MdxWarning.astro';
+
+This guide sets up Lambo as personal memory for one developer on an Apple silicon Mac. When it is done, one `lambo serve` runs in the background under launchd, holds one SQLite file and one copy of the BGE-M3 model on the GPU, and every coding agent you use (Claude Code, Cursor, Codex, or any MCP client) connects to it by URL. Each repository gets its own session, a shared `general` session carries the preferences that hold everywhere, and promotion uses the `Solo` policy, which is built for a single developer.
+
+Everything here already ships in the Metal release build. The kit is the configuration that ties it together:
+
+| File | What it is |
+|---|---|
+| [`examples/macos-solo/lambo.toml`](https://github.com/nrynss/lambo/blob/main/examples/macos-solo/lambo.toml) | The starter config: `Solo`, SQLite under `~/.local/share/lambo/`, in-process BGE-M3 on Metal, the session layout below, and `[web]`. |
+| [`examples/macos-solo/local.lambo.serve.plist`](https://github.com/nrynss/lambo/blob/main/examples/macos-solo/local.lambo.serve.plist) | The LaunchAgent that keeps `lambo serve --transport http` running across logins and crashes. |
+| [`skills/lambo-dev/SKILL.md`](https://github.com/nrynss/lambo/blob/main/skills/lambo-dev/SKILL.md) | The rules that make an agent recall before it works and write back what it decided. See [Agent skill](/lambo/agent-skill/). |
+
+The starter config is checked by the test suite: it must parse with every key it sets, and its project map must send a repository and its worktrees to the documented sessions. It uses keys from Lambo 0.6.0 and later.
+
+## Why one background writer
+
+Each Lambo session has exactly one writer. A stdio MCP server started by a client holds the session itself and loads its own copy of the model (about 1.1 GB of weights) when it is the first; a later one forwards to it. The writer then lives and dies with whichever client started it, so closing that client takes memory away from every other one until something starts a new writer.
+
+A writer owned by launchd instead of by a client fixes both. It loads the model once, it outlives every client, and launchd restarts it if it dies. Clients connect to it over HTTP on loopback and never hold the session themselves.
+
+## Set it up with one prompt
+
+Paste the prompt below into the coding agent you use (Claude Code, Cursor or Codex, running on the Mac you are setting up). Edit the repository list first. The agent runs every step of [Set it up by hand](#set-it-up-by-hand) and stops to ask you when something is already there or a step fails.
+
+```text
+Set up Lambo shared agent memory on this Mac by following
+https://nrynss.github.io/lambo/macos/ ("Set it up by hand") exactly. Lambo refuses
+unknown config keys, so use only the keys, flags and paths that page and the kit
+files contain.
+
+My repositories (session name = path; a pattern covers sibling worktrees):
+- myapp = ~/work/myapp
+- myapp = ~/work/myapp-*
+
+Steps. Stop and ask me if any check fails or a file you would write already exists.
+1. Check `uname -sm` prints "Darwin arm64". Install the Metal build:
+   curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
+   then run `~/.local/bin/lambo --version`.
+2. mkdir -p ~/.config/lambo ~/.local/share/lambo ~/Library/Logs/lambo ~/Library/LaunchAgents
+3. Download https://raw.githubusercontent.com/nrynss/lambo/main/examples/macos-solo/lambo.toml
+   to ~/.config/lambo/lambo.toml and replace /Users/USERNAME with my $HOME.
+   Replace the example session myapp with my repositories: each session name in
+   [serve] sessions and [web] sessions, and one [[serve.projects]] entry per path
+   or pattern. Keep general and general-usage. Session names use only letters,
+   digits and . _ : - characters.
+4. Run: ~/.local/bin/lambo --config ~/.config/lambo/lambo.toml provision
+5. Check nothing listens on port 7720: lsof -nP -iTCP:7720 -sTCP:LISTEN
+   Download https://raw.githubusercontent.com/nrynss/lambo/main/examples/macos-solo/local.lambo.serve.plist
+   to ~/Library/LaunchAgents/local.lambo.serve.plist, replace /Users/USERNAME with my
+   $HOME, run plutil -lint on it, then:
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.lambo.serve.plist
+   Wait up to 5 minutes (the first start downloads about 1.1 GB of model weights)
+   until curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:7720/mcp
+   prints something other than 000. If it does not, show me the end of
+   ~/Library/Logs/lambo/serve.log.
+6. Run: ~/.local/bin/lambo --config ~/.config/lambo/lambo.toml stats --store
+   Every session's lease line must contain "lease: launchd-writer@".
+7. Register an MCP server named lambo in each of Claude Code, Cursor and Codex
+   that is installed here, as the page's "Connect your clients" section shows:
+   http://127.0.0.1:7720/mcp as the user-wide fallback, and
+   http://127.0.0.1:7720/mcp/s/<session> in each of my repositories. Keep
+   per-project client files out of git.
+8. Install the skill: download
+   https://raw.githubusercontent.com/nrynss/lambo/main/skills/lambo-dev/SKILL.md
+   to ~/.claude/skills/lambo-dev/SKILL.md for Claude Code, and append its
+   sections 0 to 4 to ~/.codex/AGENTS.md for Codex and to an always-apply rule in
+   ~/.cursor/rules/ for Cursor, for the clients that are installed. For Claude
+   Code, also allow mcp__lambo__lambo_recall, mcp__lambo__lambo_inspect and
+   mcp__lambo__lambo_stats in ~/.claude/settings.json permissions.allow.
+9. Tell me what you changed, then ask me to restart you. After the restart, in
+   one of my repositories: call lambo_stats (it must name that repository's
+   session), lambo_derive one throwaway observation, lambo_stats with its
+   receipt and wait_ms 5000 (state must be applied; pending or pending_replay
+   means ask again), then lambo_recall for it.
+   Report each result.
+```
+
+The agent cannot use the new MCP server until it restarts, because clients read their MCP configuration at startup. That is why the live check is the last step.
+
+## Set it up by hand
+
+### 1. Install the Metal build
+
+```bash
+uname -sm   # Darwin arm64
+curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
+~/.local/bin/lambo --version
+```
+
+The Metal asset is the stock `ship` build plus the in-process candle embedder on the GPU. The stock macOS binary does not carry candle and refuses `kind = "candle"`. See [Installation](/lambo/installation/) to pin a version.
+
+### 2. Write the config
+
+```bash
+mkdir -p ~/.config/lambo ~/.local/share/lambo
+curl -fsSL -o ~/.config/lambo/lambo.toml \
+  https://raw.githubusercontent.com/nrynss/lambo/main/examples/macos-solo/lambo.toml
+sed -i '' "s#/Users/USERNAME#$HOME#g" ~/.config/lambo/lambo.toml
+```
+
+`store.path` is not expanded, so it must be absolute; the `sed` line writes your home directory into it. Lambo does not create the directory, which is why `mkdir` comes first.
+
+Then replace the example repository `myapp` with your own, in three places: `[serve] sessions`, the `[[serve.projects]]` entries, and `[web] sessions`. Give each repository its own session from the first day: a project's facts written into a catch-all session surface as noise in every other project's recall. A session name is 1 to 128 bytes of letters, digits, `.`, `_`, `:` and `-`, not starting with `.`. At most 16 sessions can be pinned unless you also raise `[serve] max_attached`.
+
+The file, with the example left in:
+
+```toml
+promotion_policy = "Solo"
+
+[store]
+kind = "sqlite"
+path = "/Users/USERNAME/.local/share/lambo/lambo.db"
+
+[embedder]
+kind = "candle"
+device = "metal"
+dim = 1024
+# keep_warm_secs = 0
+
+[serve]
+sessions = ["general", "general-usage", "myapp"]
+default_session = "general-usage"
+layers = ["general"]
+
+[[serve.projects]]
+path = "~/work/myapp"
+session = "myapp"
+
+[[serve.projects]]
+path = "~/work/myapp-*"
+session = "myapp"
+
+[web]
+sessions = ["general-usage", "myapp", "general"]
+list_sessions = true
+```
+
+<Warning>
+`promotion_policy` is a top-level key and must stay above `[store]`. Below a table header, TOML puts it inside that table and Lambo refuses the file with an error about that table's keys. See [Promotion policy](/lambo/config/#promotion-policy).
+</Warning>
+
+What each part does:
+
+- **`promotion_policy = "Solo"`.** The default, `Swarm`, is built for many concurrent writers, and a single developer's concepts rarely clear its bars. `Solo` decides on a recurrence score over a concept's own evidence. See [Promotion policy](/lambo/config/#promotion-policy).
+- **`[embedder]`.** BGE-M3 runs in the `lambo serve` process on the Metal GPU, with no `llama-server`. The first start downloads about 1.1 GB of weights from Hugging Face into its cache; later starts load them from disk. `device = "metal"` fails at startup if no Metal device is available rather than falling back to the CPU. `dim = 1024` is the width BGE-M3 emits. Lambo refuses to start when the model's own width disagrees with it, and each session records the embedder and width its vectors were written with, so a later change of model or width is refused until the session is re-embedded: the LaunchAgent's serve then fails at startup (see [When something is wrong](#when-something-is-wrong)).
+- **`[serve]`.** The HTTP serve pins every session in `sessions`, serves `default_session` at `/mcp`, and makes every other pinned session also read `general` on `lambo_recall`. See [Multi-session serving](/lambo/config/#multi-session-serving) and [Layers](/lambo/config/#layers).
+- **`[[serve.projects]]`.** Read only by a stdio `lambo serve` started without `--session`; see [Directory-aware stdio instead of URLs](#directory-aware-stdio-instead-of-urls). The HTTP serve ignores it and logs one warning at startup saying so (`[serve] sets keys this serve ignores`). That warning is expected.
+- **`[web]`.** The sessions `lambo serve-web` shows. See [The read-only window](#the-read-only-window).
+
+### 3. Provision the store
+
+```bash
+~/.local/bin/lambo --config ~/.config/lambo/lambo.toml provision
+```
+
+This creates the schema in the SQLite file. It does not load the model, and running it again is safe.
+
+### 4. Install the LaunchAgent
+
+```bash
+mkdir -p ~/Library/Logs/lambo ~/Library/LaunchAgents
+lsof -nP -iTCP:7720 -sTCP:LISTEN   # should print nothing
+curl -fsSL -o ~/Library/LaunchAgents/local.lambo.serve.plist \
+  https://raw.githubusercontent.com/nrynss/lambo/main/examples/macos-solo/local.lambo.serve.plist
+sed -i '' "s#/Users/USERNAME#$HOME#g" ~/Library/LaunchAgents/local.lambo.serve.plist
+plutil -lint ~/Library/LaunchAgents/local.lambo.serve.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.lambo.serve.plist
+```
+
+launchd expands neither `~` nor `$HOME` in a plist, so every path in it is absolute, and the `sed` line fills in your home directory. `plutil -lint` first, because launchd reports a malformed plist only as a generic load failure.
+
+The agent runs:
+
+```text
+~/.local/bin/lambo serve --config ~/.config/lambo/lambo.toml --agent launchd-writer --transport http --port 7720
+```
+
+- No `--session`: the sessions and the `/mcp` default come from `[serve]`. A `--session` on this line would become the `/mcp` default instead.
+- `--agent launchd-writer` names the lease holder only. Every call is still recorded under the `agent_id` its agent sends.
+- `RunAtLoad` and `KeepAlive` start it at login and after any exit.
+- `ThrottleInterval` 60 means launchd starts the job at most once every 60 seconds, so a writer that keeps failing at startup is retried once a minute rather than every 10 seconds (launchd's default). It is not a delay after an exit: a writer that ran for more than a minute and then died is restarted at once. If it died abruptly, its lease stays live for up to 45 seconds, and until it lapses the new writer answers each session's URL with `503` and retries every 5 to 6 seconds; it takes the sessions back on its own.
+- `ExitTimeOut` 30 is how long launchd waits after `SIGTERM` before `SIGKILL`. A clean shutdown takes at most 18.5 seconds, and Lambo's own watchdog aborts a stuck one at 20; launchd's default would cut that short. See [Stopping a writer](/lambo/cli/#stopping-a-writer).
+- `ProcessType` `Standard` keeps launchd from applying background resource limits to it.
+- It binds to `127.0.0.1` with no token. Never add a non-loopback `--bind` without a credential, and never put a token in the plist; see [HTTP transport](/lambo/config/#http-transport).
+
+Wait for it to answer. The first start downloads the model weights, so allow a few minutes:
+
+```bash
+for i in $(seq 1 300); do
+  code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:7720/mcp)
+  [ "$code" != "000" ] && break
+  sleep 1
+done
+echo "lambo answered HTTP $code"   # 000: not up yet, read ~/Library/Logs/lambo/serve.log
+```
+
+A plain `GET` is not an MCP request, so the answer is an error status such as `406`. Any status means the server is listening. Then confirm it holds every session:
+
+```bash
+~/.local/bin/lambo --config ~/.config/lambo/lambo.toml stats --store
+```
+
+`stats --store` reads the store without a lease and without loading the model. Each session's indented `lease:` line should read `lease: launchd-writer@<host>#<pid>;boot=<uuid> (expires ...)`: the holder is the `--agent` name, the host, the writer's process id and the macOS boot session id (`kern.bootsessionuuid`). See [Write commands](/lambo/cli/#write-commands) for the format.
+
+### 5. Connect your clients
+
+Register the server under one name, `lambo`, in each client. Use the bare `/mcp` URL once per user as the fallback, which lands in `general-usage`, and the project's own URL in each repository.
+
+| Where the client runs | URL | `lambo_recall` reads | Writes go to |
+|---|---|---|---|
+| A mapped repository | `http://127.0.0.1:7720/mcp/s/<session>` | that session and `general` | that session |
+| Anywhere else | `http://127.0.0.1:7720/mcp` | `general-usage` and `general` | `general-usage` |
+| Cross-project preferences | any of the above, with `scope = "general"` on the write | | `general` |
+
+**Claude Code.** User scope for the fallback, local scope in each repository. Local scope is private to you and stays out of the repository; project scope would write a `.mcp.json` into it.
+
+```bash
+claude mcp add --transport http --scope user lambo http://127.0.0.1:7720/mcp
+cd ~/work/myapp
+claude mcp add --transport http --scope local lambo http://127.0.0.1:7720/mcp/s/myapp
+```
+
+For headless runs and subagents, allow the read-only tools in `~/.claude/settings.json`, so recall never waits for a permission prompt nobody answers:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__lambo__lambo_recall",
+      "mcp__lambo__lambo_inspect",
+      "mcp__lambo__lambo_stats"
+    ]
+  }
+}
+```
+
+Merge the three entries into the file's existing `permissions.allow` list rather than replacing it.
+
+**Codex.** The CLI adds the fallback; a trusted project's `.codex/config.toml` overrides it with the project URL.
+
+```bash
+codex mcp add lambo --url http://127.0.0.1:7720/mcp
+```
+
+```toml
+# ~/work/myapp/.codex/config.toml
+[mcp_servers.lambo]
+url = "http://127.0.0.1:7720/mcp/s/myapp"
+```
+
+**Cursor** (including its CLI). The fallback goes in `~/.cursor/mcp.json`, the override in the repository's `.cursor/mcp.json`; the project entry wins.
+
+```json
+{ "mcpServers": { "lambo": { "url": "http://127.0.0.1:7720/mcp" } } }
+```
+
+```json
+{ "mcpServers": { "lambo": { "url": "http://127.0.0.1:7720/mcp/s/myapp" } } }
+```
+
+Keep the per-project files out of git, for example by listing `.codex/` and `.cursor/` in the repository's `.git/info/exclude`. Move a client from a `command` entry to a `url` entry in every configuration layer that names the server: a layer still holding `command` beside the new `url` is rejected even when the server answers. See [HTTP for a machine with several independent clients](/lambo/mcp/#http-for-a-machine-with-several-independent-clients).
+
+**Any other MCP client** that speaks Streamable HTTP: point it at the same URLs.
+
+### 6. Attach the skill
+
+Registration gives an agent the tools; the skill makes it use them. Copy [`skills/lambo-dev/SKILL.md`](https://github.com/nrynss/lambo/blob/main/skills/lambo-dev/SKILL.md) to `~/.claude/skills/lambo-dev/SKILL.md` for Claude Code, and paste its sections 0 to 4 into `~/.codex/AGENTS.md` for Codex or an always-apply rule in `~/.cursor/rules/` for Cursor. See [Agent skill](/lambo/agent-skill/).
+
+### 7. Check it end to end
+
+Restart each client, open it in a mapped repository, and ask the agent to:
+
+1. call `lambo_stats`, which names the session it is attached to: the repository's, not `general-usage`;
+2. call `lambo_derive` with one throwaway `observation`;
+3. call `lambo_stats` with the receipt from step 2 and a `wait_ms`, and see the state `applied`. `pending` means it has not been applied yet, so ask again. `pending_replay` means the write is held, not lost: the embedder did not answer it, the store's vector lookups kept timing out, it waits behind an earlier write of yours held for either reason, or it is owed from an earlier serve of the session. The server retries it in the background, so read the log and ask again rather than sending the write a second time;
+4. call `lambo_recall` for the same words, and see the concept come back.
+
+From a terminal, `lambo stats --store` (above) shows each session's concept count and the lease holder.
+
+## Run the LaunchAgent
+
+| To | Run |
+|---|---|
+| Start it | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.lambo.serve.plist` |
+| See its state | `launchctl print gui/$(id -u)/local.lambo.serve` (look for `state = running` and its `pid`) |
+| Stop it | `launchctl bootout gui/$(id -u)/local.lambo.serve` |
+| Read its log | `tail -f ~/Library/Logs/lambo/serve.log` |
+| Uninstall it | Stop it, then `rm ~/Library/LaunchAgents/local.lambo.serve.plist`. |
+
+Stopping sends `SIGTERM`, and the writer flushes and releases its leases before it exits. `bootout` returns before the process is gone, so wait for it before you start it again or run a command that writes to the store:
+
+```bash
+PID=$(launchctl print gui/$(id -u)/local.lambo.serve | awk '$1 == "pid" {print $3; exit}')
+launchctl bootout gui/$(id -u)/local.lambo.serve
+while [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; do sleep 0.5; done
+```
+
+To apply a change to `lambo.toml` or to the plist, stop it this way and start it again: launchd keeps the job definition it loaded, and the writer reads its config only at startup. Uninstalling leaves your memory in `~/.local/share/lambo/` and your config in `~/.config/lambo/`.
+
+**Upgrading.** Stop the agent as above, back up the store, install the new release over the old binary, bring the schema up to it, and start the agent again:
+
+```bash
+sqlite3 ~/.local/share/lambo/lambo.db ".backup '$HOME/.local/share/lambo/backup-$(date +%Y%m%d-%H%M%S).db'"
+curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
+~/.local/bin/lambo --config ~/.config/lambo/lambo.toml provision
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.lambo.serve.plist
+```
+
+Read the release's notes and [Migration and memory repair](/lambo/migration/) first: an older binary may refuse a schema a newer one provisioned, and the backup is what makes going back possible.
+
+## Add a repository
+
+1. Stop the agent (above).
+2. In `~/.config/lambo/lambo.toml`, add the session to `[serve] sessions` and `[web] sessions`, and add its `[[serve.projects]]` entries.
+3. Start the agent, and register `http://127.0.0.1:7720/mcp/s/<session>` in that repository's clients.
+
+The session has to be pinned. With no credential configured, the serve reaches its pinned sessions only, and a URL for any other session gets an empty `404`. It also has to be pinned to be layered: `general` is read only by pinned sessions.
+
+## Worktrees
+
+A URL registration belongs to the directory you made it in. Whether a client applies a repository's local or project registration inside a git worktree at another path depends on the client and its version, so check it: open the client in the worktree and call `lambo_stats`. If it names `general-usage`, register the project URL in that worktree too.
+
+The `[[serve.projects]]` pattern `~/work/myapp-*` covers every sibling directory whose name starts with `myapp-`, and the directories below them, for a stdio serve (next section). A `*` is allowed only in the last component of the path; when several entries match, the deepest one wins. See [Choosing a stdio serve's session](/lambo/config/#choosing-a-stdio-serves-session).
+
+## Directory-aware stdio instead of URLs
+
+A client that cannot set a per-project URL can start Lambo itself, with one global entry and no `--session`:
+
+```json
+{
+  "mcpServers": {
+    "lambo": {
+      "command": "/Users/USERNAME/.local/bin/lambo",
+      "args": ["--config", "/Users/USERNAME/.config/lambo/lambo.toml", "serve", "--agent", "stdio-proxy"]
+    }
+  }
+}
+```
+
+Replace `USERNAME` with your account name; use absolute paths, because not every MCP client expands `~`. The client starts this process in the project's directory. It takes its session from the `[[serve.projects]]` entry covering that directory (worktree patterns included), else from `default_session`, and forwards every call to the LaunchAgent over a private per-user Unix socket. While it forwards, it never loads the model and never takes a lease, and the session keeps its `general` layer; the next paragraph covers the case where no LaunchAgent is running. It reads `[[serve.projects]]` only because the entry passes `--config`.
+
+The URL registration above is the recommended form. A stdio entry that starts while the LaunchAgent is down (stopped, or between a crash and its restart) finds no writer to forward to. Once the old writer's lease has lapsed it takes the session itself and loads its own copy of the model. While the lease is still live it waits only if the lease will lapse within 15 seconds at most (about 13 in practice), and otherwise refuses to start. Until that client exits, the session is served without its layer, and the LaunchAgent answers that session's URL with `503` and retries it every few seconds. `lambo stats --store` showing a lease holder other than `launchd-writer` is the sign of it.
+
+## The read-only window
+
+`lambo serve-web` shows the sessions in a browser: live recall, the canonization feed and the counts. It is a reader: it never takes a lease, so it runs beside the LaunchAgent. Start it when you want it:
+
+```bash
+~/.local/bin/lambo --config ~/.config/lambo/lambo.toml serve-web --port 7721
+```
+
+Then open `http://127.0.0.1:7721/`. The first session in `[web] sessions` is served there, and each at `/s/<session>/`. With `list_sessions = true` the session picker lists them; with no credential configured, `serve-web` warns at startup that anyone who can reach the port can list and read them, which is why it stays on loopback. Stop it with `Ctrl-C`.
+
+<Note>
+`serve-web` loads its own copy of the embedder for live recall at startup, before it starts listening: a second 1.1 GB of weights beside the LaunchAgent's. {/* Pending #326: that PR makes serve-web load the embedder on the first recall that needs it, not at startup. When it lands, describe that here and revisit why the kit runs serve-web on demand. */} That is why the kit runs it on demand rather than as a second LaunchAgent. If you want one anyway, copy the plist with the label `local.lambo.web`, replace the arguments after the binary with `serve-web --config <your config> --port 7721`, and give it its own log file.
+</Note>
+
+## On a laptop
+
+While `lambo serve` idles, macOS can compress or page out model weights nothing is touching. On a Metal device the serve embeds one short probe every 10 seconds to keep them resident (about 0.2% GPU duty), so the first call after a quiet spell stays fast. On battery, turn it off:
+
+```toml
+[embedder]
+kind = "candle"
+device = "metal"
+dim = 1024
+keep_warm_secs = 0
+```
+
+The first call after an idle spell may then be slower. The setting is not part of the embedding contract, so changing it needs no re-embedding. See [Embedder](/lambo/config/#embedder).
+
+## Why port 7720
+
+`lambo serve --transport http` listens on port `7700` by default and `lambo serve-web` on `7710`. The kit uses `7720` for the writer and `7721` for the window, and the label `local.lambo.serve`, so a supervised writer never collides with a `lambo serve` started by hand on a default port (a quick test, or a writer you already run), and two LaunchAgents never share a label. If you change the port, change it in the plist and in every client URL.
+
+## When something is wrong
+
+| Symptom | Cause and fix |
+|---|---|
+| The port never answers | Read `~/Library/Logs/lambo/serve.log`. A config error names the key and its line. `device = "metal"` refuses to start without a Metal device. The first start may still be downloading weights. |
+| `launchctl print` shows the job restarting | The serve exits at startup. The log's last lines say why: a config error, a port already in use (`lsof -nP -iTCP:7720 -sTCP:LISTEN`), a store that needs `provision`, or a pinned session that cannot be attached, such as one whose embedding contract does not match the configured embedder (a changed model or `dim`). With several pinned sessions, as in the kit, a session another writer holds does not stop the start; it answers `503` instead. |
+| A project URL answers `404` | That session is not in `[serve] sessions`. Add it and restart the agent. |
+| A project URL answers `503` | The serve is not serving that session right now. If `lambo stats --store` names another lease holder for it, that writer has it, and a stdio entry is the usual one; see [Directory-aware stdio instead of URLs](#directory-aware-stdio-instead-of-urls). Right after a crash the holder can be the LaunchAgent's own previous process, whose lease lapses within 45 seconds. The serve tries to take the session again 5 to 6 seconds after each failed attempt, and the answer carries a `Retry-After` header. A `503` with no `Retry-After` comes only after such a retry, or after the serve lost a session's lease, when attaching the session again failed in a way a retry cannot fix (an embedding contract mismatch, for example); the log names the error, and the serve does not try again until it restarts. |
+| `lambo_stats` in a repository names `general-usage` | The client is using the fallback URL there. Add the project registration in that directory. |
+| Recall in a repository never shows `general` hits | Layer hits must clear a similarity floor, so an unrelated query shows none. A session that is not pinned is not layered either. |
+
+See also [Several sessions in one serve](/lambo/cli/#several-sessions-in-one-serve), [Multi-session serving](/lambo/config/#multi-session-serving) and [MCP tools](/lambo/mcp/).

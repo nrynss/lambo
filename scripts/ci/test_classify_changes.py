@@ -46,7 +46,8 @@ class PathClassification(unittest.TestCase):
 
     def test_mirror_only_does_not_start_rust(self):
         paths = [f"{prefix}/{page}.mdx" for prefix in ["docs/reference", "site/src/content/docs"]
-                 for page in ["cli", "mcp", "installation", "config", "api", "migration"]]
+                 for page in ["cli", "mcp", "installation", "config", "api", "migration",
+                              "macos"]]
         paths += [
             # Every docs page: the anchor and example checks read them all.
             "site/src/content/docs/index.mdx", "site/src/content/docs/canonization.mdx",
