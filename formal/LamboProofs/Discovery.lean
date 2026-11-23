@@ -73,6 +73,13 @@ Two join rules (`Rule`):
 * `fixed_shares`: the fix still shares. Three requests, the second and third
   arriving during the first one's read, cost two reads; the third takes the
   second's outcome, which began after it arrived.
+
+Boundary: `store_health`'s own query is not modelled (a read observes the live
+set at its start, the most stale choice); a read the portal abandoned may
+still run in the backend, which the model does not see; tokio's FIFO fairness
+is not relied on; the adapters' `store_health` is taken to omit erased
+sessions, and the route that appends the outcome to the served sessions
+(`api_sessions`) is left out.
 -/
 
 namespace Lambo.Discovery

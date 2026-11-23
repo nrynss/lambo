@@ -26,13 +26,8 @@ The model therefore takes a predicate
 
 over prefix lengths and nothing else: the estimator, the separator and the
 block texts are all inside `ok`. No property of the estimator is assumed
-except where a theorem says so.
-
-`fitFrom ok rem whole` is the loop with `rem` blocks left to try and `whole`
-already accepted; `fit ok n` is the loop over `n` blocks.
-
-Rule 2 of the module (#130), which truncates the *first* block when not even
-it fits, is modelled in the second part ("Rule 2" below).
+except where a theorem says so. Rule 2 (#130), which truncates the first
+block when not even it fits, is the second part.
 
 ## Results
 
@@ -133,8 +128,9 @@ it.
 Every caller in the crate passes `default_token_count`, which is `Steady`, so
 these are precision points about the doc, not bugs in a shipped path.
 
-Not modelled: `ContextBlock::for_hit` and `with_meta` (the model takes the
-three slices as given).
+Boundary: `ContextBlock::for_hit` and `with_meta` are not modelled (the three
+slices are given); `fits` assumes a 64-bit target, and `defaultG` agrees with
+the Rust's `f64` ceiling only for `b < 2^52` bytes.
 -/
 
 namespace Lambo.Fit

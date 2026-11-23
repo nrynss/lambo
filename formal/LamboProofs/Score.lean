@@ -4,22 +4,36 @@
 Model of `src/daemon/score.rs` (spec §9) and of the weight sanitizer in
 `src/config.rs` (`ScoringWeights::sanitized`).
 
-## Number model
+The Rust computes in `f64`; the model is its exact-arithmetic reading in
+fixed point: a dimension, weight, bonus or modifier `x` is `1000 · x` (every
+constant in the module is a multiple of `0.005`), a composite is carried at
+scale `10⁶`, and a non-finite `f64` is `none`. Also modelled: GC's eviction
+composite (`score_live_plus_frequency`), recency (`concept_recency`, #95) and
+the max-normalized dimensions (density, session activity).
 
-The Rust code computes in `f64`. This file models the *exact-arithmetic*
-reading of that code in fixed point:
+Results: for every input, finite or not, and every weight set, valid or not,
+the composite lies in `[0, 1 + MAX_BONUS]` (`score_range`); raising any clamped
+dimension, or the bonus-plus-modifier term, never lowers it (`score_mono`);
+`ScoringWeights::default`'s weights sum to exactly 1 (`defaultWeights_total`);
+`sanitized` is the identity on a valid weight and idempotent
+(`saneWeight_eq_self`, `saneWeight_idem`), and a zeroed weight drops its
+dimension (`weighted_ignores_frequency_of_bad_weight`). GC's eviction composite
+scores a concept with `frequency == 0` exactly at its live-dimension score,
+reading a concept can only raise it, and it stays in the same range
+(`livePlusFrequency_of_frequency_zero`, `live_le_livePlusFrequency`,
+`livePlusFrequency_mono`, `livePlusFrequency_range`). The two expressions for
+recency agree, the historical one is in `[0, 1]` without the clamp, and a
+session younger than ten minutes scores every concept near 1
+(`historical_eq_floor`, `historical_in_unit`, `floor_recency_near_one`); the
+last touch is never before creation (`createdAt_le_lastTouch`). A
+max-normalized count is at most the session maximum, which is attained
+(`le_listMax`, `listMax_mem_or_zero`), so the clamp never fires for those
+dimensions.
 
-* a dimension, weight, bonus or modifier `x` is the integer `1000 · x`
-  (every constant in the module is a multiple of `0.005`, so nothing rounds);
-* a composite, being a sum of `dimension × weight` products, is carried at
-  scale `10⁶`: `1_400_000` is `1 + MAX_BONUS = 1.4`;
-* a non-finite `f64` (`NaN`, `±∞`) is `none`.
-
-What the model does not capture: `f64` rounding, and overflow of an
-intermediate sum to `±∞` (weights near `f64::MAX`). The range theorem
-`score_range` still describes the Rust function in that case, because
-`finite_or_zero` returns `0.0` for a non-finite composite and `0.0` is in
-range.
+Boundary: `f64` rounding and overflow of an intermediate sum to `±∞` (weights
+near `f64::MAX`) are not captured; `score_range` still describes the Rust
+then, because `finite_or_zero` returns `0.0` for a non-finite composite. The
+dimensions are inputs: how each is measured from the graph is not modelled.
 -/
 
 namespace Lambo.Score

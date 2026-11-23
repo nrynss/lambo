@@ -24,7 +24,16 @@ the stage predicates (`src/canon/stage1.rs`, `stage2.rs`, `stage3.rs`).
 * `stage3_promotions_le`, `stage3_no_overflow`: Stage 3 promotes at most the
   remaining budget, so "a cycle can never create the overflow it then
   demotes".
-* boundary facts for the three stage predicates.
+* `stage3_boundary`, `no_demotion_no_cooldown`, `cooldown_ends`: the stage
+  predicates' edges (the Stage 3 bar is strict, `None` is not a cooldown, a
+  cooldown ends exactly at `t + cooldown`).
+
+Boundary: whether a concept is a supersession target, on a stage's plan or
+passes it, and whether the budget pass demotes it are inputs (`Flags`), as are
+the stage predicates' arguments (GC survival, dependent interactions,
+coverage, the last demotion, blast radius); how the evaluator gathers and
+computes them is not modelled, nor which concepts the budget pass demotes
+(only how many Stage 3 promotes).
 -/
 
 namespace Lambo.Canon

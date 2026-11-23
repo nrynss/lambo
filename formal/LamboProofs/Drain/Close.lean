@@ -60,6 +60,10 @@ lookup-timeout streak resets (#346).
   write settles `failed` (`streakNew_after_commit`,
   `timeout_after_commit_settlesW`); both resets would forget a run
   (`streak_both_forgets_run`).
+
+Boundary: each step is atomic, as in `Base.lean`; which puts the final flush
+committed is an input (`Landed`), the flush loop itself being `Flush/`; the
+lease fence at the flush is not modelled.
 -/
 
 import LamboProofs.Drain.Worker

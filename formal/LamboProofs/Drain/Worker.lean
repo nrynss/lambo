@@ -23,6 +23,11 @@ invariant and retry pass. Its close is in `Close.lean`.
   session through the next serve. `serveR_reported`: a halt that leaves
   intents owed reports `other`, never `null` (`serveQ_block` read `unset` as
   a reason; the stats print it as `null`).
+
+Boundary: each event is atomic, as in `Base.lean`; when a retry comes due is
+the Rust's timer, not modelled; a run's result is an input per write. A
+worker that panics after its commit is `Close.lean`'s (`stepK`, `stepP`), not
+`stepW`'s.
 -/
 
 import LamboProofs.Drain.Replay

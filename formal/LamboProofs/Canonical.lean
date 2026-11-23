@@ -49,13 +49,6 @@ The old `key` is also exactly `unfiltered_canonical_key`, which the
 `lambo provision` re-key uses to recognise a key written between #148 and the
 #301 fix.
 
-Not modelled: the invisible-character strip and Unicode NFC that open
-`tokens` (the model reads their output), Unicode case mapping beyond ASCII
-(`str::to_lowercase` maps non-ASCII letters too; `lowerA` is ASCII-only), the
-Snowball English algorithm itself (a parameter), `legacy_canonical_key`, and step 5
-(`canonicalize` matching a key against the graph). How a key is bound and kept
-is `Names.lean`.
-
 ## Results
 
 Structure (any stopword list and stemmer):
@@ -129,6 +122,13 @@ Names (`name_key`):
   (`single-writer-lease`, `lease writer single` and `SingleWriterLeases` are one
   name), `issue290_stopword` (`the-lease` is `lease`), and the general forms
   `nameKey_swap` and `nameKey_stop_segment`.
+
+Boundary: the invisible-character strip and Unicode NFC that open `tokens`
+(the model reads their output), Unicode case mapping beyond ASCII
+(`str::to_lowercase` maps non-ASCII letters too; `lowerA` is ASCII-only), the
+Snowball English algorithm itself (a parameter), `legacy_canonical_key`, and
+`canonicalize` matching a key against the graph are not modelled. How a key is
+bound and kept is `Names.lean`.
 -/
 
 namespace Lambo.Canonical

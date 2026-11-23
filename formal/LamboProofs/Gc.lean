@@ -22,10 +22,6 @@ the three conditions for one concept, before the per-sweep cap is applied:
 * `below`: `score < bar`;
 * `dependedOn`: a Resource with dependents (`resources_with_dependents`).
 
-Not modelled: how the score and the reachable set are computed, the edge
-cleanup of step 1, and the cascade pass (which applies the same
-"not protected" filter).
-
 ## Results
 
 * `protected_not_collectable`, `venerable_canonical_never_collected`: a
@@ -41,6 +37,10 @@ cleanup of step 1, and the cascade pass (which applies the same
 * `taken_le_budget`, `cap_ge_floor`: a sweep collects at most its cap.
 * `bump_mono`, `bump_never_resets`: `gc_survived` only grows.
 * `idle_never_sweeps`: "an idle session never sweeps on time alone".
+
+Boundary: how the score and the reachable set are computed, the edge cleanup
+of step 1 and the cascade pass (which applies the same "not protected"
+filter) are not modelled; the six conditions are inputs per concept.
 -/
 
 namespace Lambo.Gc

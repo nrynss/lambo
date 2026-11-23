@@ -27,9 +27,6 @@ transaction.
 Time is an integer and is supplied to each operation by the store, never by a
 client. Nothing below assumes it moves forward.
 
-Not modelled: the erased-session tombstone, and the first acquire on a session
-with no row (it mints token `1`; `first` below is that row).
-
 ## Results
 
 * `token_mono`: over any sequence of acquires and releases the token never
@@ -66,6 +63,11 @@ than the one the handle captured at its own acquire.
 * `override_beat_latches`: after the documented operator override (a release
   by hand), the old beat re-takes the row and does not latch; the fixed beat
   latches.
+
+Boundary: the erased-session tombstone and the first acquire on a session with
+no row (it mints token `1`; `first` is that row) are not modelled; time is an
+input to each operation and nothing assumes it moves forward. How the registry
+acts on a latch is `Registry/Step.lean`.
 -/
 
 namespace Lambo.Lease

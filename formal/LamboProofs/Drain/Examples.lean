@@ -25,6 +25,9 @@ an outage answers `pending_replay`, not `failed`),
 `Invariant` stops the replay on every serve; fixed by #294),
 `bad_id_never_settled` (fixed by #295), `closeW_vouches_dead_lettered` (the
 close before #345 vouches for a dead-lettered put; fixed by #345).
+
+Boundary: each case is one concrete run over the earlier layers; the general
+statements are in the other drain files.
 -/
 
 import LamboProofs.Drain.Close

@@ -42,15 +42,15 @@ and deterministic (`gatedRankMembers_lawful`, `gatedRankMembers_separating`,
 `gatedRankMembers_sorted_unique`). `gatedRankMembers_below_gate_score` is also
 the statement that the gate breaks spec §10's "always promoted first".
 
-## Model
+Members are node ids, with score, key and Canonical status as functions of
+the id, as in the Rust comparators, which look all three up by id.
 
-A comparator is a function `α → α → Ordering`. The score order
-(`f64::total_cmp`), the key order (`str::cmp` on the tie form) and the id order
-(`Uuid::cmp`) are parameters assumed lawful, and the id order is assumed to
-separate distinct ids. Members are node ids, with score, key and Canonical
-status as functions of the id, as in the Rust comparators, which look all three
-up by id. This presumes one entry per id, which `expand` guarantees
-(`Expand.expand_nodup`).
+Boundary: the score order (`f64::total_cmp`), the key order (`str::cmp` on the
+tie form) and the id order (`Uuid::cmp`) are parameters assumed lawful, not
+proved so here, and the id order is assumed to separate distinct ids. One
+entry per id is presumed, which `expand` guarantees (`Expand.expand_nodup`).
+`sort_by`'s algorithm is not modelled: `sorted_unique` holds for any correct
+sort.
 -/
 
 universe u v

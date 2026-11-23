@@ -26,12 +26,6 @@ high-risk, drift or stale payload, a contradiction on a Canonical or Venerable
 concept and its companion, and in cold mode a kept reservation holder
 (`Hotlist/Recall.lean` derives this predicate from the hot list, `forces_iff`).
 
-## Model
-
-`emit isConcept forced topK slots ranked` is the loop from a state with `slots`
-slots already used. `isConcept` is "the id resolves to a concept in the graph"
-(a stale durable-vector id does not).
-
 ## Results
 
 * `emit_sublist`: the output is a subsequence of `ranked`: order is kept and
@@ -92,6 +86,11 @@ design model) to emission: a forced pillar is shown whatever the order, and
 behind the gate `skipped_canonical_kept_canonical` fails (a `decide`
 counterexample, which needs a redundant pair whose relevance falls on both
 sides of the gate).
+
+Boundary: `forced` is an input (`Hotlist/Recall.lean` derives it); the
+redundancy signals are not modelled (`red` and `warns` are parameters), nor
+is the companion step after emission, which can bring a skipped member back as
+a contradiction companion.
 -/
 
 namespace Lambo.TopK

@@ -51,6 +51,11 @@ worker is in `Worker.lean`, the close in `Close.lean`.
   null while writes are owed; `stepQ_badId`, `stepQ_unknownFormat`,
   `stepQ_skip`: what settles and what defers. `fixed_badId_settled` describes
   the fix as first committed, which settled every unparseable id.
+
+Boundary: as in `Base.lean`, each replay step is atomic and a run's result is
+an input per write, so what the embedder answers and why is not modelled; a
+deferred agent stays deferred for the rest of the serve, and the retry pass
+is one more attempt, not a timer.
 -/
 
 import LamboProofs.Drain.Base

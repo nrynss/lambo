@@ -19,26 +19,6 @@ Model of the write-time cycle checks and of the load-time cycle check.
 * The load check `Graph::assert_invariants` (`src/graph/graph.rs`,
   `invariants.rs`), which every session load runs.
 
-## Model
-
-* `E x y`: an existing `Causal` or `Dependency` edge from `x` to `y`.
-* `P x y`: a planned edge of the write being checked.
-* `Combined E P`: the graph after the write.
-* `Reach R x y`: `y` is reachable from `x` along `R`, in zero or more steps.
-* `Acyclic R`: no edge of `R` can be closed into a cycle, that is, no edge
-  `x → y` has `y` reaching `x`. Because `Reach` is reflexive this also rules
-  out self-loops.
-* From the edge-kinds section on, a graph is a list of typed edges (`Edge`,
-  with `Kind` one of `causal`, `dependency`, `hierarchical`), and
-  `rel g ks` is the relation of the edges whose kind `ks` selects.
-
-The breadth-first searches are not modelled for the abstract theorems, which
-take their answers as hypotheses (`hcheck`); `Expand.lean` proves that style
-of search correct for the recall expansion. The executable section gives
-Boolean versions so the issue's scenario can be checked by `decide`; their
-"not reachable" answers are certified by a closed set, so `unreachB_sound`
-needs no search bound.
-
 ## The load check (#325)
 
 The two write gates check two separate conditions: `Causal ∪ Dependency` is
@@ -78,6 +58,12 @@ about what the child may cite.
   previous version. The old union check refuses that written session.
 * `hierarchical_cycle_not_loadOk`, `dependency_cycle_not_loadOk`: a pure
   cycle of either condition still fails the new check.
+
+Boundary: the breadth-first searches are not modelled for the general
+theorems, which take their answers as hypotheses (`hcheck`; `Expand.lean`
+proves that style of search correct for the recall expansion); the `decide`
+scenarios use Boolean searches whose "not reachable" answers are certified by
+a closed set (`unreachB_sound`). `Contradicts` edges are outside the check.
 -/
 
 namespace Lambo.Cite

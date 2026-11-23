@@ -58,6 +58,11 @@ in each doc comment.
   `replayStep_decode`, `unavailable_skips`, ...) are still the current
   step's and are in `Base.lean`. Current counterparts: `fixed_input_goes_on`,
   `fixed_sessionWide_stops` (#294) and `fixedD_input_goes_on` (#295).
+
+Boundary: this is the Rust before #294 and #295, not checked for drift.
+`crash_never_reapplies` is proved for logs shaped "all puts, then worker
+batches" over an empty intent table; a crash in the middle of a replay is not
+proved.
 -/
 
 import LamboProofs.Drain.Base

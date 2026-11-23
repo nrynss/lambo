@@ -39,16 +39,8 @@ inputs is a set of integers over one common scale `u > 0`: `F64.fin x` is
 separate constructors, so "every input, finite or not" is a quantifier over
 `F64`. `F64.max` is `f64::max` (a `NaN` gives way to the other operand).
 
-A value in `[0, 1]` is an exact fraction `Frac` (`num / den`, `den > 0`),
-compared by cross-multiplication (`Frac.le`, `Frac.eqv`). The fractions are
-the exact values of the Rust expressions:
-
-* `keyword_term`: `s' / (s' + 5u)` with `s' = max(s, 0)`;
-* the rescaled cosine: since `1 - m > 0`, `clamp((c - m) / (1 - m), 0, 1)` is
-  `clamp(c - m, 0, u - m) / (u - m)` (`vectorTerm_spec` gives the three
-  regimes);
-* `1 - (1 - a)(1 - b)` with `a = an / ad`, `b = bn / bd` is
-  `(ad·bd - (ad - an)(bd - bn)) / (ad·bd)` (`noisyOrCombine`).
+A value in `[0, 1]` is the exact fraction the Rust expression computes
+(`Frac`, compared by cross-multiplication).
 
 Not captured: `f64` rounding. Correct rounding makes `fl` monotone in the
 exact result of each operation, and that is all the arguments below use (`-`
@@ -158,9 +150,7 @@ named are in `src/recall/confidence.rs` (`the_arithmetic_is_the_noisy_or_recorde
   a traversal answer, both of which leave `TopLegs::default()`), and a recall
   by image or vector or a layer's side, report no confidence.
 
-## Left out
-
-The search itself (`search_ranked`, `src/graph/index.rs`, modelled as its
+Boundary: the search itself (`search_ranked`, `src/graph/index.rs`, modelled as its
 ranked list; it is score-descending with only positive scores, assumed as
 `BestFirst` where a theorem needs it), name normalization and lookup (the
 model takes the named concept, already filtered to concepts, as `nameTarget`),
@@ -173,10 +163,10 @@ daemon's `embedding.and_then(|(_, contract)| null_median_cosine(..))`
 (`src/daemon/mod.rs`, the `Route::Text` arm), which passes no median at all
 when the query embed failed, under any contract (harmless: such a recall has
 no vector leg and takes the keyword-only path, which needs none), the
-layered recall's `layer_top_legs`, and the serialized wire shape. The leg
-map is a list of entries with distinct keys standing for the `HashMap`;
-`upsertKeyword` is `entry(id).or_default()` followed by a write to the
-keyword slot. `noisyOr_none` records the `None` cases of `noisy_or`.
+layered recall's `layer_top_legs`, and the serialized wire shape are not
+modelled; the leg map is a list with distinct keys standing for the
+`HashMap`. `f64` rounding is not captured beyond what the number model
+argues.
 -/
 
 namespace Lambo.Confidence

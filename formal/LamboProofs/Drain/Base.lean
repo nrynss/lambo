@@ -27,7 +27,7 @@ it:
   findings they show. It describes no current Rust: it is not checked against
   the Rust for drift, and the docs do not cite it.
 
-Rust items modelled across the files (paths as at `16e9aafa`):
+Rust items modelled across the files:
 
 * `src/writeq/execution.rs`: the lane worker `WritePipeline::spawn_worker`
   (pop, the lease-lost fence, `WriteCtx::run`, which failures consume the
@@ -102,10 +102,7 @@ process's sequence starts at 1.
   them; no theorem depends on how they break. Since #295 the load is
   `fixedLoad` (`Replay.lean`), which needs no clock assumption.
 
-The other theorems here (the receipt store, the intent table, the load
-order's insertion sort) are the lemmas the other files' proofs rest on.
-
-Not modelled: concurrency and the cancellation-safety custody of handles
+Boundary: not modelled are concurrency and the cancellation-safety custody of handles
 (`WorkerCustody`, `ReplayCustody`); `stop_replay` running before the quiesce;
 admission and its caps (`Receipts.lean`); receipt retention, eviction, the
 undelivered queue, delivery destinations and the live entry a replay inserts;
@@ -115,7 +112,8 @@ consume; it deletes only consumed rows, so it never touches a pending one);
 counters, the ledger and logging; the
 lease fence at the flush (a fenced flush is refused at the store, so a
 consume appended after a lost lease never lands); `calibration.rs` (drain
-does not depend on it).
+does not depend on it). Why a run fails is not modelled: a run's result is an
+input per write.
 -/
 
 import LamboProofs.Receipts
