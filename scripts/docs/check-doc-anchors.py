@@ -25,6 +25,10 @@ The rules:
   must equal the declared name exactly once the `Lambo.` and `<Model>.`
   namespace prefixes are dropped: `Canon.Status.rank` matches `def
   Status.rank` inside `namespace Lambo.Canon`, and `Canon.rank` does not.
+  A model split into a directory (`formal/LamboProofs/Drain/*.lean`, one
+  namespace `Lambo.Drain`) resolves across its files, except its
+  `History.lean`: the history layer describes no current Rust, so a page
+  may not cite it.
 * `const:` a comma-separated list of names, each pinned by
   `src/formal_constants_tests.rs`: every identifier in the name (split at
   `::`, `.` and `()`) must appear there as a whole word in code, not in a
@@ -110,6 +114,8 @@ REQUIRED: dict[str, tuple[str, ...]] = {
 
 CONSTANTS_FILE = "src/formal_constants_tests.rs"
 LEAN_DIR = "formal/LamboProofs"
+# In a model split into a directory, the file a docs anchor may not cite.
+LEAN_HISTORY = "History.lean"
 
 LEAN_DECL = re.compile(
     r"^\s*(?:@\[[^\]]*\]\s*)*"
@@ -229,9 +235,23 @@ class Sources:
         return self._text[rel]
 
     def lean(self, model: str) -> set[str] | None:
+        """The names `<Model>.lean` declares or, for a model split into a
+        directory, its files other than the history layer; None if neither
+        exists."""
         if model not in self._lean:
             text = self.text(f"{LEAN_DIR}/{model}.lean")
-            self._lean[model] = None if text is None else lean_names(text)
+            folder = self.root / LEAN_DIR / model
+            if text is not None:
+                self._lean[model] = lean_names(text)
+            elif folder.is_dir():
+                names: set[str] = set()
+                for path in sorted(folder.glob("*.lean")):
+                    if path.name != LEAN_HISTORY:
+                        part = self.text(f"{LEAN_DIR}/{model}/{path.name}")
+                        names |= lean_names(part or "")
+                self._lean[model] = names
+            else:
+                self._lean[model] = None
         return self._lean[model]
 
 
@@ -334,7 +354,9 @@ def check_lean(body: str, sources: Sources) -> list[str]:
         if names is None:
             errors.append(f"lean: {ref}: no file {LEAN_DIR}/{model}.lean")
         elif name not in {lean_short(n, model) for n in names}:
-            errors.append(f"lean: {ref}: {LEAN_DIR}/{model}.lean declares no {name}")
+            where = (f"{LEAN_DIR}/{model}.lean" if (sources.root / LEAN_DIR / f"{model}.lean").is_file()
+                     else f"{LEAN_DIR}/{model}/ (outside {LEAN_HISTORY})")
+            errors.append(f"lean: {ref}: {where} declares no {name}")
     return errors
 
 

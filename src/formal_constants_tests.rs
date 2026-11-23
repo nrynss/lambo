@@ -579,7 +579,7 @@ fn hotlist() {
 fn drain() {
     use crate::writeq::{EMBEDDER_SICK_THRESHOLD, REPLAY_LOOKUP_TIMEOUT_LIMIT};
 
-    let lean = Lean::new(model!("Drain"));
+    let lean = Lean::new(model!("Drain/Base"));
     assert_pin!(
         EMBEDDER_SICK_THRESHOLD,
         lean.def("sickThreshold", "Nat").nat().to::<usize>()

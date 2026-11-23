@@ -6,7 +6,9 @@
 # with the Rust".
 #
 # One [[model]] per .lean file under formal/LamboProofs/ (subdirectories
-# included) other than the top-level Audit.lean:
+# included) other than the top-level Audit.lean, Drain/History.lean and
+# Drain/Examples.lean (the drain model's history layer and concrete cases,
+# which read no Rust of their own) and the shared lemma libraries under Lib/:
 #
 #   lean          the model file, from the repository root.
 #   read_against  optional: the commit the model was last read against.
@@ -357,31 +359,87 @@ rust = [
   "src/recall/assemble.rs#same_session_concept",
 ]
 
+# The drain model is split by subsystem; each file is listed against the Rust
+# it reads. Drain/History.lean (the worker before #295, the replay before
+# #294) and Drain/Examples.lean (concrete cases evaluated by `decide` over the
+# other files' definitions) model no Rust of their own and have no entry.
+#
+# Base: the worker step's batch shape (the consume under the commit's lock
+# hold), the receipt store's settle, `settle_deferred`'s set-aside, the
+# intent log, the adapters' load order, the error classes and the replay's
+# constants.
 [[model]]
-lean = "formal/LamboProofs/Drain.lean"
-read_against = "4cab4380"
-read_digest = "v2:sha256:ed338356702f4094f477790c3ee0f850ac3c35f35add281e9b016959609d55ba"
+lean = "formal/LamboProofs/Drain/Base.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:f67684751068529c7c6a6e3d4b5fe46f2b58876aec76040bf4d606c126671cf2"
+rust = [
+  "src/writeq/execution.rs#WriteCtx::run",
+  "src/writeq/execution.rs#ConsumeStamp",
+  "src/writeq/receipts.rs#settle_one",
+  "src/writeq/drain.rs#CloseFlush",
+  "src/writeq/drain.rs#WritePipeline::abort_workers",
+  "src/writeq/drain.rs#WritePipeline::settle_deferred",
+  "src/writeq/replay.rs#EMBEDDER_SICK_THRESHOLD",
+  "src/writeq/replay.rs#REPLAY_LOOKUP_TIMEOUT_LIMIT",
+  "src/graph/graph/mutation_log.rs#record_write_intent",
+  "src/graph/graph/mutation_log.rs#consume_write_intent",
+  "src/store/sqlite/session_load.rs",
+  "src/store/pg/session_load.rs",
+  "src/types/mod.rs#is_cycle_refusal",
+  "src/types/mod.rs#is_input_refusal",
+  "src/types/mod.rs#is_lookup_timeout",
+]
+
+# Replay: the replay loop, its deferral, retry pass and load order (#294,
+# #295), and the in-session hold's first model (`workH`), which reads the
+# lane worker.
+[[model]]
+lean = "formal/LamboProofs/Drain/Replay.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:a4f519c63bcd006211f941c9ddc8b1f613007aecd3ba1fa13457a0da1691dfea"
+rust = [
+  "src/writeq/replay.rs",
+  "src/writeq/execution.rs#WritePipeline::spawn_worker",
+  "src/store/sqlite/session_load.rs",
+  "src/store/pg/session_load.rs",
+  "src/types/mod.rs#is_cycle_refusal",
+  "src/types/mod.rs#is_input_refusal",
+]
+
+# Worker: the current lane worker (held writes, admission and its caps,
+# retries, the fence) and the serve's block reason (`serveR`).
+[[model]]
+lean = "formal/LamboProofs/Drain/Worker.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:041256adfebbde53a5d29059d2f8d60556105b11ee1328b80bceeaa9c2be2b4f"
 rust = [
   "src/writeq/execution.rs",
-  "src/writeq/drain.rs",
-  "src/writeq/replay.rs",
+  "src/writeq/admission.rs#Lanes",
   "src/writeq/receipts.rs#settle_one",
   "src/writeq/receipts.rs#hold_one",
-  "src/writeq/admission.rs#Lanes",
+  "src/writeq/replay.rs#WritePipeline::spawn_replay",
+]
+
+# Close: the close over the current worker, the dead-lettered set (#345, with
+# worker panics) and where the lookup streak resets (#346, at the commit).
+[[model]]
+lean = "formal/LamboProofs/Drain/Close.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:93aa2a8d24ada17aac16bbe4d70d959c0c0b1ff9b555e947310bf60b407c4a50"
+rust = [
+  "src/writeq/drain.rs",
   "src/memory/shutdown.rs#Memory::close",
   "src/memory/shutdown.rs#Memory::close_fenced",
-  "src/graph/graph/mutation_log.rs#record_write_intent",
   "src/graph/graph/mutation_log.rs#consume_write_intent",
   "src/graph/graph/unflushed.rs#Graph::note_dead_lettered_intents",
   "src/graph/graph/unflushed.rs#Graph::intent_dead_lettered",
   "src/graph/graph/unflushed.rs#Graph::mark_consumed_unsettled",
   "src/graph/graph/unflushed.rs#Graph::settled_write",
   "src/store/flush.rs#FlushLoop::drain_and_flush",
-  "src/store/sqlite/session_load.rs",
-  "src/store/pg/session_load.rs",
-  "src/types/mod.rs#is_cycle_refusal",
-  "src/types/mod.rs#is_input_refusal",
-  "src/types/mod.rs#is_lookup_timeout",
+  "src/writeq/execution.rs#WorkerCommit",
+  "src/writeq/execution.rs#WritePipeline::spawn_worker",
+  "src/writeq/admission.rs#Lanes",
+  "src/writeq/receipts.rs#settle_one",
 ]
 
 [[model]]

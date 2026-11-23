@@ -80,6 +80,20 @@ class CountTheorems(unittest.TestCase):
             self.assertEqual([p.name for p in ct.model_files(d)], ["A.lean"])
             self.assertEqual(ct.main(["--repo", d]), 0)
 
+    def test_main_counts_subdirectories_but_not_lib(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "formal" / "LamboProofs"
+            (root / "Split").mkdir(parents=True)
+            (root / "Lib").mkdir()
+            (root / "A.lean").write_text("theorem a : True := trivial\n", encoding="utf-8")
+            (root / "Split" / "Base.lean").write_text("theorem b : True := trivial\n", encoding="utf-8")
+            (root / "Split" / "Audit.lean").write_text("theorem c : True := trivial\n", encoding="utf-8")
+            (root / "Lib" / "List.lean").write_text("theorem d : True := trivial\n", encoding="utf-8")
+            self.assertEqual(
+                [p.relative_to(root).as_posix() for p in ct.model_files(d)],
+                ["A.lean", "Split/Audit.lean", "Split/Base.lean"],
+            )
+
     def test_char_literal_quote_opens_no_string(self):
         src = (
             "def q : Char := '\"'\n"

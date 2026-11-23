@@ -3,8 +3,10 @@
 
   python3 -I scripts/formal/count-theorems.py [--repo DIR]
 
-The model files are `formal/LamboProofs/*.lean` other than `Audit.lean`. A
-theorem is a declaration line: outside every comment (`--` line comments and
+The model files are the `.lean` files under `formal/LamboProofs/`,
+subdirectories included (a model split by subsystem, such as `Drain/`, counts
+each of its files), other than the top-level `Audit.lean` and the shared
+lemma libraries under `Lib/`. A theorem is a declaration line: outside every comment (`--` line comments and
 `/- ... -/` block comments, which nest, doc comments included) and outside
 string literals (raw strings `r"..."`, `r#"..."#` included) and char literals,
 a line that starts at column 0 with `theorem`, or with
@@ -102,7 +104,11 @@ def count(src):
 
 def model_files(repo):
     root = Path(repo) / "formal" / "LamboProofs"
-    return sorted(p for p in root.glob("*.lean") if p.name != "Audit.lean")
+    return sorted(
+        p for p in root.rglob("*.lean")
+        if p.relative_to(root).parts not in (("Audit.lean",),)
+        and p.relative_to(root).parts[0] != "Lib"
+    )
 
 
 def main(argv=None):

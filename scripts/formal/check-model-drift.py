@@ -79,7 +79,9 @@ case it is 1.
 The manifest itself is checked on every run, and a broken manifest fails
 (exit 3) even without `--strict`: every `.lean` file under
 `formal/LamboProofs/` (subdirectories included) other than the top-level
-`Audit.lean` must have exactly one entry, every Lean file and Rust path an
+`Audit.lean`, the drain model's history layer and concrete cases
+(`Drain/History.lean`, `Drain/Examples.lean`) and the shared lemma libraries
+under `Lib/` must have exactly one entry, every Lean file and Rust path an
 entry names must exist, every `#item` must be found, `read_digest` must be
 `v<N>:sha256:` and 64 lowercase hex digits (a bare `sha256:` is scheme 1) with
 N this script's DIGEST_VERSION, and `read_against`, when given, a hex commit
@@ -113,8 +115,20 @@ import tomllib
 
 MANIFEST = "formal/models.toml"
 MODEL_DIR = "formal/LamboProofs"
-# Relative to MODEL_DIR: the audit index, not a model of any Rust.
-SKIP_MODELS = {"Audit.lean"}
+# Relative to MODEL_DIR, the Lean files that read no Rust of their own and so
+# have no entry: the audit index; the drain model's history layer (the worker
+# before #295 and the replay before #294, kept as the evidence for their
+# findings; docs do not cite it); and its concrete cases, evaluated by
+# `decide` over the definitions of the other drain files, which have entries.
+SKIP_MODELS = {"Audit.lean", "Drain/History.lean", "Drain/Examples.lean"}
+# Relative to MODEL_DIR, directories of shared lemma libraries: generic facts
+# about lists and the like, which describe no Rust.
+SKIP_DIRS = ("Lib/",)
+
+
+def is_model(rel):
+    """Whether `rel`, a `.lean` path relative to MODEL_DIR, needs an entry."""
+    return rel not in SKIP_MODELS and not rel.startswith(SKIP_DIRS)
 ENTRY_KEYS = {"lean", "rust", "read_against", "read_digest"}
 ITEM_KINDS = r"(?:fn|struct|enum|trait|type|const|static|mod|union)"
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -226,7 +240,7 @@ class WorkTree:
             for f in filenames:
                 if f.endswith(".lean"):
                     out.add(f"{rel}/{f}")
-        return {p for p in out if p[len(MODEL_DIR) + 1:] not in SKIP_MODELS}
+        return {p for p in out if is_model(p[len(MODEL_DIR) + 1:])}
 
 
 class GitTree:
@@ -242,7 +256,7 @@ class GitTree:
     def model_files(self):
         prefix = MODEL_DIR + "/"
         return {p for p in self.repo.tree(self.rev)
-                if p.startswith(prefix) and p.endswith(".lean") and p[len(prefix):] not in SKIP_MODELS}
+                if p.startswith(prefix) and p.endswith(".lean") and is_model(p[len(prefix):])}
 
 
 # --------------------------------------------------------------------------
@@ -1780,6 +1794,13 @@ def self_test():
         code, out = run("--bump", "B")
         expect("... --bump of another model still works", code == 0 and "note:" in out, out)
         git("rm", "-q", "-r", "formal/LamboProofs/Sub")
+        write("formal/LamboProofs/Lib/L.lean", "-- shared lemmas, no entry\n")
+        write("formal/LamboProofs/Drain/History.lean", "-- history layer, no entry\n")
+        commit("add Lib/L and Drain/History")
+        code, out = run()
+        expect("a shared library and the history layer need no entry",
+               code == 0 and "no entry" not in out, out)
+        git("rm", "-q", "-r", "formal/LamboProofs/Lib", "formal/LamboProofs/Drain")
         manifest(c4, c11, a_rust=A2, b_rust='"src/b.rs#keep", "src/gone.rs"')
         commit("missing path")
         code, out = run()

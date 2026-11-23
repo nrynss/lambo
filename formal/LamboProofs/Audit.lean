@@ -19,7 +19,12 @@ import LamboProofs.Supersession
 import LamboProofs.Policy
 import LamboProofs.Conflict
 import LamboProofs.Hotlist
-import LamboProofs.Drain
+import LamboProofs.Drain.Base
+import LamboProofs.Drain.Replay
+import LamboProofs.Drain.Worker
+import LamboProofs.Drain.Close
+import LamboProofs.Drain.Examples
+import LamboProofs.Drain.History
 import LamboProofs.Flush
 import LamboProofs.BatchQueue
 import LamboProofs.Registry

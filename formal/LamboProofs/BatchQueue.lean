@@ -1423,7 +1423,7 @@ again, so a fault of the device that has passed by the canary is charged to
 a lone text as permanent (`Backend`), while the same fault on a chunk of two
 lets each text run alone and both embed. A write's text is often queued
 alone; `Backend` makes the write path settle it `failed` and consume its
-intent (`LamboError::Embed`, see `Drain.lean`). -/
+intent (`LamboError::Embed`, see `Drain/Worker.lean`). -/
 def flaky (row : Txt → Option Vec) : Fwd := fun k ts => if k = 0 then .err else rowFwd row k ts
 
 theorem lone_transient_fault_permanent (row : Txt → Option Vec) (dim : Nat) (t : Txt)
