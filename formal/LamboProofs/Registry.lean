@@ -194,7 +194,7 @@ a close; `ERASE_PERMIT_WAIT` and the erase's cut-off (both answer 503 or an
 unknown outcome without a state change); an erase whose read-back finds the
 tombstone after an error (`Tombstone::Yes` and `Unknown`); the
 `ExitProcess` wind-down (a one-session serve has no watcher and no retry
-loop); the write-behind log and the flush ladder (`Flush.lean`); how
+loop); the write-behind log and the flush ladder (`Flush/`); how
 `build_attach` loads and checks the contract (`Contract/Reembed.lean`); a
 heartbeat's transient errors; and the expiry clock of a lease row, folded
 into `rowLapse`. `NegativeCache::put`'s bound is not proved.

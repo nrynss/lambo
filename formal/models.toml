@@ -548,15 +548,38 @@ rust = [
   "src/writeq/receipts.rs#settle_one",
 ]
 
+# The retry ladder, its backoff and the store's flush contract.
 [[model]]
-lean = "formal/LamboProofs/Flush.lean"
-read_against = "a65a9d53"
-read_digest = "v2:sha256:1dad2561851b61a01e293ccb8f1273ad791127c1fbb71d6c43c185b2ef181926"
+lean = "formal/LamboProofs/Flush/Retry.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:0fed522f548f71deb9e49c8e89e975bbab94ccba91853be48f98fc3c24c0b983"
 rust = [
-  "src/store/flush.rs",
-  "src/store/error.rs",
+  "src/store/flush.rs#flush_with_retry",
+  "src/store/flush.rs#next_backoff",
+  "src/store/flush.rs#BACKOFF_BASE",
+  "src/store/flush.rs#BACKOFF_CAP",
+  "src/store/flush.rs#RETAINED_BACKOFF",
   "src/types/mod.rs#is_retryable",
   "src/store/mod.rs#GraphStore::flush",
+]
+
+# The flush loop before #293, after it, and with #301's two store calls.
+[[model]]
+lean = "formal/LamboProofs/Flush/Loop.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:00274796661038c5756a96f37d926b1c18b36180cb45902d24a285e037402c83"
+rust = [
+  "src/store/flush.rs",
+]
+
+# The adapters' error classes (#301 item 3) and the loop over them.
+[[model]]
+lean = "formal/LamboProofs/Flush/Errors.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:0e8af54ae9c23ffe367acee1c3ba4812a5a1044a26de742f892c41cf7c3c1e36"
+rust = [
+  "src/store/error.rs",
+  "src/store/flush.rs#FlushLoop::drain_and_flush",
 ]
 
 # Left out: the files issue #273 proposes splitting candle.rs into.
@@ -569,7 +592,7 @@ rust = [
 ]
 
 # Left out: src/store/flush.rs's stale-write latch, a match arm inside the
-# flush loop that Flush.lean already covers; the files issue #273 proposes.
+# flush loop that Flush/Loop.lean already covers; the files issue #273 proposes.
 [[model]]
 lean = "formal/LamboProofs/Registry.lean"
 read_against = "514da8d7"

@@ -50,7 +50,7 @@ counted in `running`.
 The fence is checked when a write is taken, before it runs: a write taken
 after the fence is refused (`failed`, its intent left to the next holder)
 and never run; a write already running when the fence lands can still
-commit, which the store's fenced flush then refuses (`Flush.lean`).
+commit, which the store's fenced flush then refuses (`Flush/Loop.lean`).
 
 Which errors hold a write (`holdsS`): an embedder outage. A lookup timeout
 settles `failed`, as the replay settles a single one; the worker's run of

@@ -897,7 +897,7 @@ it), whether it was running, held or queued when the close began; or
 `pending_replay`. `shutdown_exactly_oneW` adds that exactly one of these
 holds. "Applied" means in this process's graph, its batch in the log: the
 batch is durable only once a flush takes it, and one committed after the
-fence is refused at the flush (`Flush.lean`). The current counterpart of
+fence is refused at the flush (`Flush/Loop.lean`). The current counterpart of
 `shutdown_no_silent_loss`. -/
 theorem shutdown_no_silent_lossW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
     {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
@@ -1351,7 +1351,7 @@ completes and when the tail is empty ("every set-aside intent was taken by an
 earlier flush, so it is durable"). Neither says the set-aside write's put
 reached the store. A background flush that the store refuses with a
 constraint violation, or a value it cannot hold, dead-letters its batch: the
-whole of `pending`, dropped while the session goes on (`Flush.lean`,
+whole of `pending`, dropped while the session goes on (`Flush/Loop.lean`,
 `constraint_dead_lettered`, `value_rejected_dead_letters`). That batch can
 hold the `PutWriteIntent` of a write that is still unsettled (a held,
 `pending_replay` one, or one still queued), and then nothing durable backs

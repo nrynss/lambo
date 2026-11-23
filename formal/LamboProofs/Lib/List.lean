@@ -140,7 +140,7 @@ theorem two_le_length_iff {A : Type} {l : List A} (h : l.Nodup) :
 
 /-! ## Permutations and prefixes
 
-Moved from `BatchQueue.lean`, `Flush.lean`. -/
+Moved from `BatchQueue.lean`, `Flush.lean` (now `Flush/Loop.lean`). -/
 
 theorem eraseIdx_perm {α : Type} (g : List α) (i : Nat) (h : i < g.length) :
     g.Perm (g[i] :: g.eraseIdx i) := by

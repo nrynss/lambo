@@ -449,7 +449,7 @@ theorem override_beat_latches {released A : H} (a : Row H) (hA : a.holder = A)
   unfold beatLatchesOld beatLatches
   simp [hhold, htok]
 
-/-- The override scenario concretely (the `exRetakenRow` of `Flush.lean`):
+/-- The override scenario concretely (the `exRetakenRow` of `Flush/Errors.lean`'s runs):
 holder `0` holds token 1, the override at 50 s releases it, the refresh at
 60 s re-takes it at token 2. The old beat does not latch; the fixed one does. -/
 example :

@@ -599,7 +599,7 @@ fn flush() {
     };
 
     // Milliseconds.
-    let lean = Lean::new(model!("Flush"));
+    let lean = Lean::new(model!("Flush/Retry"));
     assert_pin!(BACKOFF_BASE, lean.def("backoffBase", "Nat").nat().ms());
     assert_pin!(BACKOFF_CAP, lean.def("backoffCap", "Nat").nat().ms());
     assert_pin!(RETAINED_BACKOFF, lean.apply("retainedBackoff", &[]).ms());
