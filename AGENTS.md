@@ -176,7 +176,10 @@ stay fail-closed and stop until recall succeeds (see
   proves that two inputs share a key exactly when their nonempty stems form the same
   multiset (`keyF_eq_iff_perm`). It leaves out step 2, non-ASCII lowercasing and the
   Snowball stemmer itself; its stem examples (`issue290_order`, `issue290_stopword`) use
-  a small table checked against a debug build, not Snowball. The refusals are code only:
+  a small table checked against a debug build, not Snowball. Of the refusals, the
+  model covers the empty key (`nameKeyF_all_empty`, `issue301_fixed`) and an id-shaped
+  name, and `formal/LamboProofs/Names.lean` proves a name never shadows another
+  (`declare_no_shadow`). The size and character check and `NameTaken` are code only:
   `name_key` and `Graph::validate_name` in `src/graph/graph/names.rs`, with
   `canonical_key` in `src/graph/canonical.rs`.
 

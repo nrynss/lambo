@@ -131,9 +131,9 @@ dependencies, the protection is blind.
    CLI, pass `--name` on `lambo derive` or bind names on existing concepts with
    `lambo names assign`). The kebab-case shape is a convention the server does
    not check. It compares names by a normalized key that ignores word order,
-   separators, word endings and stopwords, and case except where a lowercase
-   letter meets an uppercase one (a camelCase boundary splits a word, so
-   `ProdVpc` is `prod-vpc` but `prodvpc` is one word). So `prod-vpc-base-sg`
+   separators, word endings and stopwords, and case except where an ASCII
+   lowercase letter meets an ASCII uppercase one (a camelCase boundary splits
+   a word, so `ProdVpc` is `prod-vpc` but `prodvpc` is one word). So `prod-vpc-base-sg`
    and `base sg prod vpc` are one name; the first spelling to take a key owns
    it for good. Cite a name by that original spelling, never by its key.
 

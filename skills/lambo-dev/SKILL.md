@@ -104,12 +104,12 @@ have named the dependents and, where the change is still needed, said why:
    for good. The server checks neither the shape nor what you name; it
    compares names by a normalized key. Word order, `-`, `_` and spaces, word
    endings and the stopwords (the, a, an, for, of, at, in, to, on, and, or,
-   is, are) do not tell names apart, and neither does case, except that a
-   lowercase letter followed by an uppercase one splits a word (camelCase).
-   So `single-writer-lease`, `lease writer single` and `SingleWriterLeases`
-   are one name, and `the-lease` is `lease`, but `singlewriterlease` is a
-   different name. The first spelling to take a key owns
-   it: a later name with the same key for another concept, or with the same
+   is, are) do not tell names apart, and neither does case, except that an
+   ASCII lowercase letter followed by an ASCII uppercase one splits a word
+   (camelCase). So `single-writer-lease`, `lease writer single` and
+   `SingleWriterLeases` are one name, and `the-lease` is `lease`, but
+   `singlewriterlease` is a different name. The first spelling to take a key
+   owns it: a later name with the same key for another concept, or with the same
    key as another concept's content, is refused. Cite a name by its original
    spelling, never by its normalized key, which can key differently when typed
    back.
