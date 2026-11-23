@@ -232,8 +232,8 @@ impl ResolvedBackends {
 /// very embedder width this function is handed: SQLite's `BLOB` has no width of its
 /// own, and Postgres's construction width is config until its live `vector(n)` probe
 /// runs at init or attach. Either way `store_dim != embedder_dim` is unreachable here.
-/// The width is checked in layers instead, each failing closed before a session is
-/// served:
+/// The width is checked in layers instead. The first two refuse before a session is
+/// served; the last refuses the attach, read or write it guards:
 ///
 /// * at resolve, the explicit pin comparison in [`resolve_backends`] (every kind), and
 ///   this function for Cockroach;
