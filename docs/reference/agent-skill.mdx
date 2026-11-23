@@ -70,10 +70,12 @@ own `AGENTS.md` does), add four habits on top of the pre-flight rule:
   or `constraint` rulings meant to be cited across PRs — never to
   `observation`s or file paths (names stay reserved permanently even after GC).
   The shape and the choice of concept are conventions the server does not
-  check. It compares names by a normalized key that ignores word order, case,
-  separators, camelCase splits, word endings and stopwords, so
-  `single-writer-lease` and `SingleWriterLeases` are one name, and the first
-  spelling to take a key owns it. See *Durable names* under
+  check. It compares names by a normalized key that ignores word order,
+  separators, word endings and stopwords, and case except at a camelCase
+  boundary (a lowercase letter followed by an uppercase one splits a word).
+  So `single-writer-lease` and `SingleWriterLeases` are one name, but
+  `singlewriterlease` is not. The first spelling to take a key owns it, so
+  cite a name by that original spelling. See *Durable names* under
   [`lambo_derive`](/mcp#lambo_derive) for the exact rules.
 - **Triage warnings by scope:** Always act on `⚠ Contradicted`, `⚠ Rests on a
   contradicted concept`, `⚠ Possibly superseded`, and active `Reserved by` /
