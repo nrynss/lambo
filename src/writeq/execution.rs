@@ -665,6 +665,15 @@ impl WritePipeline {
         self.arm_test_pause(super::admission::PausePoint::BeforeSettle)
     }
 
+    /// Test-only (#346): arm a one-shot pause after a write's commit, once
+    /// `WriteCtx::run` has returned and before the worker's `Ok` arm. The
+    /// test must notify `resume` before it closes the session: see
+    /// [`test_pause`].
+    #[cfg(test)]
+    pub(crate) fn pause_after_commit(&self) -> (Arc<Notify>, Arc<Notify>) {
+        self.arm_test_pause(super::admission::PausePoint::AfterCommit)
+    }
+
     #[cfg(test)]
     fn arm_test_pause(&self, point: super::admission::PausePoint) -> (Arc<Notify>, Arc<Notify>) {
         let reached = Arc::new(Notify::new());
@@ -810,6 +819,13 @@ impl WritePipeline {
                         at: (clock)(),
                     };
                     let raw_outcome = ctx.run(&job, Some(stamp)).await;
+                    // Test-only (#346): hold a committed write here, after
+                    // `run` returned and before the `Ok` arm, while another
+                    // worker runs. See `test_pause`.
+                    #[cfg(test)]
+                    if raw_outcome.is_ok() {
+                        test_pause(&lanes, super::admission::PausePoint::AfterCommit).await;
+                    }
                     // Which failures hold the write rather than consume it.
                     // An embedder outage says nothing about the input, so the
                     // write is held (#295). A lookup timeout is the replay's

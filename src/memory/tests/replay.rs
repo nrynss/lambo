@@ -2802,23 +2802,18 @@ async fn submit_until_answered(
     receipt
 }
 
-/// **#346**: the in-session lookup-timeout streak counts the timeouts "with
-/// nothing applied between". Two lookup timeouts settle `failed`; then agent
-/// b's write commits, and its worker is held (test-only
-/// `pause_before_settle`) between that commit and its settle block; agent
-/// c's first attempt then times out. A write applied since the other two, so
-/// c's timeout is a first timeout and settles `failed`. Before the fix the
-/// streak was reset only in the settle block, so c's timeout counted as the
-/// third of a run and was held (`pending_replay`).
-///
-/// Mirrors `Drain.streak_old_counts_across_commit` (the bug) and
-/// `Drain.timeout_after_commit_settlesW`, `Drain.heldNew_iff` (the fix).
-#[tokio::test(start_paused = true)]
-async fn a_lookup_timeout_between_a_commit_and_its_settle_settles_failed() {
+/// Two lookup timeouts settle `failed`; agent b's write commits and its
+/// worker is held at the test pause `arm` sets; agent c's first attempt then
+/// times out. Returns c's answer; when it is `failed`, b is resumed and
+/// checked applied, and the session closed.
+async fn timeout_after_a_paused_commit(
+    session: &str,
+    arm: impl Fn(&crate::writeq::WritePipeline) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>),
+) -> crate::writeq::ReceiptAnswer {
     let inner = Arc::new(MemoryStore::new());
     let slow = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let mem = Memory::builder()
-        .session("in-session-lookup-commit")
+        .session(session)
         .agent("agent-a")
         .flush_interval(Duration::from_secs(3_600))
         .store(
@@ -2841,9 +2836,9 @@ async fn a_lookup_timeout_between_a_commit_and_its_settle_settles_failed() {
         assert_eq!(mem.pipeline().lookup(&a, id).tag(), "failed");
     }
 
-    // Agent b's write commits; its worker stops before its settle block.
+    // Agent b's write commits; its worker stops at the pause.
     slow.store(false, Ordering::SeqCst);
-    let (reached, resume) = mem.pipeline().pause_before_settle();
+    let (reached, resume) = arm(mem.pipeline());
     let applied = mem
         .derive_async_as(
             &b,
@@ -2856,22 +2851,62 @@ async fn a_lookup_timeout_between_a_commit_and_its_settle_settles_failed() {
         .receipt;
     tokio::time::timeout(Duration::from_secs(60), reached.notified())
         .await
-        .expect("agent b's write committed and reached its settle block");
+        .expect("agent b's write committed and reached the pause");
 
-    // A first-attempt timeout lands between that commit and its settle.
+    // A first-attempt timeout lands while b's worker waits after its commit.
     slow.store(true, Ordering::SeqCst);
     let after = submit_until_answered(&mem, &c, "slow lookup fact after a commit").await;
     let answer = mem.pipeline().lookup(&c, after);
+    if answer.tag() == "failed" {
+        // Resume b before the close: `abort_workers` refuses a paused worker.
+        resume.notify_one();
+        until_mem(&mem, "agent b's write to settle", |m| {
+            m.pipeline().lookup(&b, applied).tag() == "applied"
+        })
+        .await;
+        mem.close().await.expect("clean close");
+    }
+    answer
+}
+
+/// **#346**: the in-session lookup-timeout streak counts the timeouts "with
+/// nothing applied between". Two lookup timeouts settle `failed`; then agent
+/// b's write commits, and its worker is held (test-only
+/// `pause_before_settle`) between that commit and its settle block; agent
+/// c's first attempt then times out. A write applied since the other two, so
+/// c's timeout is a first timeout and settles `failed`. Before the fix the
+/// streak was reset only in the settle block, so c's timeout counted as the
+/// third of a run and was held (`pending_replay`).
+///
+/// Mirrors `Drain.streak_old_counts_across_commit` (the bug) and
+/// `Drain.timeout_after_commit_settlesW`, `Drain.heldNew_iff` (the fix).
+#[tokio::test(start_paused = true)]
+async fn a_lookup_timeout_between_a_commit_and_its_settle_settles_failed() {
+    let answer =
+        timeout_after_a_paused_commit("in-session-lookup-commit", |p| p.pause_before_settle())
+            .await;
     assert_eq!(
         answer.tag(),
         "failed",
         "a write applied since the run, so this is a first timeout: {answer:?}"
     );
+}
 
-    resume.notify_one();
-    until_mem(&mem, "agent b's write to settle", |m| {
-        m.pipeline().lookup(&b, applied).tag() == "applied"
-    })
-    .await;
-    mem.close().await.expect("clean close");
+/// **#346, the narrower window**: as above, with agent b's worker held right
+/// after `WriteCtx::run` returned, before its `Ok` arm (test-only
+/// `pause_after_commit`). The write has committed, so c's timeout is a first
+/// timeout and settles `failed`. With the reset in the `Ok` arm (#346's first
+/// fix), c's timeout still counted as the third of a run and was held.
+///
+/// Mirrors `Drain.streak_okArm_counts_across_commit` (the bug) and
+/// `Drain.timeout_after_commit_settlesW`, `Drain.heldNew_iff` (the fix).
+#[tokio::test(start_paused = true)]
+async fn a_lookup_timeout_between_a_commit_and_its_ok_arm_settles_failed() {
+    let answer =
+        timeout_after_a_paused_commit("in-session-lookup-ok-arm", |p| p.pause_after_commit()).await;
+    assert_eq!(
+        answer.tag(),
+        "failed",
+        "a write committed since the run, so this is a first timeout: {answer:?}"
+    );
 }

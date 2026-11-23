@@ -669,6 +669,8 @@ pub(super) struct Lanes {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PausePoint {
+    /// After `WriteCtx::run` returned `Ok`, before the worker's `Ok` arm.
+    AfterCommit,
     /// Before the worker's settle block.
     BeforeSettle,
 }
