@@ -184,8 +184,8 @@ rust = [
 
 [[model]]
 lean = "formal/LamboProofs/Receipts.lean"
-read_against = "507e3fa8"
-read_digest = "v2:sha256:c8dc7dad1d9f521a2893afc3c38a8d176658a677556376b504e089b33445da58"
+read_against = "4cab4380"
+read_digest = "v2:sha256:a89baec0f9450267a45aec7d6b4a8ae12c03ea43e8ea9c135b8a5bd53dacc3fa"
 rust = [
   "src/writeq/receipts.rs",
   "src/writeq/admission.rs",
@@ -359,8 +359,8 @@ rust = [
 
 [[model]]
 lean = "formal/LamboProofs/Drain.lean"
-read_against = "507e3fa8"
-read_digest = "v2:sha256:111a39f506ff52d361d821dde25f402597e17f81e3b5f1b594052bfc612b7ea0"
+read_against = "4cab4380"
+read_digest = "v2:sha256:ed338356702f4094f477790c3ee0f850ac3c35f35add281e9b016959609d55ba"
 rust = [
   "src/writeq/execution.rs",
   "src/writeq/drain.rs",
