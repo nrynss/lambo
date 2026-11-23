@@ -62,6 +62,30 @@ action is `actions/cache`, pinned by commit.
     count was taken by hand: this README said 2,393 for the files the script
     counts as 2,394 (at `8ee90cd3`).
 
+## How the models are written
+
+The models are Lambo's algorithm and its specification: the definitions are
+the algorithm, as the Rust runs it, and the theorems are the guarantees. Every
+theorem earns its place in one of two ways. Either a proof uses it (a stepping
+stone is fine), or it states a property of the modelled Rust and its doc
+comment says, in one sentence, what it guarantees about which Rust behaviour:
+a function, a receipt answer, an order, an invariant. A doc comment that only
+restates the Lean in words is not enough; a theorem that cannot be given that
+sentence truthfully is deleted, not documented into place
+(`formal/audit/deleted-theorems.tsv` lists the deletions and why).
+
+Every model file opens with a header that says what it models, which Rust it
+covers, its end results and its boundary: the Rust behaviour it does not cover
+(concurrency beyond the modelled lock order, store and SQL behaviour, embedder
+internals, panics where they are not modelled, ...), so that silence is not
+read as a guarantee. Prose that only narrates the Lean is left out.
+
+CI enforces the part a machine can check: `python3 -I
+scripts/formal/audit-theorems.py --check` fails when a theorem is used by no
+proof (and named by no other declaration, as an `rfl` lemma handed to `simp`
+is) and carries no doc comment. What the doc comment says is the reviewer's to
+judge.
+
 ## What is modelled, and what each file proves
 
 Every file opens with a comment that says which Rust items it models, what the

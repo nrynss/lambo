@@ -171,6 +171,16 @@ class Audit(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(at.main(["--repo", str(self.root), "--dump", str(self.dump)]), 1)
 
+    def test_check_fails_on_an_unused_undocumented_theorem(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+            code = at.main(["--repo", str(self.root), "--dump", str(self.dump), "--check"])
+        self.assertEqual(code, 1)
+        # Undocumented and unused: headline (named in the header, still no doc
+        # comment), f_zero and others; `documented` has one, `twin_used` is used.
+        self.assertIn("M.lean:13: headline", err.getvalue())
+        self.assertNotIn(": documented ", err.getvalue())
+        self.assertNotIn(": twin_used ", err.getvalue())
+
     def test_dead_rfl_helper_is_b(self):
         model = MODEL.replace("theorem old_ruleW (n : Nat) : f n = n := rfl",
                               "theorem old_ruleV (n : Nat) : f n = n := rfl")

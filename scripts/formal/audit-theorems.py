@@ -3,6 +3,7 @@
 
   python3 -I scripts/formal/audit-theorems.py [--dump FILE] [--out FILE] [--repo DIR]
   python3 -I scripts/formal/audit-theorems.py --duplicates [--dump FILE]
+  python3 -I scripts/formal/audit-theorems.py --check [--dump FILE]
 
 Reads a dump of the elaborated models (`scripts/formal/DumpDecls.lean`; built
 here when `--dump` is not given) and, for every theorem declared in a model
@@ -49,6 +50,10 @@ README or the CHANGELOG, or a bold title (a); a superseding counterpart (b);
 the other (a) criteria; a `@[simp]` lemma (c); a dead helper (b); the rest
 (c). The classes are a first sort from those signals, for a person to
 confirm.
+
+`--check` exits 1 when a theorem is neither used by a proof (or named by
+another declaration) nor carries a doc comment: the rule every theorem
+follows (formal/README.md, "How the models are written"). CI runs it.
 
 `--duplicates` lists theorems that state the same thing (the same `shape`:
 binders named by depth, universe parameters by position) in more than one
@@ -419,12 +424,39 @@ def classify(m, n, d, src_lines, header, readme, changelog, doc_mentions, twins=
     return "c", f"undocumented {span}-line lemma, a property in its own right or a leftover"
 
 
+def check(m):
+    """The models' rule: every theorem is used by a proof (or named by another
+    declaration, as an `rfl` lemma handed to `simp` is), or its doc comment says
+    what it guarantees about the Rust. Only the doc comment's presence can be
+    checked; what it says is the reviewer's."""
+    used = set(m.proof_users())
+    used |= set(named_refs(m))
+    bad = []
+    for n, d in m.theorems.items():
+        if n in used:
+            continue
+        p = module_path(m.repo, d["module"]).resolve()
+        if not doc_comment(m.text[p].split("\n"), d):
+            bad.append((p.relative_to(m.repo.resolve()).as_posix(), d["line"], local_name(n)))
+    for path, line, name in sorted(bad):
+        print(f"{path}:{line}: {name} is used by no proof and has no doc comment stating its Rust guarantee",
+              file=sys.stderr)
+    if bad:
+        print(f"{len(bad)} theorem(s) neither used nor documented (formal/README.md, \"How the models are "
+              f"written\")", file=sys.stderr)
+        return 1
+    print(f"every theorem of {len(m.theorems)} is used by a proof or documented")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", default=".", help="repository root (default: .)")
     ap.add_argument("--dump", help="a DumpDecls.lean dump (built when absent)")
     ap.add_argument("--out", help="write the markdown report here (default: stdout)")
     ap.add_argument("--duplicates", action="store_true", help="list theorems stated more than once")
+    ap.add_argument("--check", action="store_true",
+                    help="exit 1 if a theorem is neither used by a proof nor carries a doc comment")
     ap.add_argument("--deleted", default="formal/audit/deleted-theorems.tsv",
                     help="the theorems deleted on purpose (NAME<TAB>REASON<TAB>KEPT), listed in the report")
     args = ap.parse_args(argv)
@@ -448,6 +480,9 @@ def main(argv=None):
             print("  ".join(sorted(v)))
         print(f"{len(dups)} statement(s) proved more than once", file=sys.stderr)
         return 0
+
+    if args.check:
+        return check(m)
 
     refs = {k: defaultdict(set) for k in SIGNALS}
     for n, us in m.proof_users().items():

@@ -95,6 +95,12 @@ jobs:
         working-directory: formal
         run: lake env lean ../scripts/formal/DumpDecls.lean
 
+      # The models' rule (formal/README.md, "How the models are written"):
+      # every theorem is used by a proof or documented. Dumps the built
+      # models (DumpDecls.lean) and reads the dump.
+      - name: Every theorem is used or documented
+        run: python3 -I scripts/formal/audit-theorems.py --check
+
       # The differential oracle (#291): rebuild the exporter, regenerate
       # formal/oracle/*.json from the models and fail if the committed vectors
       # are stale, so a model change cannot ship with vectors the Rust test
