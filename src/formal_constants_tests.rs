@@ -365,7 +365,7 @@ fn fusion() {
     };
 
     // The weights are at scale 10 (`10` for `1.0`), k a fraction kNum/kDen.
-    let lean = Lean::new(model!("Fusion"));
+    let lean = Lean::new(model!("Fusion/Rrf"));
     let fields = lean.fields("RrfConfig");
     let dflt = lean.def("rrfDefault", "RrfConfig");
     let den = dflt.anon(&fields, "kDen").nat().value;

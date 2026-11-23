@@ -144,7 +144,16 @@ impl Vectors {
             v.model, model,
             "formal/oracle/{model}.json names another model"
         );
-        assert_eq!(v.lean, format!("formal/LamboProofs/{model}.lean"));
+        // A model split into a directory names the part its vectors exercise.
+        let file = v
+            .lean
+            .strip_prefix("formal/LamboProofs/")
+            .and_then(|f| f.strip_suffix(".lean"));
+        assert!(
+            matches!(file, Some(f) if f == model || f.starts_with(&format!("{model}/"))),
+            "formal/oracle/{model}.json names another model file: {}",
+            v.lean
+        );
         assert!(
             REPLAYED.iter().any(|(m, _)| *m == model),
             "{model} is not in REPLAYED (src/formal_oracle_tests.rs)"
@@ -198,9 +207,10 @@ impl Vectors {
         }
         if !failures.is_empty() {
             panic!(
-                "{model}: Rust {rust} disagrees with Lean {lean} (formal/LamboProofs/{model}.lean) \
+                "{model}: Rust {rust} disagrees with Lean {lean} ({file}) \
                  on {n} of {total} cases of formal/oracle/{model}.json; the first:\n{first}",
                 model = self.model,
+                file = self.lean,
                 rust = f.rust,
                 n = failures.len(),
                 total = f.cases.len(),

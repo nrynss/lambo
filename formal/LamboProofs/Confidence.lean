@@ -23,7 +23,7 @@ Model of `src/recall/confidence.rs`:
   `KeywordLeg` walk over the ranked search (`best_bm25`, `matched`,
   `exact_name`), the keyword loop cut to `limit * KEYWORD_OVERFETCH`
   (`KEYWORD_OVERFETCH = 4`) and the exact-name step that raises the named
-  concept's keyword slot to `max(BM25, 1.0)` (#288; `Fusion.lean` models
+  concept's keyword slot to `max(BM25, 1.0)` (#288; `Fusion/Max.lean` models
   that step's effect on ranking);
 * the caller in `src/daemon/mod.rs` (`Route::Text` gets `provisional`, the
   other routes `None`) and the median it passes,

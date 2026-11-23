@@ -1,5 +1,5 @@
 /-
-# Oracle vectors for `Fusion.lean`: RRF
+# Oracle vectors for `Fusion/Rrf.lean`: RRF
 
 `Fusion.RrfRecall`: each candidate's exact RRF value (`rrf`, a fraction) and
 its position in `rank`'s output (`rrfAhead`), against `rank` in
@@ -33,7 +33,7 @@ model calls both `0` and orders them by the tie-break. The Rust now sums
 from `+0.0` and agrees with the model. Those cases (`zeroTie`) keep their
 own function, as #328's regression cases.
 -/
-import LamboProofs.Fusion
+import LamboProofs.Fusion.Rrf
 import OracleExport.Gen
 import OracleExport.Order
 
@@ -133,7 +133,7 @@ def vectors : Vectors := run seed do
   let cases ← many 250 (genCase false)
   let zeros ← many 30 (genCase true)
   return {
-    model := "Fusion", seed
+    model := "Fusion", file := some "Fusion/Rrf.lean", seed
     notes := [
       "RrfRecall.rrf (an exact fraction [num, den]) and RrfRecall.rrfAhead (the output order) against rank under FusionKind::Rrf.",
       "members: id (Uuid pair (2,id)), key (a concept with that canonical_key; null: an id in no graph), keyword and vector leg scores at scale 1000, recent_rank (the model's recentRank of a generated recentIdx, written into the input because rank reads LegScores::recent_rank).",

@@ -1,6 +1,6 @@
 {
 "model": "Fusion",
-"lean": "formal/LamboProofs/Fusion.lean",
+"lean": "formal/LamboProofs/Fusion/Rrf.lean",
 "generator": "formal/OracleExport/Main.lean",
 "seed": 77332283477838,
 "notes": [

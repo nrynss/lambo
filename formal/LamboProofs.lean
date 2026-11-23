@@ -14,7 +14,8 @@ import LamboProofs.Reserve
 import LamboProofs.Contract.Stamp
 import LamboProofs.Contract.Reembed
 import LamboProofs.Contract.Store
-import LamboProofs.Fusion
+import LamboProofs.Fusion.Max
+import LamboProofs.Fusion.Rrf
 import LamboProofs.Confidence
 import LamboProofs.Canonical
 import LamboProofs.Dispatch

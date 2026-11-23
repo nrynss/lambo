@@ -83,6 +83,10 @@ structure Fn where
 /-- One model's vector file. -/
 structure Vectors where
   model : String
+  /-- The model file under `formal/LamboProofs/`, when it is not
+  `<model>.lean` (a model split into a directory names the part the
+  vectors exercise). -/
+  file : Option String := none
   seed : UInt64
   /-- How each abstract parameter of the model was instantiated, and any
   restriction on the inputs; free text, for people. -/
@@ -98,7 +102,7 @@ def Vectors.render (v : Vectors) : String := Id.run do
   let q (s : String) : String := (toJson s).compress
   let mut out := "{\n"
   out := out ++ s!"\"model\": {q v.model},\n"
-  out := out ++ s!"\"lean\": {q s!"formal/LamboProofs/{v.model}.lean"},\n"
+  out := out ++ s!"\"lean\": {q s!"formal/LamboProofs/{v.file.getD (v.model ++ ".lean")}"},\n"
   out := out ++ s!"\"generator\": {q "formal/OracleExport/Main.lean"},\n"
   out := out ++ s!"\"seed\": {v.seed.toNat},\n"
   out := out ++ "\"notes\": [\n"
