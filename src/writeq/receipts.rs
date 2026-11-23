@@ -781,13 +781,13 @@ impl ReceiptAnswer {
                                               order. Fetch this receipt id there to learn the \
                                               outcome, or recall."
                 .into(),
-            ReceiptAnswer::CloseUnflushed => "close could not confirm this write was saved (its \
-                                              final flush did not finish, or the store rejected \
-                                              the batch that carried its intent) — this write \
-                                              was not applied before the session closed, and it \
-                                              may or may not have been saved as an intent for \
-                                              the next serve to re-attempt. Recall before \
-                                              re-deriving."
+            ReceiptAnswer::CloseUnflushed => "close could not confirm this write was saved — this \
+                                              write was not applied before the session closed. \
+                                              If the close's final flush did not finish, it may \
+                                              or may not have been saved as an intent for the \
+                                              next serve to re-attempt; if the store rejected \
+                                              the batch that carried its intent, it was not \
+                                              saved. Recall before re-deriving."
                 .into(),
             ReceiptAnswer::Dropped(why) => {
                 format!("DROPPED before it was attempted, nothing was written — {why}")

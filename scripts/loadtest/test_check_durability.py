@@ -303,7 +303,8 @@ class ClassifyTest(unittest.TestCase):
         # own answer, distinct from intent_durable.
         tag, _ = self.mod.classify(
             "close could not confirm this write was saved — this write was not applied before the "
-            "session closed, and it may or may not have been saved"
+            "session closed. If the close's final flush did not finish, it may or may not have "
+            "been saved"
         )
         self.assertEqual(tag, "close_unflushed")
         tag, _ = self.mod.classify("not applied before this session closed — the validated")
