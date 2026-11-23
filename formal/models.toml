@@ -316,11 +316,12 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Supersession/Suspected.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:e264b666867848ff31ed4ada4fce67c8ecd115854ee5abe440bfd465a7271c31"
+read_digest = "v2:sha256:0c943166764a740149cc051c54acce66d3e426d8fe65ddb3d95d4a010e777fcc"
 rust = [
   "src/graph/suspected.rs",
   "src/graph/suspected/slot.rs",
   "src/graph/suspected/replacement.rs",
+  "src/types/mod.rs#ConceptType",
 ]
 
 # The #20 canon pass and the evidence it reads.
@@ -366,7 +367,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Policy/Support.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:bd9f9fd77cb9d3e49bc24c0dc5d700484758fcc14ddab4e8b0f09c55556ac9c2"
+read_digest = "v2:sha256:ee76d319cfb0349bfe58c08bb8ed5b6401cdc0d1e128ea1eeadcc078a4f603ab"
 rust = [
   "src/canon/policy.rs#supporting_interaction_times",
   "src/canon/policy.rs#recurrence_sessions",
@@ -383,6 +384,7 @@ rust = [
   "src/canon/stage1.rs#counts_with",
   "src/canon/stage1.rs#dependent_origin",
   "src/canon/stage1.rs#Credit",
+  "src/types/mod.rs#EdgeType",
 ]
 
 # The score, bands, admission and `PromotionPolicy`, and how the evaluator
@@ -390,9 +392,10 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Policy/Score.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:650f940c63e6f2378f69fa34d40b82a9962339ed490562d12c283d96585ae092"
+read_digest = "v2:sha256:0610c61fcd10bf222057643da6bebadf652c051218b21fba653339122cf18dc1"
 rust = [
   "src/canon/policy.rs",
+  "src/types/mod.rs#ConceptType",
   "src/types/mod.rs#eviction_resistance",
   "src/canon/eval.rs#Evaluator::gather",
   "src/canon/eval.rs#apply",
@@ -403,11 +406,12 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Conflict/Detect.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:45de244dd0a5e964c671405a6b960c7bb05d6422484926c39b8410fd556510bf"
+read_digest = "v2:sha256:4c4ad5b8b2ffbfc52711ccd673fcba3b7e6daeee5f9384c8d0902653c2c61148"
 rust = [
   "src/daemon/conflict.rs",
   "src/daemon/hotlist.rs#HotList::revalidate",
   "src/graph/graph.rs#record_edge",
+  "src/types/mod.rs#EdgeType",
 ]
 
 # Contradiction dating, over conflict.rs's write-time attribution.
