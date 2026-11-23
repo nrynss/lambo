@@ -92,13 +92,25 @@ have named the dependents and, where the change is still needed, said why:
    makes the ruling load-bearing and earns it promotion; plain text in your
    content does not.
 3. **Name what you showed to be wrong.** When your concept contradicts one
-   already in memory, put that concept's id in `against`. Do not cite and
-   contradict the same concept in one call. Never `against` a candidate the
-   receipt marks `newer`.
+   already in memory, put that concept's id in `against`. One concept cannot
+   list the same target in both its `depends_on` and its `against`: the server
+   refuses the whole call. Another concept in the same call may cite what this
+   one contradicts. Never `against` a candidate the receipt marks `newer`: it
+   may replace your concept, not the other way round. The server does not
+   check this one, so it is up to you.
 4. **Name only standing rulings.** Give a short lowercase kebab-case `name`
    (`<domain>-<subject>`) only to a settled `logic` or `constraint` that later
    work will cite. Never name observations or file paths: a name is reserved
-   for good.
+   for good. The server checks neither the shape nor what you name; it
+   compares names by a normalized key. Word order, case, `-`, `_` and spaces,
+   camelCase splits, word endings and the stopwords (the, a, an, for, of, at,
+   in, to, on, and, or, is, are) do not tell names apart, so
+   `single-writer-lease`, `lease writer single` and `SingleWriterLeases` are
+   one name, and `the-lease` is `lease`. The first spelling to take a key owns
+   it: a later name with the same key for another concept, or with the same
+   key as another concept's content, is refused. Cite a name by its original
+   spelling, never by its normalized key, which can key differently when typed
+   back.
 5. **Record actions when work lands.** Call `lambo_record_action` with a short
    line (`merged PR #52`, `review round 2 closed`, `released 1.4.0`), what it
    `produces` and `modifies`, and the ids it relied on in `depends_on`.
