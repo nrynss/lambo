@@ -64,7 +64,7 @@
 //! Backends are **Level B** pluggable: Cargo features compile adapters in, and
 //! `lambo.toml` or the environment selects among them at runtime. One binary
 //! carries every adapter it was built with. See
-//! `dev-diary/notes/level-b-pluggability.md`.
+//! `docs/reference/config.mdx` ("Features").
 //!
 //! Implement [`GraphStore`] for durable storage and [`Embedder`] for vectors.
 //! A store declares what it can do through [`Capabilities`]: only a store

@@ -2385,7 +2385,7 @@ mod tests {
         // §5.7 requires every concept to have a Derives edge (interaction -> concept).
         // If blast_radius counted that inbound edge as "another source", every concept
         // would look non-orphaned and blast radius would be ~0. It must ignore
-        // provenance (Derives/Temporal) edges (see Handoff Log T1.4).
+        // provenance (Derives/Temporal) edges (T1.4).
         let store = MemoryStore::new();
         let sid = SessionId::from("br-provenance");
         let ts = Utc::now() - chrono::Duration::hours(1);

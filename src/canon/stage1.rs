@@ -21,7 +21,7 @@
 //! Canonical concepts are never candidates. There is **no peer minimum and no
 //! percentile cut**: the spec's "20 non-Canonical peers and strictly above
 //! P90" was a quota, and a quota moves with whatever else the session holds.
-//! Measured on a rig snapshot (design note `design-36-canonization.md`),
+//! Measured on a rig snapshot (#36's design analysis),
 //! replaying recall traffic at k = 0/1/2 moved the P90 Canonical count
 //! 68/74/78 and flipped which fair-test ruling reached Venerable; the evidence
 //! floor gave the same set every time. A young or small session (fewer than

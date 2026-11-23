@@ -1,8 +1,8 @@
 # Driving `lambo serve` under load and under real models (C-series)
 
 Two families of harness live here, and they answer different questions. The
-C-series capture is written up in
-[dev-diary/notes/concurrency-capture.md](../../dev-diary/notes/concurrency-capture.md).
+C-series capture's results are in
+[evidence/concurrency/](../../evidence/concurrency/).
 
 **Synthetic (C1–C3)** drives `lambo serve --transport http` with K concurrent
 MCP clients under a weighted valid + adversarial mix, pulls SIGTERM while load

@@ -2,8 +2,8 @@
 //!
 //! On a canonical-key miss ([`CanonicalizeResult::Unmatched`]) under
 //! `MatchStrategy::Hybrid`, this module embeds the concept **with context**
-//! (name + origin interaction text — the live BGE-M3 calibration rule; see
-//! `dev-diary/PHASE-7-embeddings.md`), queries [`GraphStore::vector_candidates_checked`],
+//! (name + origin interaction text — the live BGE-M3 calibration rule, set in
+//! phase 7), queries [`GraphStore::vector_candidates_checked`],
 //! and — when a candidate sits at or above `semantic_match_threshold` — records
 //! the merge as a decaying [`EdgeType::Semantic`] edge to the matched concept.
 //! Below the threshold, or when the **store capability** is absent, it degrades
@@ -16,8 +16,8 @@
 //! refusal or timeout is a *per-input* surprise: before this rule, the concept
 //! was applied with `embedding: NULL`, reported to the caller as an unqualified
 //! success, and became unfindable by semantic recall — the located mechanism
-//! behind the dogfood store's 92/100 unembedded concepts (DOGFOOD-FINDINGS
-//! 2026-08-20) and behind the ack path's estimator poisoning (a 3 ms non-embed
+//! behind the dogfood store's 92/100 unembedded concepts (a dogfood
+//! finding of 2026-08-20) and behind the ack path's estimator poisoning (a 3 ms non-embed
 //! sampled as a fast write inflated the drain rate 20–45× and abandoned 326/361
 //! acked writes). *Applied without its vector* is not a lesser success; it is a
 //! different outcome, and the caller decides what to do with it — retry,
@@ -125,7 +125,7 @@
 //! for every row the product itself wrote: the live-CockroachDB review measured
 //! **0 of 13** organic concepts with a vector, so recall's vector leg could never
 //! fire on organically-derived memory — only out-of-band seeding produced
-//! vectors (`adversarial-review/adve-review-t8.2-t8.3-live.md`).
+//! vectors (the T8.2/T8.3 live review).
 //! Persisting the vector is what makes derived memory vector-recallable. Arms
 //! where no vector exists still write `None` — a vector is never invented.
 //!

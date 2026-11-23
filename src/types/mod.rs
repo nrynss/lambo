@@ -1,6 +1,6 @@
 //! Core Lambo types.
 //!
-//! Spec: lambo-hackathon-spec-v0.1.md §§3–6, graph model §5.
+//! Originally spec §§3–6 (graph model §5).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -895,7 +895,7 @@ pub enum Mutation {
         embedding: Option<EmbeddingContract>,
     },
     /// A validated, acked background write that has not yet been applied
-    /// (durable intents — `dev-diary/lambo-for-mooshik/J3-durability-redesign.md`).
+    /// (J3 durable intents).
     ///
     /// Appended at **ack** time by the write pipeline, through this same
     /// write-behind log, so the C-series "session closed, tail durable"

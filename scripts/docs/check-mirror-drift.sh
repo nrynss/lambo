@@ -11,8 +11,8 @@
 # The two copies of each pair are meant to carry the SAME shared prose, but they
 # are deliberately NOT byte-identical files: the site copies add Astro component
 # imports and a `/lambo/...` link prefix, and mcp.mdx's site copy carries a whole
-# "Verified clients" / managed-CockroachDB section the docs copy does not (see the
-# correction in dev-diary/lambo-for-mooshik/J-multi-client.md, J2 round-1 review).
+# "Verified clients" / managed-CockroachDB section the docs copy does not
+# (a deliberate difference, not drift).
 # A raw `diff` of the pair would therefore be red the day it landed.
 #
 # So this gate compares each pair's canonical "shared prose" form: it strips the

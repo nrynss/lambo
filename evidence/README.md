@@ -29,6 +29,7 @@ Research experiments and their adoption decisions are indexed in
 | Path | What it shows |
 |---|---|
 | [`issue-22-eg2/`](issue-22-eg2/) | EmbeddingGemma 2 on llama.cpp b11517 (#22 PR 5): the live test passing for text and images, the no-projector refusal, what `/props` reports, the default-ubatch cap on the image budget that the adapter refuses, and the design 7.3 ranking-parity table. |
+| [`157-layer-tuning/`](157-layer-tuning/) | The #157 sweep behind the BGE-M3 layer defaults (`weight = 0.5`, `min_similarity = 0.50`) and the absolute-cosine admission rule: setup, aggregate CSVs and the selected operating point. A calibration test reads its corpus size. |
 
 ## Performance
 

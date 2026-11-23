@@ -111,8 +111,8 @@ pub const HIERARCHICAL_WEIGHT: f64 = 0.5;
 /// `ConceptType` assigned to contents that appear only in [`ParentOf`] pairs.
 /// `derive`'s caller supplies types only for the `concepts` argument; a
 /// parent/child that does not already exist must still become a concept, and
-/// `Entity` is the generic default (documented decision — the handoff log in
-/// `dev-diary/PHASE-2-graph-core.md`).
+/// `Entity` is the generic default (a deliberate decision, recorded at
+/// T2's handoff).
 pub const PARENT_OF_CONCEPT_TYPE: ConceptType = ConceptType::Entity;
 
 /// Declaration of `Hierarchical` parent→child relationships for one [`derive`](fn@derive)

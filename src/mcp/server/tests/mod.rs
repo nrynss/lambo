@@ -161,7 +161,7 @@ fn tools(s: &LamboServer) -> Vec<rmcp::model::Tool> {
 /// `ToolRouter::call`: building a `RequestContext` needs a live `Peer`, and
 /// the protocol path (handshake, `tools/list`, `tools/call` dispatch) is
 /// covered end-to-end by the real Claude Code client run captured in
-/// `dev-diary/evidence/t8.2-mcp-client/`, which is stronger evidence than a
+/// `evidence/mcp-client-stdio/`, which is stronger evidence than a
 /// hand-built context would be.
 /// Drive a tool and, for a J3 write, **wait for it to be applied** before
 /// returning.

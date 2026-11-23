@@ -31,6 +31,10 @@ class PathClassification(unittest.TestCase):
             "evidence/issue-221/repro-8concept-qwen3-4b-2560.json",
             "evidence/issue-221/repro-8concept-qwen3-4b-1024.json",
             "evidence/issue-237/calibration-elastic-jina-v3-1024.json",
+            "evidence/157-layer-tuning/README.md",
+            "evidence/issue-221/runs/qwen3-4b-2560.json",
+            "evidence/issue-221/runs/qwen3-4b-1024.json",
+            "evidence/issue-237/runs/elastic-jina-v3-1024.json",
             # include_str!'d by src/formal_constants_tests.rs (#291).
             "formal/LamboProofs/Hotlist.lean",
             # include_str!'d by src/formal_oracle_tests.rs (#291).
@@ -56,7 +60,7 @@ class PathClassification(unittest.TestCase):
 
     def test_unrelated_docs_and_evidence_stay_lightweight(self):
         self.assertEqual(classifier.classify_paths([
-            "README.md", "dev-diary/handoff.md", "site/src/components/MdxNote.astro",
+            "README.md", "docs/operations/dogfood-rig.md", "site/src/components/MdxNote.astro",
             "evidence/issue-221/README.md", "scripts/loadtest/mcp_load.py",
             # formal/ outside the models the Rust tests read (#291).
             "formal/README.md", "formal/lakefile.toml", "formal/lean-toolchain",

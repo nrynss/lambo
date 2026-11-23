@@ -241,7 +241,7 @@ pub fn score(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
 /// score. [`score`], which recall ranking, the daemon score table and
 /// canonization Stage 1 use, has no session-wide term either: there too an
 /// access moves only the accessed concept's score.
-/// Evidence and method: `dev-diary/notes/issue-30-access-count.md`.
+/// Evidence and method: #30.
 pub fn score_over_live_dimensions(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
     let w = weights.sanitized();
     let live_total = w.recency + w.session_activity + w.density;

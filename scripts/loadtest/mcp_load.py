@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Concurrency-capture load driver for `lambo serve` over streamable HTTP MCP.
 
-C1 of the concurrency capture (dev-diary/notes/concurrency-capture.md). Drives
+C1 of the concurrency capture (results in evidence/concurrency/). Drives
 `lambo serve --transport http` with K concurrent clients issuing a weighted mix
 of valid and adversarial tool calls, and records EVERY response to a JSONL
 ledger. The ledger is the ground truth for the C2 SIGTERM capture and the C3

@@ -29,9 +29,9 @@ Model of
   Stage 2's span still read the dependent's origin, which is what
   `dependentOrigins` models.
 
-The design is `dev-diary/lambo-for-mooshik/C-solopolicy.md` (spec §3.2's
-formula, with the valid-action term replaced by dependent interactions in #36
-PR 3) and `D-event-clock.md` (event time).
+The design is spec §3.2's formula, with the valid-action term replaced by
+dependent interactions in #36 PR 3, over the event time of
+`src/canon/event_time.rs`.
 
 ## Model
 

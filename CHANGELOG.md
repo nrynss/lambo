@@ -32,6 +32,14 @@
   third. `scripts/formal/count-theorems.py` counts the theorems by the rule
   `formal/README.md` states (2,486 with the #345 and #346 models below; the
   README said 2,393 for files it counts as 2,394).
+- Repository: the frozen v0.1 hackathon spec (`lambo-hackathon-spec-v0.1.md`)
+  and the `dev-diary/` tree are removed. Lambo has outgrown both, and agents
+  read them as rules. The source and the reference docs are the authority;
+  the dogfood rig runbook moved to `docs/operations/dogfood-rig.md` and the
+  backend design rules to the Features section of `docs/reference/config.mdx`.
+  The originals stay in git history (for example at `v0.15.0`), which is what
+  remaining `spec §N` and `dev-diary/` citations in comments, earlier entries
+  here and `evidence/` refer to.
 
 ### Fixed
 
