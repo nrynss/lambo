@@ -536,7 +536,7 @@ fn policy() {
 fn conflict() {
     use crate::daemon::conflict::CONFLICT_RECENCY_WINDOW;
 
-    let lean = Lean::new(model!("Conflict"));
+    let lean = Lean::new(model!("Conflict/Detect"));
     // Seconds.
     assert_pin!(
         CONFLICT_RECENCY_WINDOW,

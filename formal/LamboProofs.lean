@@ -18,7 +18,8 @@ import LamboProofs.Canonical
 import LamboProofs.Dispatch
 import LamboProofs.Supersession
 import LamboProofs.Policy
-import LamboProofs.Conflict
+import LamboProofs.Conflict.Detect
+import LamboProofs.Conflict.Contradiction
 import LamboProofs.Hotlist
 import LamboProofs.Drain.Base
 import LamboProofs.Drain.Replay

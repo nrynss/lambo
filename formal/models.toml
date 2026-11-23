@@ -328,15 +328,28 @@ rust = [
   "src/canon/stage1.rs#Credit",
 ]
 
-# Left out: the cases in src/daemon/contradiction/tests.rs.
+# Conflict detection, and the hot list's re-validation of it. Left out: the
+# cases in src/daemon/contradiction/tests.rs.
 [[model]]
-lean = "formal/LamboProofs/Conflict.lean"
-read_against = "514da8d7"
-read_digest = "v2:sha256:ca35102588cabb1e8084a7453e9b93ee45fbb92a432d9fc30214af76dd3eef7c"
+lean = "formal/LamboProofs/Conflict/Detect.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:45de244dd0a5e964c671405a6b960c7bb05d6422484926c39b8410fd556510bf"
 rust = [
   "src/daemon/conflict.rs",
-  "src/daemon/contradiction.rs",
   "src/daemon/hotlist.rs#HotList::revalidate",
+  "src/graph/graph.rs#record_edge",
+]
+
+# Contradiction dating, over conflict.rs's write-time attribution.
+[[model]]
+lean = "formal/LamboProofs/Conflict/Contradiction.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:68ca46f26bcd606fe2fab8ddca9e5debf3457f39ed45ff9c13b8bd94d4d55c9f"
+rust = [
+  "src/daemon/contradiction.rs",
+  "src/daemon/conflict.rs#WriterTimeline",
+  "src/daemon/conflict.rs#attribute_at",
+  "src/daemon/conflict.rs#edge_writers",
   "src/graph/graph.rs#record_edge",
 ]
 

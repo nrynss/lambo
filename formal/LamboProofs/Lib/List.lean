@@ -52,7 +52,7 @@ theorem eq_of_nodup_map {α β : Type} (f : α → β) :
 
 /-! ## Lengths of filters and of duplicate-free lists
 
-Moved from `Conflict.lean`, `Fusion.lean`, `Hotlist.lean`. -/
+Moved from `Conflict.lean` (now `Conflict/Detect.lean`), `Fusion.lean`, `Hotlist.lean`. -/
 
 theorem length_filter_mono {ι : Type} {l : List ι} {p q : ι → Bool} (h : ∀ x, p x = true → q x = true) :
     (l.filter p).length ≤ (l.filter q).length := by
