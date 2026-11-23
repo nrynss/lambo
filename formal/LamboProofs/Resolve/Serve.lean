@@ -51,8 +51,9 @@ Boundary: exit codes are modelled only where `main` and `serve_preflight`
 choose them; a command body's own exit codes (`CliError::exit_code`,
 `canon_exit`), `run_canon`, `serve-web`'s session, host and credential
 planning (an input, `MainIn.webPlan`; its bind check is modelled, with
-"has a credential" an input, `MainIn.webCredential`), tracing setup, `[serve]`'s unenforced-key notice and
-`session verify`'s `ServeConfig::validate` are not. Path matching, `~` and
+"has a credential" an input, `MainIn.webCredential`), tracing setup,
+`[serve]`'s unenforced-key notice and `session verify`'s
+`ServeConfig::validate` are not. Path matching, `~` and
 symlinks in stdio session selection are not modelled. Tokens are byte lists
 with a UTF-8 flag and ASCII whitespace; Rust's `str::trim` also trims non-ASCII
 whitespace, which can change the reason given for a refused token but never
