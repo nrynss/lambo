@@ -4,6 +4,9 @@ This directory holds a Lean 4 development that models parts of the Lambo engine
 and proves properties the source states in its doc comments and pins in its
 tests. It has no dependencies beyond Lean itself (no Mathlib).
 
+See [Formal verification with Lean](../docs/reference/formal-verification.mdx)
+to understand the modeled guarantees and run the local checks.
+
 ## Status: machine-checked
 
 `lake build` passes on Lean `v4.36.0` with no errors, no warnings and no
@@ -170,11 +173,11 @@ A proof here is about the *model* in the same file, not about the Rust code.
 The link between the two is the reading of the source recorded in each file's
 header, and it is only as good as that reading. In particular:
 
-* Arithmetic is exact. `Score.lean` uses fixed-point integers; `f64` rounding
-  and overflow are outside the model (the header says where that matters).
-* Concurrency is not modelled. The lease, receipt and reservation files prove
-  properties of sequences of atomic operations; that each operation is atomic
-  is the job of the store transaction or the lock, and is assumed.
+* Some numerical models use exact arithmetic. The bounds in `Score.lean`
+  apply to its fixed-point integer representation.
+* The lease, receipt and reservation models assume atomic operations under a
+  store transaction or lock. The worker, registry and tiered index models
+  cover interleavings represented by their event sequences.
 * Several algorithms are modelled from their inputs onward or without a path
   that does not affect the stated results; each header lists what it leaves
   out. Where a model's statement holds only in exact arithmetic, the header

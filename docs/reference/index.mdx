@@ -3,17 +3,17 @@ title: "Lambo"
 description: "Agentic graph memory for multi-agent work"
 ---
 
-Lambo is agentic graph memory for multi-agent work. It runs as an MCP server that stores what your agents learn, recalls relevant memory, and coordinates edits, with a background process that promotes concepts to canonical facts as they earn it.
+Use Lambo to share memory across coding agents. Agents can record what they learn, recall past decisions, and check dependencies before editing shared work. Lambo promotes concepts when they meet the promotion policy’s evidence requirements.
 
 <CardGroup cols={2}>
   <Card title="Installation" icon="download" href="/installation">
     Install the binary, write a lambo.toml, and run it the first time.
   </Card>
   <Card title="MCP tools" icon="wrench" href="/mcp">
-    The nine MCP tools your agents call, with arguments and limits.
+    Find tool arguments, limits, and write receipt states.
   </Card>
   <Card title="Command line" icon="terminal" href="/cli">
-    The same operations from the terminal.
+    Read sessions, run one-shot writes, and administer a store.
   </Card>
   <Card title="Configuration" icon="gear" href="/config">
     The lambo.toml keys, features, and provisioning.
@@ -25,6 +25,9 @@ Lambo is agentic graph memory for multi-agent work. It runs as an MCP server tha
     The Rust API for embedding Lambo in a program.
   </Card>
   <Card title="End to end" icon="diagram-project" href="/end-to-end">
-    How the parts fit together, including running a swarm.
+    Write and recall memory, then connect agents to the same session.
+  </Card>
+  <Card title="Formal verification with Lean" icon="code" href="/formal-verification">
+    Find the model guarantees, assumptions, and checks you can run locally.
   </Card>
 </CardGroup>

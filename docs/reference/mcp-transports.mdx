@@ -1,0 +1,85 @@
+---
+title: "Choose an MCP transport"
+description: "Compare stdio and Streamable HTTP, connect clients, and move an existing session to a shared writer."
+---
+
+Use stdio when you want a local MCP client to launch Lambo. Use Streamable HTTP when independent clients need a stable server address or you want a writer that stays up after clients close. Lambo enforces the same single-writer lease per session with either transport.
+
+## Compare stdio and Streamable HTTP
+
+Choose based on who should start the writer and how clients should select a session.
+
+| Decision | stdio | Streamable HTTP |
+| --- | --- | --- |
+| Who starts Lambo | The MCP client launches a local process. The client that launches the writer controls its lifetime. | You start Lambo separately. The writer can stay up as clients connect and disconnect. |
+| Where clients run | On the machine that launches the process. A second local stdio process can forward to an eligible writer over a private Unix socket. | On the same machine or over a network. Clients connect to a server URL. |
+| How a client reaches a session | Each launched process selects one session. Use `--session`, a matching `[[serve.projects]]` entry, or `default_session`. | One server can hold several sessions. Use `/mcp/s/<session>` for an explicit session or `/mcp` for the server's default session. |
+| How clients get access | The client starts the process under a local account. Forwarding uses a private per-user socket. | Loopback accepts unauthenticated requests by default. A non-loopback bind requires a bearer credential. |
+
+{/* code: src/main.rs Commands::Serve transport, src/config/serve/projects.rs select_stdio_session, src/mcp/endpoint.rs SessionEndpoint::for_store, src/mcp/serve/transport.rs session_router, src/mcp/serve/http_guards.rs authorize_bind */}
+{/* test: tests/serve_proxy_multi_client.rs two_clients_over_stdio_both_work_through_one_hub; tests/serve_multi_session.rs one_hub_serves_two_pinned_sessions_fenced_proxied_and_released, stdio_session_count_is_refused_before_any_backend; tests/serve_bind_preflight.rs an_exposed_bind_without_a_credential_is_refused_before_any_backend */}
+
+For a single local client, stdio keeps startup in the client configuration. For several independent clients sharing sessions, HTTP gives each client a stable URL and lets you restart the writer separately.
+
+## Connect with stdio
+
+Configure your MCP client to launch the following command. Use absolute paths for the executable, the configuration file, and a local SQLite database. See [Connect an MCP client](/installation#connect-an-mcp-client) to register a stdio command.
+
+```bash
+/path/to/lambo --config /path/to/lambo.toml serve \
+  --session demo --agent stdio-writer --transport stdio
+```
+
+For one client registration across projects, omit `--session` and configure `[[serve.projects]]`. Lambo uses the directory where the client launches it, with `default_session` as a fallback. See [Choose a stdio session](/config#choosing-a-stdio-serves-session) to configure project and worktree paths.
+
+## Connect with HTTP
+
+Start the writer. The example uses the default loopback bind at `127.0.0.1:7700`.
+
+```bash
+lambo --config lambo.toml serve --transport http \
+  --session demo --agent http-writer
+```
+
+In your client, select Streamable HTTP and enter `http://127.0.0.1:7700/mcp/s/demo`. For this single-session example, `http://127.0.0.1:7700/mcp` reaches the same session. Run `lambo_stats` from the client and confirm that it reports `demo`.
+
+To serve several sessions, repeat `--session` or list them in `[serve] sessions`. Give each project the URL for its session. HTTP uses the request URL for routing. See [Several sessions in one serve](/cli#several-sessions-in-one-serve) to choose the default and configure on-demand sessions.
+
+A configured HTTP credential requires a bearer token even on loopback. Lambo listens over plain HTTP. For clients on another machine, use a TLS-terminating reverse proxy or an encrypted tunnel. See [HTTP authentication](/config#authentication) to configure a token and [Credentials](/config#credentials) to scope it to specific sessions.
+
+See [Operate a shared HTTP writer](/operate-http-writer) to supervise this process, check its health, and back up its store.
+
+For browser access to durable session data, use `lambo serve-web`. See [Read-only window views](/config#read-only-window-views) to configure browser access.
+
+## Switch an existing session to HTTP
+
+Keep the same persistent store, session ID, and embedder configuration to serve the existing memory.
+
+1. Pause writes through the stdio clients.
+2. Check outstanding write receipts with `lambo_stats`.
+3. Close the clients that launch stdio servers for the session. Let the old writer finish its shutdown.
+4. Run `lambo --config lambo.toml stats --store` to confirm the old writer has released the session lease.
+5. Start the HTTP writer with the existing session ID.
+6. Replace the stdio command with the HTTP URL in each client's active configuration. Check the project and user scopes for entries that still launch the old command.
+7. Reconnect the clients and confirm the session with `lambo_stats`. Recall a known concept before resuming writes.
+
+## Use stdio with an HTTP writer
+
+A local client that supports stdio can still reach an HTTP writer. If both processes identify the same persistent store and session, and the writer has a reachable private socket, the stdio process forwards to it. HTTP credentials apply to HTTP requests. Unix permissions govern local socket access.
+
+If a new stdio process starts while the HTTP writer is down, it can acquire the lease itself. A stdio process already forwarding needs a writer to reconnect to. See [Local stdio forwarding](/mcp#more-than-one-client-on-one-machine) to check socket requirements and what happens when the holder stops.
+
+## Diagnose a connection failure
+
+Check the effective client registration and the server log first. Use `lambo stats --store` with the same persistent-store configuration to see each session's lease holder.
+
+| Symptom | What to check |
+| --- | --- |
+| The command or URL is rejected by the client | Check the registration format and configuration scopes your client uses. Confirm that the active entry specifies the intended transport. |
+| Stdio exits with a lease conflict | Check who holds the lease and whether both processes use the same store and session. For a local holder, check the private socket requirements. |
+| HTTP returns `401` | Check that the request includes the correct bearer token. |
+| HTTP returns `404` | Check the endpoint path and session name. Verify that the server serves the session and that the credential can reach it. |
+| HTTP returns `503` | Read the response and check `Retry-After`. For an unavailable session, check the lease holder and the attach log. A new MCP connection can also hit the server's connection limit. |
+| A write has an uncertain outcome after a disconnect | Check its receipt if you have one. Recall or inspect the session before submitting the write again. |
+
+See [MCP errors](/mcp#errors) to interpret tool responses and [Write receipts](/mcp#lambo_stats) to check pending writes.

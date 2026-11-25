@@ -5,17 +5,15 @@ description: "How a concept earns Candidate, Venerable and Canonical status, und
 import Note from '../../components/MdxNote.astro';
 import Mermaid from '../../components/Mermaid.astro';
 
-Canonization is how Lambo decides which memories are load-bearing. No agent can declare a concept canonical. A background loop measures what other work rests on each concept and promotes it one stage at a time when the evidence clears that stage's gate.
-
-This page has two readers. If you write agents, read [The ladder](#the-ladder), [The gates](#the-gates) and [What agents see](#what-agents-see). If you run Lambo, read on through [Swarm and Solo](#swarm-and-solo), [Supersession](#supersession), [Timing](#timing) and [Operator tools](#operator-tools).
+Lambo promotes a concept one stage at a time as it meets the promotion policy’s evidence requirements. Canonical status marks concepts that other work depends on.
 
 <Note>
-Where the Lean 4 models in [`formal/`](https://github.com/nrynss/lambo/tree/main/formal) cover a rule on this page, the rule is checked against them; the rest are read from the code. The promotion thresholds are the models' constants, which a Rust test pins equal to the shipped code. The worked examples are cases the Lean definitions evaluated, and a Rust test replays each one against the shipped code. The models take a gate's measurements as inputs; how a store computes blast radius or coverage is not modelled.
+Rust tests compare the promotion thresholds with the Lean model and replay the worked examples below. The model takes store measurements such as blast radius and coverage as inputs.
 </Note>
 
-## Terms
+See [Formal verification with Lean](/lambo/formal-verification/) to learn how the proofs and Rust checks fit together.
 
-These terms have one meaning on this page.
+## Terms
 
 | Term | Meaning |
 |---|---|
@@ -204,9 +202,9 @@ For example, four sessions give an Entity 4.8 (a Candidate) and an Observation 2
 
 ### Which to choose
 
-Choose **Swarm** when several agents write to the session under distinct `agent_id`s. Its Stage 1 needs three GC sweeps. A session that never takes `gc_interval` mutations (10000 by default) between sweeps is swept only on the time trigger, at most once a day, so its concepts wait days for their third sweep. {/* const: MIN_GC_SURVIVED */} {/* lean: Gc.sweepDue */} {/* code: src/config.rs Config::default, src/daemon/gc.rs GC_MAX_INTERVAL */}
+Choose `Swarm` when several agents write under distinct `agent_id` values. Stage 1 requires a concept to survive three garbage collection sweeps. If the session stays below `gc_interval`, timed sweeps still need at least `gc_idle_floor` mutations. {/* const: MIN_GC_SURVIVED */} {/* lean: Gc.sweepDue */} {/* code: src/config.rs Config::default, src/daemon/gc.rs GC_MAX_INTERVAL GC_IDLE_FLOOR */}
 
-Choose **Solo** for one writer. A concept supported on separate days can become a Candidate without any GC sweep, where Swarm refuses it until it has survived three. {/* lean: Policy.solo_admits_what_swarm_refuses */}
+Choose `Solo` for personal memory shared by your coding agents. Under this policy, a concept can become a Candidate before its first garbage collection sweep. {/* lean: Policy.solo_admits_what_swarm_refuses */}
 
 ### Solo credits a dependence to the interaction that wrote it
 
@@ -316,9 +314,9 @@ Three commands preview canonization with no writer running. Each reads a SQLite 
 
 Flags and output are in [Preview canonization](/lambo/cli/#preview-canonization).
 
-## Verifying it yourself
+## Verify the audit trail
 
-Every hop writes an audit row, and the Canonical hop records the blast radius that admitted it. {/* code: src/canon/eval.rs record, src/canon/stage3.rs stage3_passes */} You can read those rows from a client that has never heard of Lambo:
+Each status change writes a row to `canonization_events`. The promotion to Canonical records the qualifying blast radius. {/* code: src/canon/eval.rs record, src/canon/stage3.rs stage3_passes */} You can query these rows from a SQL client.
 
 - [The managed CockroachDB MCP server answering `select_query`](https://github.com/nrynss/lambo/blob/main/evidence/managed-mcp-canonization-events.md) against a live cluster, scoped to one session
 - [The same events in the database](https://github.com/nrynss/lambo/blob/main/evidence/demo-live-canon-events.txt) after a live run

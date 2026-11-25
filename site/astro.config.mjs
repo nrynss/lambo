@@ -58,9 +58,7 @@ export default defineConfig({
       editLink: {
         baseUrl: 'https://github.com/nrynss/lambo/edit/main/site',
       },
-      // Five small groups rather than one eleven-item 'References' bucket: a
-      // reader can tell from the group label whether a page is for running
-      // Lambo, calling it, or checking a claim.
+      // Group pages by what the reader is trying to do.
       sidebar: [
         {
           label: 'Start here',
@@ -74,8 +72,16 @@ export default defineConfig({
           label: 'Install and configure',
           items: [
             { label: 'Installation', slug: 'installation' },
+            { label: 'Choose an MCP transport', slug: 'mcp-transports' },
             { label: 'macOS multi-session setup', slug: 'macos' },
             { label: 'Configuration', slug: 'config' },
+          ],
+        },
+        {
+          label: 'Operate and troubleshoot',
+          items: [
+            { label: 'Operate a shared HTTP writer', slug: 'operate-http-writer' },
+            { label: 'Troubleshoot missing memory', slug: 'troubleshoot-missing-memory' },
             { label: 'Migration and memory repair', slug: 'migration' },
           ],
         },
@@ -93,6 +99,7 @@ export default defineConfig({
           items: [
             { label: 'Canonization', slug: 'canonization' },
             { label: 'End to end', slug: 'end-to-end' },
+            { label: 'Formal verification with Lean', slug: 'formal-verification' },
           ],
         },
         {

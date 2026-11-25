@@ -1,0 +1,76 @@
+---
+title: "Formal verification with Lean"
+description: "Understand what Lambo's Lean models prove and how to check them against the Rust implementation."
+---
+
+Lambo uses Lean 4 to model parts of its memory engine, including recall, graph updates, and write durability. You can use the proofs to check a rule across all inputs or event sequences that satisfy the model's assumptions.
+
+## How the models work
+
+Lean definitions describe algorithms or state transitions. Theorems state what follows from those definitions. For example, the lease model represents acquire and release as atomic operations and proves that the fencing token never decreases across a sequence of those operations. {/* lean: Lease.token_mono */}
+
+Each model's header identifies the Rust behavior it represents and the assumptions it makes. For the full theorem inventory and source map, refer to the [Lean proof README](https://github.com/nrynss/lambo/blob/main/formal/README.md#what-is-modelled-and-what-each-file-proves).
+
+## Modeled guarantees
+
+| Area | Example guarantee | Lean source |
+| --- | --- | --- |
+| Recall | Graph expansion returns exactly the nodes reachable from a candidate within the configured depth over traversable edges. When recall renders context, it fits the budget according to the estimator it used. {/* lean: Expand.expand_sound, Expand.expand_complete, Fit.fitBlocks_fits */} | [Expand](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Expand.lean), [Fit](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Fit.lean) |
+| Graph writes and names | Starting from an empty graph, modeled writes preserve acyclicity of causal and dependency edges together and of hierarchical edges separately. A bound name resolves to its original concept or returns a retired-name refusal. {/* lean: Cite.written_loadOk, Names.resolve_never_rebinds */} | [Cite](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Cite.lean), [Names](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Names.lean) |
+| Canonization and garbage collection | The canonization gate allows entry to `Canonical` only from `Venerable`. Garbage collection preserves concepts in both statuses. {/* lean: Canon.canonical_only_from_venerable, Gc.venerable_canonical_never_collected */} | [Canon](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Canon.lean), [Gc](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Gc.lean) |
+| Writer lease | After another identity takes the lease, the write fence rejects the previous holder's captured token. {/* lean: Lease.stale_token_refused */} | [Lease](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Lease.lean) |
+| Write queue and shutdown | The worker takes jobs from an initially empty lane in submission order. After the final flush completes, a write set aside during shutdown gets `intent_durable` exactly when its intent record committed. {/* lean: Receipts.lane_fifo, Drain.closeD_durable_iff */} | [Receipts](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Receipts.lean), [Drain](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Drain/Close.lean) |
+| Embedding contracts | Contracts are compatible exactly when the embedder kind, model, and vector width match. A successful full re-embed leaves every stored vector under the new contract. {/* lean: Contract.compatible_iff_eq, Contract.reembed_one_space */} | [Stamp](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Contract/Stamp.lean), [Reembed](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Contract/Reembed.lean) |
+| Backend resolution | Resolving a command builds at most one serving store and one embedder. {/* lean: Resolve.resolve_builds_at_most_one */} | [Resolve](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Resolve/Construction.lean) |
+| Tiered recall | Index-side events leave the durable store unchanged. {/* lean: Tiered.indexSide_keeps_durable */} | [Tiered](https://github.com/nrynss/lambo/blob/main/formal/LamboProofs/Tiered/Machine.lean) |
+
+## Example canonization transitions
+
+The write gate checks that an event's starting status matches the concept's current status and that the transition is legal. Lean proves both rules for the model. {/* lean: Canon.gate_some, Canon.gate_rejects_mismatch, Canon.canonical_only_from_venerable */}
+
+Lean computes the results below, and the Rust replay checks the same inputs against `Graph::apply_canonization_transition`. {/* code: src/graph/graph/transitions.rs Graph::apply_canonization_transition */}
+
+{/* oracle: Canon.json gate#43 gate#23 gate#11 */}
+
+| Concept's status | Event's from | Event's to | Result |
+| --- | --- | --- | --- |
+| Venerable | Venerable | Canonical | Canonical |
+| Candidate | Candidate | Canonical | refused |
+| None | Venerable | Canonical | refused |
+
+The second event skips `Venerable`. The third event supplies the wrong starting status.
+
+## How the checks connect to Rust
+
+| Check | What it checks |
+| --- | --- |
+| Lean build and axiom audit | CI checks the proofs with the pinned Lean toolchain, rejects proof placeholders, and limits audited theorems to Lean's standard axioms. |
+| Rust constant tests | Tests compare selected Lean constants, such as the canonization thresholds for coverage and blast radius, with the Rust definitions. {/* const: MIN_COVERAGE, MIN_BLAST_RADIUS */} |
+| Differential oracle | Lean evaluates selected definitions on reproducible inputs and exports their expected outputs. A Rust test runs the corresponding functions on those inputs and compares the results. {/* test: src/formal_oracle_tests.rs oracle */} |
+| Model drift check | A fingerprint in `formal/models.toml` records the mapped Rust source when someone last reviewed the model against it. A changed fingerprint prompts another review. |
+
+The oracle caught a ranking bug in reciprocal rank fusion. Rust sorted `+0.0` and `-0.0` separately, bypassing the tie-breaker. The replay now checks that these zero scores tie. {/* test: src/recall/candidates.rs rrf_zero_scores_tie_break_whatever_the_sign_of_zero */}
+
+## Model boundaries
+
+Each proof applies to the Lean definitions under their stated assumptions. The Rust replay checks agreement for the exported cases. Changes in mapped Rust source still call for review of the model and its assumptions.
+
+Some scoring models use exact arithmetic, so their bounds apply to that arithmetic. The lease model assumes atomic store operations. Models that describe concurrent work cover the interleavings represented by their event sequences. Canonization starts with measurements such as coverage and blast radius supplied by the store.
+
+See [End to end](/end-to-end) to follow those components through a running session.
+
+## Run the checks locally
+
+Install Lean with `elan` and make `lake` available on your `PATH`. You also need Cargo and Python 3.11 or later. Run the commands from the repository root. The `formal/lean-toolchain` file selects the Lean version.
+
+```bash
+(cd formal && lake build --wfail)
+bash scripts/formal/check-oracle.sh
+cargo test --locked --lib formal_oracle_tests::oracle
+cargo test --locked --lib formal_constants_tests
+python3 -I scripts/formal/check-model-drift.py
+```
+
+To replay the Candle batching cases, add `--features embed-candle` to the oracle test command.
+
+For the steps to review and update a model after a Rust change, refer to [Keeping the models in step with the Rust](https://github.com/nrynss/lambo/blob/main/formal/README.md#keeping-the-models-in-step-with-the-rust).

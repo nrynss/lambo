@@ -1,0 +1,81 @@
+---
+title: "Troubleshoot missing memory"
+description: "Find out why a known concept is missing from recall by checking the session, receipt, ranking, layers, and vectors."
+---
+
+If recall omits a concept you expect to find, confirm which session you read and whether the write reached it. Then use an exact lookup to distinguish missing data from ranking, layer selection, or vector search.
+
+## Confirm the session and store
+
+Call `lambo_stats` from the MCP client and check the session it reports. For HTTP, use the explicit `/mcp/s/<session>` URL to select a project. For stdio, check `--session` or the project map in the configuration the client actually loads.
+
+Check that CLI commands and the read-only browser use the same persistent store. With SQLite, compare the absolute path to the database. Use `lambo --config lambo.toml stats --store` to list durable sessions and their current lease holders. See [Choose an MCP transport](/lambo/mcp-transports/) to verify routing.
+
+{/* code: src/cli/stats.rs run_store, src/mcp/serve/transport.rs session_router, src/config/serve/projects.rs select_stdio_session */}
+
+## Check the write receipt and flush
+
+If the concept was recently written through MCP, pass the receipt to `lambo_stats`. Send the request through the session you wrote through and use the original `agent_id`, even if the write targeted a shared layer.
+
+```json
+{
+  "agent_id": "agent-a",
+  "receipt": "<write-receipt>",
+  "wait_ms": 1000
+}
+```
+
+Read `receipt.state`. With `applied` or `applied_after_restart`, check the result through the writer. With `pending` or `pending_replay`, check again. If the state is uncertain after a restart or disconnect, inspect the expected concept before you submit the write again.
+
+For an applied write visible through MCP but missing from the CLI or browser, check the writer's `log_depth` and `flush_lag_ms`. These readers see durable state after the write flushes. The browser also caches each session view for `view_ttl_ms`. See [lambo_stats](/lambo/mcp/#lambo_stats) to interpret receipts and [Read-only window views](/lambo/config/#read-only-window-views) to check the cache.
+
+{/* test: src/mcp/server/tests/receipts.rs waiting_on_a_receipt_through_lambo_stats_restores_read_your_writes */}
+
+## Inspect the concept directly
+
+Call `lambo_inspect` with a known concept ID, durable name, or text. If the write receipt returned an ID, use it as `focus`. For a concept in a shared layer, pass that layer name as `scope`.
+
+```json
+{
+  "agent_id": "agent-a",
+  "focus": "user schema"
+}
+```
+
+If inspect finds the concept, try a recall query with its exact terms or durable name. Check both `hits` and the rendered `context`. Increase `top_k` to allow more ranked hits or `max_tokens` to give the rendered context more space. See [lambo_recall](/lambo/mcp/#lambo_recall) to check ranking and context limits.
+
+If inspect cannot resolve the ID, confirm its source session. If the session is correct, check whether garbage collection or a repair removed the concept. A durable name whose target was removed remains reserved. See [Migration and memory repair](/lambo/migration/) to check whether legacy aliases or names need repair.
+
+## Check a shared layer
+
+Use `scope` on `lambo_recall` to query a configured layer by itself. For example, use `"scope": "general"`. In a merged result, read `hits[].session` to see which session each hit came from.
+
+If the direct layer lookup finds the concept but merged recall omits it, check the layer's `min_similarity` and whether the original query produced a vector match. Ordinary merged layer hits must meet the vector similarity floor. Anchored dependency traversal can include a layer dependent without that match.
+
+If recall warns that a layer is unavailable, check the layer's lease and the writer's attach log. HTTP layers must be pinned, reachable to the credential, and compatible with the project session's embedding contract. CLI readers and the browser read individual sessions. See [Layers](/lambo/config/#layers) to verify the serving configuration.
+
+{/* code: src/mcp/server/tools/recall.rs LamboServer::recall_impl, src/mcp/server/layers.rs LayerRead::Direct */}
+{/* test: src/recall/layered/tests.rs an_unavailable_layer_leaves_the_primary_answer_and_says_so */}
+
+## Check vector search
+
+Use a plain text query to check `top_legs.vector_cosine`. A number is the best vector score returned for a candidate that recall could use. A `null` means there was no usable vector score for that query. Check `warnings` and the reader or writer log to narrow down the cause.
+
+| What you observe | What to check |
+| --- | --- |
+| You use the in-memory store | Use keyword or graph recall. For vector search, choose a store that supports it and configure a semantic embedder. |
+| Writer recall uses vectors, and browser recall shows a disabled vector leg | Check `[web] embedder` and the `serve-web --no-embedder` flag. |
+| The log reports a query embedding or vector read failure | Check the embedder and vector store. Use the logged error to resolve timeouts or embedding-contract mismatches. |
+| Vector search runs but specific concepts have no vectors | Run the durable missing-vector inventory for the session. |
+| Vector search runs with the fixture embedder | Use exact keywords for the fixture setup. Choose a semantic embedder when you need recall by meaning. |
+
+Run the inventory against the same store. It reports text and image concepts without vectors in the durable snapshot.
+
+```bash
+lambo --config lambo.toml stats --session demo --missing-vectors
+```
+
+See [Re-embed stored concepts](/lambo/cli/#re-embed-stored-concepts) to distinguish a text vector backfill from changing the embedding contract. See [Repairing a canary drift](/lambo/cli/#repairing-a-canary-drift) when the configured embedder's output changed under the same contract.
+
+{/* code: src/cli/stats.rs run_with_missing_vectors, src/recall/confidence.rs top_legs */}
+{/* test: src/memory/tests/top_legs.rs a_degraded_vector_leg_reports_a_null_cosine_and_a_keyword_only_confidence */}

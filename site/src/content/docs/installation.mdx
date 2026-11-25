@@ -6,11 +6,11 @@ import Steps from '../../components/MdxSteps.astro';
 import Step from '../../components/MdxStep.astro';
 import Warning from '../../components/MdxWarning.astro';
 
-Lambo ships as a single `lambo` binary that carries both runtime surfaces: the MCP server (`lambo serve`) and the command line verbs. You deploy it in two steps. Install the binary, then write a `lambo.toml` that says which store and which embedder to use.
+Install the `lambo` binary to run commands in a terminal or serve sessions over MCP. Use `lambo.toml` to select a store and embedder.
 
-That is the whole deployment model. Every released binary carries the full `ship` adapter set. You move between the in-memory store, SQLite, CockroachDB, and PostgreSQL, or between the fixture, BGE-M3, Gemini, EmbeddingGemma 2, and Elastic (Elasticsearch Inference API) embedders, by editing config, not by downloading a different build. The one exception is the in-process candle embedder: it ships only in the Metal build for Apple silicon, described below.
+Release binaries include the `ship` feature set. You can select the in-memory store, SQLite, CockroachDB, or PostgreSQL in the configuration file. To use the in-process Candle embedder, install the Metal build for Apple silicon.
 
-Already have stored memory? Read [Migration and memory repair](/lambo/migration/) before changing binaries or repairing legacy names. It covers schema provisioning, reviewed repairs and rollback.
+See [Migration and memory repair](/lambo/migration/) to upgrade a store with existing sessions or repair legacy names.
 
 ## Install the binary
 
@@ -30,7 +30,7 @@ Each release carries one `lambo` binary per platform plus a SHA-256 checksum fil
   </Step>
 </Steps>
 
-To pin a version or choose the install directory, set the variables on `sh`, the command that reads them. `LAMBO_INSTALL_DIR` must be writable by the current user.
+Set `LAMBO_VERSION` to pin the release. To choose another install directory, set `LAMBO_INSTALL_DIR` to a directory you can write to.
 
 ```bash
 curl -fsSLo install.sh https://github.com/nrynss/lambo/releases/download/v0.15.0/install.sh
@@ -56,7 +56,7 @@ Prebuilt binaries are published for Linux and macOS; Windows support is blocked 
 
 ## Write a lambo.toml
 
-The config file picks the store and the embedder at runtime. This one needs no external services at all, because the in-memory store and the fixture embedder are both self-contained.
+Configure a local SQLite file and the fixture embedder to run Lambo without an external service.
 
 ```toml lambo.toml
 [store]
@@ -68,46 +68,39 @@ kind = "fixture"
 dim = 1024
 ```
 
-SQLite is a local file, so this still needs no external service, and it survives a restart. Create the schema once with `lambo --config lambo.toml provision`.
+Create the SQLite schema with `lambo --config lambo.toml provision`. SQLite stores the session on disk so you can read it from another process or after a restart.
 
-<Warning>
-The in-memory store lives inside one process. It is ideal for a single `lambo serve` that many agents connect to, because they all share that one process's graph. It does not survive that process exiting, and a separate command line process cannot read it. Choose `sqlite`, `cockroach`, or `postgres` whenever more than one process is involved.
-</Warning>
+The in-memory store belongs to a single process. Clients that connect to the same server can share it until that process exits. Use SQLite, CockroachDB, or PostgreSQL to share the store across separate Lambo processes.
 
-Every key has an environment variable override. See [Configuration](/lambo/config/) for the full set.
+See [Environment variables](/lambo/config/#environment-variables) to find the configuration keys you can override.
 
-<Warning>
-An adapter is compiled into the binary, but its backing service still has to be reachable at runtime. The `bge_m3` embedder needs a `llama-server`, the `gemini` embedder needs Vertex AI credentials, the `cockroach` store needs a cluster, and the `postgres` store needs a server with pgvector.
-</Warning>
+If you select an adapter with a backing service, make that service available before you start Lambo. For example, `bge_m3` needs `llama-server`, and PostgreSQL needs the `pgvector` extension.
 
 ## Run it the first time
 
-Start a server in one terminal and read from it in another.
+Write and recall a concept before you connect a client to the session.
 
 <Steps>
-  <Step title="Start a session server">
+  <Step title="Write a concept">
     ```bash
-    lambo serve --config lambo.toml --session demo --agent agent-a
-    ```
-  </Step>
-  <Step title="Write a concept from another terminal">
-    ```bash
-    lambo --config lambo.toml derive --session other --agent agent-b \
+    lambo --config lambo.toml derive --session demo --agent agent-a \
       --content "user schema" --kind entity
     ```
-    Use a second session name, because the server already holds the writer lease on `demo`.
   </Step>
-  <Step title="Read it back">
+  <Step title="Recall the concept">
     ```bash
-    lambo --config lambo.toml recall --session other --query "user schema"
+    lambo --config lambo.toml recall --session demo --query "user schema"
     ```
-    Recall is a read, so it works whether or not a server holds the session.
+
+    The output includes `user schema` and its concept type, `Entity`.
   </Step>
 </Steps>
 
-Your agent can now connect over MCP. See [MCP tools](/lambo/mcp/) for the tool surface, and [End to end](/lambo/end-to-end/) for a full walkthrough.
+See [End to end](/lambo/end-to-end/) to connect agents to an existing session and check write receipts.
 
 ## Connect an MCP client
+
+See [Choose an MCP transport](/lambo/mcp-transports/) to compare stdio and HTTP or move an existing session to a shared writer.
 
 Most MCP clients, such as Claude Code and Cursor, read an `mcpServers` configuration. Add Lambo as a server and let the client start it over stdio. Point `command` at your `lambo` binary and pass the `serve` arguments.
 
@@ -128,7 +121,7 @@ Most MCP clients, such as Claude Code and Cursor, read an `mcpServers` configura
 }
 ```
 
-The `--config` flag comes before `serve`, because it is a global flag. The `serve` flags come after. The client launches this process and talks to it over stdio, so you do not start `lambo serve` yourself when you use a client this way.
+With this configuration, your client starts `lambo serve` and connects over stdio. Set `store.path` to the absolute path of the database you provisioned so the client opens it from any working directory.
 
 Real clients drive this, not only unit tests. Claude Code and the Cursor Agent CLI each completed the handshake and tool discovery over stdio (listing all seven tools on the initial capture, before `lambo_stale` and `lambo_derive_image` were added). OMP, the Oh My Pi harness, is an MCP client out of the box. Two models drove the tools autonomously in those captures: DeepSeek Flash under OMP called derive, recall, and stats against a live CockroachDB session, and Cursor's model ran derive, record_action, recall, and stats in sequence. Pi needs its MCP adapter installed first, after which it drives the full MCP surface.
 
@@ -137,12 +130,18 @@ Real clients drive this, not only unit tests. Claude Code and the Cursor Agent C
 See [MCP tools](/lambo/mcp/#verified-clients) for the per-client breakdown.
 
 {/* lambo-site-only:end */}
-To connect over HTTP instead, start the server yourself with `--transport http` and point your client at `http://127.0.0.1:7700`.
+For HTTP, start the server in a terminal.
+
+```bash
+lambo --config lambo.toml serve --session demo --agent agent-a --transport http
+```
+
+Configure your MCP client to connect to `http://127.0.0.1:7700/mcp`.
 
 On an Apple silicon Mac, [macOS multi-session setup](/lambo/macos/) runs that HTTP server under launchd with one session per repository and wires Claude Code, Cursor and Codex to it.
 
 <Warning>
-The HTTP endpoint is a session writer, so treat it accordingly. On loopback it is unauthenticated by default. Binding anywhere else fails closed and requires a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`), which every request must then send as `Authorization: Bearer <token>`. See [Configuration](/lambo/config/#http-transport).
+HTTP clients can write to the sessions they can access. Loopback accepts connections without authentication by default. For a non-loopback bind, configure `--auth-token`, `LAMBO_AUTH_TOKEN`, or `[[serve.credential]]` and send the token in the `Authorization` header. See [HTTP transport](/lambo/config/#http-transport) to configure the listener.
 </Warning>
 
 ## Set up real embeddings
@@ -175,7 +174,7 @@ url = "http://127.0.0.1:8080"
 ```
 
 <Warning>
-Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable.
+See [Re-embed stored concepts](/lambo/cli/#re-embed-stored-concepts) to change the embedder for an existing session. If the embedder outputs changed under the same contract, see [Repairing a canary drift](/lambo/cli/#repairing-a-canary-drift).
 </Warning>
 
 ## Set up durable storage
