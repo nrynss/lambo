@@ -1004,7 +1004,7 @@ impl MemoryBuilder {
             query_embeddings: PlMutex::new(QueryEmbeddingCache::new()),
             accesses,
             writers: AsyncRwLock::new(()),
-            close_state: tokio::sync::Mutex::new(false),
+            close_state: Default::default(),
             closed: AtomicBool::new(false),
             registered: AtomicBool::new(true),
             lease_holder,

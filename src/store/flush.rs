@@ -257,6 +257,14 @@ pub struct FlushStats {
     pub dead_lettered: u64,
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+struct DrainPause {
+    reached: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+    panic_on_resume: bool,
+}
+
 /// Lock-light state shared between the running task and the caller's stats
 /// handle. `caught_up` is a `Mutex<Instant>` (held for nanoseconds inside
 /// `stats`); `started`/`depth`/`degraded`/`dead_lettered` are atomics.
@@ -281,7 +289,7 @@ struct Shared {
     /// `Notify` and waits on the second, so a test can observe the stats in
     /// the window between the drain and the rest of the cycle.
     #[cfg(test)]
-    drain_pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    drain_pause: Mutex<Option<DrainPause>>,
 }
 
 impl Shared {
@@ -445,6 +453,20 @@ impl FlushTask {
 
     pub fn stats(&self) -> FlushStats {
         self.shared.stats()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_drain(
+        &self,
+        reached: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+        panic_on_resume: bool,
+    ) {
+        *self.shared.drain_pause.lock() = Some(DrainPause {
+            reached,
+            resume,
+            panic_on_resume,
+        });
     }
 
     /// `true` once the pending depth exceeded `log_max`: flushing has stopped
@@ -1234,9 +1256,13 @@ impl FlushLoop {
     #[cfg(test)]
     async fn pause_after_drain(&self) {
         let pause = self.shared.drain_pause.lock().take();
-        if let Some((reached, resume)) = pause {
-            reached.notify_one();
-            resume.notified().await;
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.resume.notified().await;
+            assert!(
+                !pause.panic_on_resume,
+                "injected flush-task panic after drain"
+            );
         }
     }
 
@@ -2157,7 +2183,7 @@ mod tests {
         assert_eq!(log, 3);
         assert!(log + depth >= 3 && log.max(depth) == 3, "{log} + {depth}");
 
-        *task.shared.drain_pause.lock() = Some((reached.clone(), resume.clone()));
+        task.pause_next_drain(reached.clone(), resume.clone(), false);
         tokio::time::advance(POLL_QUANTUM).await;
         reached.notified().await;
         let (log, depth) = observe();

@@ -436,6 +436,178 @@ async fn close_flushes_a_retained_batch_after_a_panicking_stats_write() {
     );
 }
 
+/// #318: fail the task itself while it holds the admitted intent in
+/// pending. A successful final flush can only preserve the surviving log.
+#[tokio::test(start_paused = true)]
+async fn close_after_flush_task_panic_only_flushes_the_surviving_tail() {
+    use super::replay::{HangingEmbedder, VectorSearchable};
+    for (session, leave_tail, fail_first_flush) in [
+        ("flush-task-panic-tail", true, false),
+        ("flush-task-panic-empty", false, false),
+        ("flush-task-panic-retry", true, true),
+    ] {
+        let inner = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(
+            Arc::new(VectorSearchable(inner.clone())),
+            0,
+        ));
+        let mem = Memory::builder()
+            .session(session)
+            .agent("agent-a")
+            .store(store.clone() as Arc<dyn GraphStore>)
+            .embedder(Arc::new(HangingEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(crate::types::MatchStrategy::Hybrid)
+            .flush_interval(Duration::from_secs(3600))
+            .build()
+            .await
+            .unwrap();
+        let agent = AgentId::new("agent-a");
+        let ack = mem
+            .derive_async_as(
+                &agent,
+                &[("pending schema", ConceptType::Entity)],
+                &ParentOf::none(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!ack.dropped());
+
+        let drained = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        mem.flush
+            .pause_next_drain(drained.clone(), resume.clone(), true);
+        tokio::time::timeout(Duration::from_secs(5), drained.notified())
+            .await
+            .expect("the background flusher took the write's intent");
+        let stats = mem.stats();
+        assert_eq!(stats.log_depth, 0);
+        assert!(stats.flush_depth > 0);
+        if leave_tail {
+            mem.set_root_goal(&["surviving log"]).unwrap();
+        }
+        if fail_first_flush {
+            store.fail_next(1);
+        }
+        resume.notify_one();
+
+        let first = mem.close().await;
+        let result = if fail_first_flush {
+            first.expect_err("the surviving tail's first flush failed");
+            assert!(
+                mem.stats().log_depth > 0,
+                "the surviving tail remains retryable"
+            );
+            assert_eq!(
+                mem.pipeline().lookup(&agent, ack.receipt).tag(),
+                "close_unflushed"
+            );
+            mem.close().await
+        } else {
+            first
+        };
+        if leave_tail {
+            let stored = inner.load_session(&SessionId::new(session)).await.unwrap();
+            assert_eq!(stored.root_goal, Some(serde_json::json!(["surviving log"])));
+            assert!(
+                stored.write_intents.is_empty(),
+                "the task lost the drained intent"
+            );
+        }
+        let err = result.expect_err("a panicked flush task lost the drained batch");
+        let detail = err.to_string();
+        assert!(detail.contains("flush task panicked"), "{detail}");
+        assert!(
+            detail.contains(&format!("flush depth was {}", stats.flush_depth)),
+            "{detail}"
+        );
+        assert_eq!(
+            mem.pipeline().lookup(&agent, ack.receipt).tag(),
+            "close_unflushed"
+        );
+
+        let retry = mem
+            .close()
+            .await
+            .expect_err("retry cannot recover the lost batch");
+        assert_eq!(retry.to_string(), detail);
+        assert_eq!(
+            mem.pipeline().lookup(&agent, ack.receipt).tag(),
+            "close_unflushed"
+        );
+    }
+}
+
+/// Cancellation after joining the panicked task must preserve both the panic
+/// verdict and custody of the surviving tail for the next close.
+#[tokio::test(start_paused = true)]
+async fn cancelled_close_after_flush_task_panic_keeps_the_verdict_and_tail() {
+    use super::replay::{HangingEmbedder, VectorSearchable};
+
+    let session = "cancelled-close-flush-task-panic";
+    let inner = Arc::new(MemoryStore::new());
+    let store = Arc::new(AdverseStore::new(
+        Arc::new(VectorSearchable(inner.clone())),
+        FlushBehaviour::HangOnce,
+    ));
+    let mem = Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .store(store.clone() as Arc<dyn GraphStore>)
+        .embedder(Arc::new(HangingEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(crate::types::MatchStrategy::Hybrid)
+        .flush_interval(Duration::from_secs(3600))
+        .build()
+        .await
+        .unwrap();
+    let agent = AgentId::new("agent-a");
+    let ack = mem
+        .derive_async_as(
+            &agent,
+            &[("lost intent", ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!ack.dropped());
+
+    let drained = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    mem.flush
+        .pause_next_drain(drained.clone(), resume.clone(), true);
+    tokio::time::timeout(Duration::from_secs(5), drained.notified())
+        .await
+        .expect("the background flusher took the write's intent");
+    assert_eq!(mem.stats().log_depth, 0);
+    assert!(mem.stats().flush_depth > 0);
+    mem.set_root_goal(&["surviving log"]).unwrap();
+    resume.notify_one();
+
+    assert!(tokio::time::timeout(Duration::from_secs(5), mem.close())
+        .await
+        .is_err());
+    assert_eq!(store.flush_calls(), 1, "the final flush was parked");
+    assert!(mem.flush_handle.lock().is_none(), "the panic was joined");
+    assert!(mem.graph().read().log_len() > 0, "tail returned to log");
+
+    let err = mem
+        .close()
+        .await
+        .expect_err("the lost batch is not durable");
+    assert!(err.to_string().contains("flush task panicked"), "{err}");
+    assert_eq!(
+        mem.pipeline().lookup(&agent, ack.receipt).tag(),
+        "close_unflushed"
+    );
+    let stored = inner.load_session(&SessionId::new(session)).await.unwrap();
+    assert_eq!(stored.root_goal, Some(serde_json::json!(["surviving log"])));
+    assert!(stored.write_intents.is_empty(), "the task lost the intent");
+    assert!(!stored.concepts.iter().any(|c| c.content == "lost intent"));
+}
+
 /// Pins the push-**front** mechanism itself: returned custody lands at the
 /// FRONT of the graph log, so `close()`'s final batch carries the retained
 /// mutations *and* everything written after them, as one chronological

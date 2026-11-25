@@ -261,17 +261,12 @@ pub struct Memory {
     /// §6.4 rule is untouched — the graph lock is still taken, used and
     /// released inside these methods without ever crossing an await.
     writers: AsyncRwLock<()>,
-    /// Serializes `close()` bodies and holds its one-shot success flag: `true`
-    /// once a close has actually made the tail durable.
-    ///
-    /// A second **concurrent** caller parks here until the first finishes
-    /// rather than returning an early `Ok` over an in-flight final flush,
-    /// and a **failed** close leaves it `false` so the tail — pushed back to
-    /// the front of the log — can be retried.
-    close_state: tokio::sync::Mutex<bool>,
+    /// Serializes close attempts and retains the shutdown verdict across
+    /// retries, including a flush-task panic observed before a later await.
+    close_state: tokio::sync::Mutex<shutdown::CloseState>,
     closed: AtomicBool,
     /// `true` while this handle holds a slot in [`ACTIVE_SESSIONS`](leases::ACTIVE_SESSIONS). A
-    /// **successful** `close()` releases it and clears this, so [`Drop`]
+    /// completed `close()` releases it and clears this, so [`Drop`]
     /// does not release a second time and take a *different* handle's slot with
     /// it — the registry keys on session + agent id, which a re-attach reuses.
     registered: AtomicBool,

@@ -222,7 +222,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Contract/Reembed.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:d7e73f900553ed4bc477e166b01b331f99bb5c4526ae172bda894e515ec8e4a0"
+read_digest = "v2:sha256:f48cfb337dd02a10fd9ff8fd35c28766f1fe03ae740bac16cd06fbceb8f9f49c"
 rust = [
   "src/graph/graph/embeddings.rs",
   "src/memory/builder.rs#build_attach",
@@ -549,10 +549,11 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Close.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:156876ee939972d811c8acf65e71a0f237aef71452ea5abc70e3a36f19e58486"
+read_digest = "v2:sha256:8fe5b33bd0d3bd0dcf0eba8f8b054d40df753318f6918e9a38cd7be7b0d0b917"
 rust = [
   "src/writeq/drain.rs",
   "src/memory/shutdown.rs#Memory::close",
+  "src/memory/shutdown.rs#Memory::finish_close",
   "src/memory/shutdown.rs#Memory::close_fenced",
   "src/graph/graph/mutation_log.rs#consume_write_intent",
   "src/graph/graph/unflushed.rs#Graph::note_dead_lettered_intents",
@@ -587,8 +588,11 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Flush/Loop.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:c11c81550940c7eddb0a322e44b9fb314f1fbf724a04af7426d3f4e50a37edc4"
+read_digest = "v2:sha256:5350f2734bc1121e1ca8dbdeedb2a70e7b3ced09a7aded205ad4d6d3b8952005"
 rust = [
+  "src/memory/shutdown.rs#Memory::close",
+  "src/memory/shutdown.rs#Memory::finish_close",
+  "src/memory/shutdown.rs#CloseState::result",
   "src/store/flush.rs",
   "src/store/replay_flush.rs",
 ]
