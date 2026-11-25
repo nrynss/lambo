@@ -917,7 +917,6 @@ impl MemoryBuilder {
         // here, and nowhere else in this type.
         let daemon_handle = daemon.spawn();
         let flush_handle = flush.spawn();
-        let canon_handle = canon.spawn();
         // The heartbeat started at the acquire (above); the `Memory` owns it
         // from here.
         let heartbeat_handle = heartbeat_guard
@@ -976,7 +975,10 @@ impl MemoryBuilder {
         // cross-restart receipt answers, so those ids answer
         // `pending`/`applied_after_restart`/`failed` instead of
         // `restart_lost`.
-        pipeline.spawn_replay(write_intents);
+        pipeline.spawn_replay(write_intents, Some(flush.replay_waker()));
+        // The evaluator can write audit rows directly. Arm the startup replay
+        // latch before it can gather any speculative graph effects.
+        let canon_handle = canon.spawn();
 
         // Last, so nothing registers for a `build()` that failed. Released by
         // a successful `close()` or, failing that, by `Drop`.

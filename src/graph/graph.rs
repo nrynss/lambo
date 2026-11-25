@@ -112,6 +112,9 @@ pub struct Graph {
     /// Ordered write-behind log; drained by the flush task (T3.4). Append-only
     /// here; [`Graph::drain_log`] is the only way out.
     mutation_log: Vec<Mutation>,
+    pub(crate) replay_flush: crate::store::replay_flush::ReplayFlush,
+    /// Startup replay may still stage effects in the graph.
+    pub(crate) replay_producing: bool,
     /// `MutationEpoch` — bumps once per appended mutation. Recall-cache invalidation
     /// key (spec §8); GC's step 7 is redundant but harmless (any mutation already
     /// bumps the epoch).
@@ -189,6 +192,8 @@ impl Graph {
             closed_at: None,
             embedding: None,
             mutation_log: Vec::new(),
+            replay_flush: Default::default(),
+            replay_producing: false,
             epoch: 0,
             gc_mark: GcMark::default(),
             access_dirty: HashSet::new(),

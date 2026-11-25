@@ -834,7 +834,7 @@ impl WritePipeline {
         let refusal = {
             let mut graph = self.ctx.graph.write();
             let mut lanes = self.lanes.lock();
-            let refusal = if lanes.sealed {
+            let refusal = if graph.replay_flush.deferred() || lanes.sealed {
                 Some((DropReason::Closed, WRITE_QUEUE_LANE_MAX))
             } else if lanes.lane_outstanding(&agent) + lanes.lane_held(&agent)
                 >= WRITE_QUEUE_LANE_MAX

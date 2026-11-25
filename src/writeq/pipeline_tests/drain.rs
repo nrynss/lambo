@@ -519,7 +519,7 @@ async fn a_cancelled_stop_replay_leaves_the_replay_joinable() {
         pipeline, graph, ..
     } = rig;
     let pipeline = Arc::new(pipeline);
-    pipeline.spawn_replay(vec![intent]);
+    pipeline.spawn_replay(vec![intent], None);
 
     // The liveness embed, then the intent's own embed, are both entered.
     until(

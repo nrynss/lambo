@@ -73,6 +73,7 @@ pub use dsn::store_dsn_identity;
 // (it only reads `Mutation`), so it compiles and is tested under every feature
 // row, including the `--no-default-features` minimal ones.
 pub mod batch;
+pub(crate) mod replay_flush;
 // `load_session()` / startup materialization (see `load.rs`).
 pub mod load;
 pub(crate) mod span;

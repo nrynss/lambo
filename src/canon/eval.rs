@@ -422,6 +422,15 @@ impl Evaluator {
         // 1. Gather — read guard, released before the first await.
         let plan = {
             let g = graph.read();
+            // The audit writes directly to the store. Wait until startup
+            // replay has stopped staging effects and every staged span is
+            // confirmed, or skip while the writer needs a restart.
+            if g.replay_producing
+                || g.replay_flush.has_pending_groups()
+                || g.replay_flush.deferred()
+            {
+                return Ok(EvalOutcome::default());
+            }
             self.gather(&g, scores, params, now)
         };
 

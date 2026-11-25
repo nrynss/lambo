@@ -125,7 +125,11 @@ impl Memory {
     /// and concept keys are refused; a name is never retargeted.
     pub fn declare_name(&self, name: &str, target: NodeId) -> Result<bool, LamboError> {
         let _writing = self.begin_write_sync()?;
-        let changed = self.graph.write().declare_name(name, target)?;
+        let changed = {
+            let mut graph = self.graph.write();
+            graph.ensure_replay_writable()?;
+            graph.declare_name(name, target)?
+        };
         self.daemon.wake();
         Ok(changed)
     }
@@ -137,7 +141,11 @@ impl Memory {
         let _writing = self.begin_write_sync()?;
         let value = serde_json::to_value(goals)
             .map_err(|e| LamboError::Config(format!("set_root_goal: {e}")))?;
-        self.graph.write().set_root_goal(Some(value));
+        {
+            let mut graph = self.graph.write();
+            graph.ensure_replay_writable()?;
+            graph.set_root_goal(Some(value));
+        }
         self.daemon.wake();
         Ok(())
     }
@@ -148,6 +156,7 @@ impl Memory {
     pub fn declare_synonym(&self, source: &str, canonical: &str) -> Result<(), LamboError> {
         let _writing = self.begin_write_sync()?;
         let mut graph = self.graph.write();
+        graph.ensure_replay_writable()?;
         let (target, _) = crate::surface::resolve::resolve_existing_scoped(
             &graph,
             crate::types::ReferenceField::DependsOn,
@@ -180,7 +189,11 @@ impl Memory {
     /// cannot be applied must fail loudly, never silently vanish.
     pub fn confirm_human(&self, node: NodeId) -> Result<i32, LamboError> {
         let _writing = self.begin_write_sync()?;
-        let confirmed = self.graph.write().confirm_human(node)?;
+        let confirmed = {
+            let mut graph = self.graph.write();
+            graph.ensure_replay_writable()?;
+            graph.confirm_human(node)?
+        };
         self.daemon.wake();
         Ok(confirmed)
     }
@@ -339,6 +352,7 @@ impl Memory {
                 // Short critical section; the guard dies with this block, well
                 // before the mirroring below. No `.await` inside it (§6.4).
                 let mut g = self.graph.write();
+                g.ensure_replay_writable()?;
                 derive_cited(
                     &mut g,
                     interaction,
@@ -402,6 +416,7 @@ impl Memory {
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         let outcome = {
             let mut g = self.graph.write();
+            g.ensure_replay_writable()?;
             if against.is_empty() {
                 graph_record_action(&mut g, interaction, agent, action)?
             } else {
@@ -488,6 +503,7 @@ impl Memory {
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         let outcome = {
             let mut g = self.graph.write();
+            g.ensure_replay_writable()?;
             // #19(b) review L3: stamped by the record, after the recheck.
             crate::graph::action::record_action_against(
                 &mut g,
@@ -869,6 +885,7 @@ impl Memory {
         let interaction = self.begin_interaction(None)?;
         let created = {
             let mut g = self.graph.write();
+            g.ensure_replay_writable()?;
             graph_demote(&mut g, interaction, &self.agent, chunk, chunk_group_id)?
         };
         // Observations are concepts: the mod.rs contract names `demote`
@@ -995,6 +1012,7 @@ impl Memory {
         } else {
             // graph -> index, the daemon GC's order. Both guards die here.
             let mut g = self.graph.write();
+            g.ensure_replay_writable()?;
             g.remove_node(node)?;
             self.index.write().remove(node);
             drop(g);
@@ -1047,6 +1065,7 @@ impl Memory {
     ) -> Result<Reservation, LamboError> {
         let _writing = self.begin_write_sync()?;
         let mut g = self.graph.write();
+        g.ensure_replay_writable()?;
         graph_reserve(&mut g, node, agent, ttl, Utc::now())
     }
 
@@ -1067,6 +1086,7 @@ impl Memory {
     pub fn release_as(&self, agent: &AgentId, node: NodeId) -> Result<(), LamboError> {
         let _writing = self.begin_write_sync()?;
         let mut g = self.graph.write();
+        g.ensure_replay_writable()?;
         graph_release(&mut g, node, agent)
     }
 
@@ -1103,6 +1123,7 @@ impl Memory {
         let id = NodeId::new();
         let created_at = (self.clock)();
         let mut g = self.graph.write();
+        g.ensure_replay_writable()?;
         let previous_id = g.temporal_chain().last().copied();
         g.insert_interaction(Interaction {
             id,

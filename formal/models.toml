@@ -187,7 +187,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Receipts.lean"
 read_against = "4cab4380"
-read_digest = "v2:sha256:a89baec0f9450267a45aec7d6b4a8ae12c03ea43e8ea9c135b8a5bd53dacc3fa"
+read_digest = "v2:sha256:e7b6e78bb3c82f8e18c13905c6928169cbfba8abda3888c7ebf94b06f2cc784e"
 rust = [
   "src/writeq/receipts.rs",
   "src/writeq/admission.rs",
@@ -222,7 +222,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Contract/Reembed.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:d5e79eae0743cfea88713f9421204d3f042305583e1cdca976583a4958cd6d10"
+read_digest = "v2:sha256:d7e73f900553ed4bc477e166b01b331f99bb5c4526ae172bda894e515ec8e4a0"
 rust = [
   "src/graph/graph/embeddings.rs",
   "src/memory/builder.rs#build_attach",
@@ -480,7 +480,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Base.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:b70366842a99765cb17cba130badf374743a647e42343d9d4201b6cc38b6aa8f"
+read_digest = "v2:sha256:0e99f1363fc7bc27183ce5970b262f7396df8f8074b464f28ce455f2cf72da71"
 rust = [
   "src/writeq/execution.rs#WriteCtx::run",
   "src/writeq/execution.rs#ConsumeStamp",
@@ -514,9 +514,10 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Replay.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:42252cfe0ef797b12112c5eab8ca5d32f6071d3c025cf145ed798beed8a34a17"
+read_digest = "v2:sha256:b238f07816a48d441a745fbc0388d1ba683bb0e147ccc7a8597c12b124ed401b"
 rust = [
   "src/writeq/replay.rs",
+  "src/store/replay_flush.rs",
   "src/writeq/receipts.rs#ReceiptId",
   "src/writeq/counters.rs#ReplayBlockReason",
   "src/writeq/execution.rs#WritePipeline::spawn_worker",
@@ -533,7 +534,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Worker.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:99241c6a9832cbb4aee05018de7fb053e9b75479791ae3b387f54fb09a9da537"
+read_digest = "v2:sha256:f75cf93f6cfae36d635d6ff975f772a9648121c42a39d885cbe149165f4c7aad"
 rust = [
   "src/writeq/execution.rs",
   "src/writeq/admission.rs#Lanes",
@@ -548,7 +549,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Close.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:a8df4dcc27d39030be6903e2033fd92667b932cc4b2ee018a3b7885417db3c99"
+read_digest = "v2:sha256:a43cffccc036520895ab8f5a77b8937134ec0f46b34ea7928c917fc4c4092c5a"
 rust = [
   "src/writeq/drain.rs",
   "src/memory/shutdown.rs#Memory::close",
@@ -570,9 +571,10 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Flush/Retry.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:0fed522f548f71deb9e49c8e89e975bbab94ccba91853be48f98fc3c24c0b983"
+read_digest = "v2:sha256:255259c7c884ed1d19c4cc5ab3fa816e13f70925dd61e0e00be59b3a416015a2"
 rust = [
   "src/store/flush.rs#flush_with_retry",
+  "src/store/flush.rs#flush_attempt",
   "src/store/flush.rs#next_backoff",
   "src/store/flush.rs#BACKOFF_BASE",
   "src/store/flush.rs#BACKOFF_CAP",
@@ -585,16 +587,17 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Flush/Loop.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:00274796661038c5756a96f37d926b1c18b36180cb45902d24a285e037402c83"
+read_digest = "v2:sha256:8e904941cc1b1b0de152c1a98e4a7a64ba151a17da87219a0459ef0f3f29aeef"
 rust = [
   "src/store/flush.rs",
+  "src/store/replay_flush.rs",
 ]
 
 # The adapters' error classes (#301 item 3) and the loop over them.
 [[model]]
 lean = "formal/LamboProofs/Flush/Errors.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:0e8af54ae9c23ffe367acee1c3ba4812a5a1044a26de742f892c41cf7c3c1e36"
+read_digest = "v2:sha256:8be1752b3954ca29849bd39648859edc83514dca82e122a6233842cc9d973dc2"
 rust = [
   "src/store/error.rs",
   "src/store/flush.rs#FlushLoop::drain_and_flush",

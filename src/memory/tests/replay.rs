@@ -502,6 +502,137 @@ fn holds_put(batch: &MutationBatch, receipt: crate::writeq::ReceiptId) -> bool {
         .any(|m| matches!(m, Mutation::PutWriteIntent { intent } if intent.receipt == receipt))
 }
 
+/// A store rejection of a mixed replay flush must settle only the rejected
+/// write as failed. The second restart must load that failure and apply
+/// the valid neighbor from the durable backlog exactly once.
+#[tokio::test(start_paused = true)]
+async fn a_dead_letter_does_not_replay_the_bad_intent_on_every_restart() {
+    let session = "replay-dead-letter";
+    let sid = SessionId::new(session);
+    let agent = AgentId::new("agent-a");
+    let bad_content = "rejected invoice";
+    let good_content = "permitted schema";
+    let inner = Arc::new(MemoryStore::new());
+    let store = Arc::new(
+        FlakyStore::new(Arc::new(VectorSearchable(inner.clone())), 0)
+            .with_rejected_content(bad_content),
+    );
+
+    let original = held_write_session(session, store.clone()).await;
+    let bad = submit_and_hold(&original, &agent, bad_content).await;
+    let good = submit_and_hold(&original, &agent, good_content).await;
+    original.close().await.expect("persist the owed intents");
+    let seed = inner.load_session(&sid).await.expect("load owed intents");
+    assert_eq!(seed.write_intents.len(), 2);
+    assert!(seed
+        .write_intents
+        .iter()
+        .all(|intent| intent.outcome.is_none()));
+
+    let attach = || {
+        Memory::builder()
+            .session(session)
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(1))
+            .store(store.clone() as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Hybrid)
+            .build()
+    };
+    let consumes = |batch: &MutationBatch, receipt: crate::writeq::ReceiptId| {
+        batch.mutations.iter().any(|mutation| {
+            matches!(mutation, Mutation::ConsumeWriteIntent { receipt: id, .. } if *id == receipt.to_string())
+        })
+    };
+
+    let first = attach().await.expect("first restart");
+    until_mem(
+        &first,
+        "the mixed replay batch to leave the flush queue",
+        |mem| {
+            store
+                .batches()
+                .iter()
+                .any(|batch| consumes(batch, bad) && consumes(batch, good))
+                && mem.stats().flush_depth == 0
+        },
+    )
+    .await;
+    let first_bad = first.pipeline().lookup(&agent, bad);
+    let first_good = first.pipeline().lookup(&agent, good);
+    let after_first = inner
+        .load_session(&sid)
+        .await
+        .expect("load after rejection");
+    let outcomes = |snapshot: &crate::types::GraphSnapshot| -> Vec<(String, Option<String>)> {
+        snapshot
+            .write_intents
+            .iter()
+            .map(|intent| {
+                (
+                    intent.receipt.clone(),
+                    intent.outcome.as_ref().map(|outcome| outcome.tag.clone()),
+                )
+            })
+            .collect()
+    };
+    assert!(outcomes(&after_first).contains(&(bad.to_string(), Some("failed".into()))));
+    assert!(outcomes(&after_first).contains(&(good.to_string(), None)));
+    assert!(
+        after_first.concepts.is_empty(),
+        "the speculative suffix was never stored"
+    );
+    let refused = first
+        .derive_async_as(
+            &agent,
+            &[(bad_content, ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect_err("a fresh write must not use the rejected replay state");
+    assert!(
+        refused.to_string().contains("restart required"),
+        "{refused}"
+    );
+    first.close().await.expect("close after the first restart");
+
+    let second = attach().await.expect("second restart");
+    until_mem(&second, "startup replay to settle", |mem| {
+        mem.pipeline().counters().replay_owed() == 0
+    })
+    .await;
+    let second_replayed = second.pipeline().counters().replayed();
+    let second_bad = second.pipeline().lookup(&agent, bad);
+    let second_good = second.pipeline().lookup(&agent, good);
+    let second_close = second.close().await;
+
+    assert_eq!(first_bad.tag(), "failed", "first restart: {first_bad:?}");
+    assert_eq!(first_good.tag(), "pending_replay");
+    assert_eq!(second_bad.tag(), "failed", "second restart: {second_bad:?}");
+    assert_eq!(second_good.tag(), "applied_after_restart");
+    assert_eq!(
+        second_replayed, 1,
+        "only the still-owed good intent is applied"
+    );
+    second_close.expect("close after the second restart");
+    let durable = inner.load_session(&sid).await.expect("load final state");
+    assert_eq!(durable.concepts.len(), 1);
+    assert_eq!(durable.concepts[0].content, good_content);
+    assert!(outcomes(&durable).contains(&(bad.to_string(), Some("failed".into()))));
+    assert!(outcomes(&durable).contains(&(good.to_string(), Some("applied_after_restart".into()))));
+    assert_eq!(
+        store
+            .batches()
+            .iter()
+            .filter(|batch| consumes(batch, good) && !consumes(batch, bad))
+            .count(),
+        1,
+        "the valid intent commits its effects and consume together on the second restart"
+    );
+}
+
 /// **#345**: a background flush the store refuses with a constraint
 /// violation dead-letters its whole batch, and the session goes on. Here
 /// that batch holds the put of a write the worker is holding
@@ -843,8 +974,10 @@ async fn a_content_refusal_at_replay_still_settles_the_intent_failed() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(mem2.pipeline().counters().replay_owed(), 0);
-    mem2.close().await.expect("clean close 2");
-    let snap = inner.load_session(&sid).await.expect("reload");
+    let snap = inner
+        .load_session(&sid)
+        .await
+        .expect("the failed receipt already has a durable consume before close");
     let outcome = snap.write_intents[0]
         .outcome
         .as_ref()
@@ -854,6 +987,7 @@ async fn a_content_refusal_at_replay_still_settles_the_intent_failed() {
         snap.concepts.is_empty(),
         "nothing was written for a refused replay"
     );
+    mem2.close().await.expect("clean close 2");
 }
 
 /// **#116**: a replayed intent refused because it would close a

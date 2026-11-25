@@ -275,6 +275,7 @@ struct Shared {
     /// permit here; the loop's `biased;` `select!` polls it FIRST and, when it
     /// fires, re-appends `pending` to the front of the graph log and exits.
     stop: Arc<tokio::sync::Notify>,
+    replay_wake: Arc<tokio::sync::Notify>,
     /// Test-only, one-shot pause right after a cycle's drain (the guard
     /// dropped, before anything else runs): the loop signals the first
     /// `Notify` and waits on the second, so a test can observe the stats in
@@ -294,6 +295,7 @@ impl Shared {
             degraded: AtomicBool::new(false),
             dead_lettered: AtomicU64::new(0),
             stop: Arc::new(tokio::sync::Notify::new()),
+            replay_wake: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             drain_pause: Mutex::new(None),
         }
@@ -433,6 +435,14 @@ impl FlushTask {
 
     /// Current observable durability loss bound (spec §2.4: the bound is
     /// observable, not assumed).
+    pub(crate) fn replay_waker(&self) -> Arc<tokio::sync::Notify> {
+        self.shared.replay_wake.clone()
+    }
+
+    pub(crate) fn count_replay_dead_letter(&self) {
+        self.shared.dead_lettered.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub fn stats(&self) -> FlushStats {
         self.shared.stats()
     }
@@ -583,6 +593,31 @@ struct FlushLoop {
     last_published: Option<(tokio::time::Instant, SessionFlushStats)>,
 }
 
+pub(super) async fn flush_attempt(
+    store: &dyn GraphStore,
+    batch: &MutationBatch,
+    token: Option<u64>,
+) -> Result<(), StoreError> {
+    let attempt = async {
+        match CatchUnwindPoll(async { store.flush(batch, token).await }).await {
+            Ok(result) => result,
+            Err(payload) => {
+                let message = panic_message(&payload);
+                tracing::warn!(panic = %message, "BackendFlushPanic: store.flush panicked");
+                Err(StoreError::Backend(format!(
+                    "store flush panicked: {message}"
+                )))
+            }
+        }
+    };
+    match tokio::time::timeout(FLUSH_ATTEMPT_TIMEOUT, attempt).await {
+        Ok(result) => result,
+        Err(_) => Err(StoreError::Backend(format!(
+            "store flush timed out after {FLUSH_ATTEMPT_TIMEOUT:?}"
+        ))),
+    }
+}
+
 impl FlushLoop {
     async fn run(mut self) {
         let mut interval = tokio::time::interval(self.params.interval);
@@ -596,6 +631,7 @@ impl FlushLoop {
         // polling, and `self.shared.stop.notified()` would conflict with the
         // `&mut self` the `cycle` branches need.
         let stop = self.shared.stop.clone();
+        let replay_wake = self.shared.replay_wake.clone();
 
         loop {
             // Single-writer-lease fence. Checked at the top of every
@@ -650,6 +686,7 @@ impl FlushLoop {
                     break;
                 }
                 _ = interval.tick() => self.cycle(true).await,
+                _ = replay_wake.notified() => self.cycle(true).await,
                 // Early-flush poll: catch a batch reaching max_batch before the tick.
                 _ = tokio::time::sleep(POLL_QUANTUM) => self.cycle(false).await,
             }
@@ -797,6 +834,8 @@ impl FlushLoop {
         if self.fenced() {
             return false;
         }
+        super::replay_flush::defer_suffix(&self.graph, &mut self.pending);
+        self.refresh_depth();
         if self.pending.is_empty() {
             // Nothing drained and nothing held: the store holds every
             // mutation, so the durability lag is zero now (#16 §3). Not for a
@@ -847,7 +886,23 @@ impl FlushLoop {
             return false; // early-flush poll: batch not full yet, wait for the tick
         }
 
-        match self.flush_with_retry().await {
+        let mut result = self.flush_with_retry().await;
+        if matches!(result, Err(StoreError::Constraint(_)))
+            && super::replay_flush::has_replay(&self.graph, &self.pending)
+        {
+            result = super::replay_flush::recover(
+                &self.graph,
+                &mut self.pending,
+                self.store.as_ref(),
+                self.token,
+                self.fence.as_deref(),
+                || {
+                    self.shared.dead_lettered.fetch_add(1, Ordering::AcqRel);
+                },
+            )
+            .await;
+        }
+        match result {
             Ok(()) => {
                 self.commit_pending();
                 self.retry_after = None;
@@ -1049,41 +1104,7 @@ impl FlushLoop {
         let mut retries_used: u32 = 0;
         let mut backoff = BACKOFF_BASE;
         loop {
-            // A panicking backend must not abort the spawned loop: the task
-            // would die silently, stopping all flush bookkeeping with
-            // `degraded()==false` and no events — durability loss worse than
-            // the designed failure path. Poll the flush inside `catch_unwind`
-            // and route a panic into the typed-error path below (same backoff
-            // → retain/degrade handling), logging the payload.
-            let attempt = async {
-                match CatchUnwindPoll(async { self.store.flush(&self.pending, self.token).await })
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(payload) => {
-                        let message = panic_message(&payload);
-                        tracing::warn!(
-                            panic = %message,
-                            attempt = retries_used + 1,
-                            max_retries = self.params.retries,
-                            "BackendFlushPanic: store.flush panicked; treating as a failed flush \
-                             attempt (backoff, then retain/degrade as usual)"
-                        );
-                        Err(StoreError::Backend(format!(
-                            "store flush panicked: {message}"
-                        )))
-                    }
-                }
-            };
-            // Bound the whole attempt (panic containment included).
-            // On timeout the in-flight future is dropped; the backend only
-            // borrows `&self.pending`, so the pending buffer is intact.
-            let result = match tokio::time::timeout(FLUSH_ATTEMPT_TIMEOUT, attempt).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(StoreError::Backend(format!(
-                    "store flush timed out after {FLUSH_ATTEMPT_TIMEOUT:?}"
-                ))),
-            };
+            let result = flush_attempt(self.store.as_ref(), &self.pending, self.token).await;
             match result {
                 Ok(()) => return Ok(()),
                 Err(err) => {
@@ -1181,8 +1202,7 @@ impl FlushLoop {
     /// here, after the commit was acknowledged, so a concept is never absent
     /// from both the database and that set. A brief write lock, no I/O.
     fn commit_pending(&mut self) {
-        let through = self.pending.mutation_epoch;
-        self.graph.write().mark_durable_through(through);
+        super::replay_flush::committed(&self.graph, &self.pending);
         self.clear_pending();
     }
 
@@ -1193,7 +1213,7 @@ impl FlushLoop {
     /// must not count these writes as committed.
     fn drop_pending(&mut self) {
         if !self.pending.mutations.is_empty() {
-            self.graph.write().pin_unflushed(&self.pending.mutations);
+            super::replay_flush::discarded(&self.graph, &self.pending.mutations, false);
         }
         self.clear_pending();
     }
@@ -1203,9 +1223,7 @@ impl FlushLoop {
     /// durable (`Graph::note_dead_lettered_intents`, #345).
     fn dead_letter_pending(&mut self) {
         if !self.pending.mutations.is_empty() {
-            let mut graph = self.graph.write();
-            graph.note_dead_lettered_intents(&self.pending.mutations);
-            graph.pin_unflushed(&self.pending.mutations);
+            super::replay_flush::discarded(&self.graph, &self.pending.mutations, true);
         }
         self.clear_pending();
     }
@@ -4263,5 +4281,72 @@ mod tests {
             assert!(!stored.last_gc_at_reset, "stored marks carry no flag");
             assert!(stored.last_gc_epoch > 0, "the epoch stays monotone");
         }
+    }
+    #[tokio::test]
+    async fn replay_recovery_rejected_ordinary_prefix_leaves_replay_owed() {
+        let graph = new_graph();
+        add_interaction(&graph, 1, None);
+        let completion = Arc::new(crate::store::replay_flush::Completion::default());
+        let finished = Arc::new(AtomicBool::new(false));
+        let result = finished.clone();
+        completion.on_finish(Box::new(move |outcome| {
+            assert!(outcome.is_none());
+            result.store(true, Ordering::SeqCst);
+        }));
+        let mut batch = {
+            let mut g = graph.write();
+            let start = crate::store::replay_flush::Checkpoint::capture(&g);
+            g.consume_replayed_write(
+                "replay".into(),
+                crate::types::WriteIntentOutcome {
+                    tag: "failed".into(),
+                    summary: "invalid input".into(),
+                    consumed_at: chrono::Utc::now(),
+                },
+                start,
+                completion,
+            );
+            g.drain_log()
+        };
+        let store = ConstraintStore::only_first(Arc::new(MemoryStore::new()));
+        let mut dead_letters = 0;
+        crate::store::replay_flush::recover(&graph, &mut batch, &store, None, None, || {
+            dead_letters += 1
+        })
+        .await
+        .unwrap();
+        assert!(batch.is_empty());
+        assert!(graph.read().replay_flush.deferred());
+        assert!(finished.load(Ordering::SeqCst));
+        assert_eq!(dead_letters, 1);
+        assert_eq!(store.flush_calls(), 1);
+    }
+
+    #[test]
+    fn discarded_replay_latches_unsafe_but_ordinary_discard_does_not() {
+        let graph = new_graph();
+        add_interaction(&graph, 1, None);
+        let ordinary = graph.write().drain_log();
+        crate::store::replay_flush::discarded(&graph, &ordinary.mutations, false);
+        assert!(!graph.read().replay_flush.deferred());
+        let replay = {
+            let mut graph = graph.write();
+            let start = crate::store::replay_flush::Checkpoint::capture(&graph);
+            graph.consume_replayed_write(
+                "owed".into(),
+                crate::types::WriteIntentOutcome {
+                    tag: "applied".into(),
+                    summary: String::new(),
+                    consumed_at: Utc::now(),
+                },
+                start,
+                Arc::new(crate::store::replay_flush::Completion::default()),
+            );
+            graph.drain_log()
+        };
+        crate::store::replay_flush::discarded(&graph, &replay.mutations, false);
+        let graph = graph.read();
+        assert!(graph.replay_flush.deferred());
+        assert!(!graph.replay_flush.has_pending_groups());
     }
 }
