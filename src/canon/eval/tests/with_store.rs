@@ -178,6 +178,23 @@ async fn one_hop_per_cycle_none_with_stage2_evidence_becomes_candidate() {
     // Evaluated after the last interaction (80 s in), so every dependent
     // origin is aged (#36 PR 3: Stage 1 ages its evidence like Stage 2).
     let at = ts() + chrono::Duration::seconds(120);
+    g.write().replay_producing = true;
+    let skipped = eval_cycle(&mut ev, &g, &store, &scores, &tx, &params(), at)
+        .await
+        .unwrap();
+    assert!(
+        skipped.is_empty(),
+        "active replay must not emit a durable transition"
+    );
+    assert!(g.read().canonization_events().is_empty());
+    assert!(store
+        .load_session(&sid())
+        .await
+        .unwrap()
+        .canonization_events
+        .is_empty());
+    g.write().replay_producing = false;
+
     let outcome = eval_cycle(&mut ev, &g, &store, &scores, &tx, &params(), at)
         .await
         .unwrap();

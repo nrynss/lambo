@@ -1097,6 +1097,49 @@ async fn a_write_in_flight_when_close_starts_is_never_acknowledged_then_lost() {
     }
 }
 
+/// A direct async mutation already past admission must recheck after its I/O.
+#[tokio::test]
+async fn in_flight_retract_refuses_after_replay_is_discarded() {
+    let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+    let parking = Arc::new(ParkingStore::new(inner, ParkPoint::BlastRadius));
+    let mem = Arc::new(memory_on(parking.clone(), "retract-replay-fence").await);
+    mem.derive(&[("victim", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap();
+    let entered = parking.entered();
+    let retracting = tokio::spawn({
+        let mem = mem.clone();
+        async move { mem.retract("victim", DryRun::No).await }
+    });
+    entered.notified().await;
+    let dropped = {
+        let mut graph = mem.graph.write();
+        let start = crate::store::replay_flush::Checkpoint::capture(&graph);
+        graph.consume_replayed_write(
+            "owed".into(),
+            crate::types::WriteIntentOutcome {
+                tag: "applied".into(),
+                summary: String::new(),
+                consumed_at: Utc::now(),
+            },
+            start,
+            Arc::new(crate::store::replay_flush::Completion::default()),
+        );
+        graph.drain_log().mutations
+    };
+    crate::store::replay_flush::discarded(&mem.graph, &dropped, false);
+    parking.release();
+    let err = retracting.await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("restart required"), "{err}");
+    assert!(mem
+        .graph
+        .read()
+        .snapshot()
+        .concepts
+        .iter()
+        .any(|c| c.content == "victim"));
+}
+
 /// The **post-acquire** `closed` re-check in `begin_write` — the
 /// second half of the gate, and the half a mutant could delete and still
 /// pass 539/539.

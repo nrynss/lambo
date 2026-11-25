@@ -84,6 +84,7 @@ mod execution;
 pub(crate) use execution::REPORT_GATE;
 mod receipts;
 mod replay;
+pub(crate) use replay::replay_flush_failure;
 
 pub use admission::{
     DropReason, Submitted, WRITE_QUEUE_LANE_MAX, WRITE_QUEUE_MAX, WRITE_QUEUE_MAX_BYTES,

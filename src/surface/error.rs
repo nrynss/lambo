@@ -43,6 +43,8 @@ pub(crate) fn err_class(err: &LamboError) -> &'static str {
         // new error class to learn.
         LamboError::Embed(_) | LamboError::EmbedUnavailable(_) => "embedding error",
         LamboError::Config(_) => "configuration error",
+        LamboError::ReplayInProgress => "startup replay in progress",
+        LamboError::ReplayRestartRequired => "restart required",
         // J1-R2-2: two variants, one class. The split exists so N4 can tell a
         // model-safe §11 refusal from a lease-lost one; an operator and the
         // ledger see the same `error_kind` either way, so nothing downstream of
@@ -97,7 +99,9 @@ pub(crate) fn model_safe_message(err: &LamboError) -> String {
         // type (J1-R2-2): its text is the caller's own reference, shortened
         // and escaped, and session-local ids and content the caller can read
         // through recall and inspect.
-        LamboError::Reference(_) => err.to_string(),
+        LamboError::Reference(_)
+        | LamboError::ReplayInProgress
+        | LamboError::ReplayRestartRequired => err.to_string(),
         LamboError::Store(e) if e.is_embedding_contract_refusal() => {
             "store error: the session's embedding contract no longer matches this query \
              (it changed mid-query, or the vector width differs); re-check the session's \

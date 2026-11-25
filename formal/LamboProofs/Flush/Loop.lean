@@ -12,7 +12,9 @@ order, `requeue_pending`, `drop_pending`, `FlushParams` and
 store calls `refused_as_erased` and `publish_stats` unguarded, `runUnguarded`,
 and guarded, `runGuarded`). Ghost state records every mutation appended
 (`hist`), every batch that left `pending` with its fate (`ledger`) and every
-store call (`calls`).
+store call (`calls`). Those results cover the ordinary flush path. The
+replay isolation model at the end describes the separate attempts triggered
+when the store rejects a mixed batch (#324).
 
 Results: over every run nothing is lost or duplicated while the loop runs
 (`Good.conserve`); every batch sent is the whole unconsumed tail, oldest
@@ -2256,5 +2258,46 @@ theorem close_ok_accounted_guarded {s : St α} (hg : Good s) (evs : List (PEv α
 end CloseProbes
 
 end Unguarded
+
+/-! ## Isolating a rejected replay batch (#324)
+
+The first store call has already rejected the whole mixed batch. Each probe
+then offers a chronological span. Replay effects and their consume make one
+span. A deterministic rejection of a replay span permits a separate attempt
+to persist its failure consume. The result below records only confirmed store
+commits. A transient, fenced or unacknowledged attempt ends this pass and
+has no durable effect in the model. -/
+
+inductive ReplayProbe (span : Type)
+  | committed (batch : span)
+  | settledRejection (failedConsume : span)
+  | stopped
+
+/-- The prefix confirmed durable by the isolation pass. After a rejection,
+later replay writes may depend on rejected effects still present in RAM.
+Their spans are deferred to the next serve. -/
+def replayRecoveryLog : List (ReplayProbe span) → List span
+  | [] => []
+  | .committed batch :: rest => batch :: replayRecoveryLog rest
+  | .settledRejection failedConsume :: _ => [failedConsume]
+  | .stopped :: _ => []
+
+/-- Confirmed prefixes stay durable, the rejected span writes only its failed
+consume, and a suffix produced from speculative state stays uncommitted. -/
+theorem replay_recovery_stops_at_rejection (confirmed : List span) (failure : span)
+    (suffix : List (ReplayProbe span)) :
+    replayRecoveryLog (confirmed.map ReplayProbe.committed ++
+      .settledRejection failure :: suffix) = confirmed ++ [failure] := by
+  induction confirmed with
+  | nil => rfl
+  | cons batch rest ih => simp [replayRecoveryLog, ih]
+
+/-- Failure of the standalone consume leaves that intent owed on restart. -/
+theorem replay_recovery_unconfirmed (confirmed : List span)
+    (suffix : List (ReplayProbe span)) :
+    replayRecoveryLog (confirmed.map ReplayProbe.committed ++ .stopped :: suffix) = confirmed := by
+  induction confirmed with
+  | nil => rfl
+  | cons batch rest ih => simp [replayRecoveryLog, ih]
 
 end Lambo.Flush

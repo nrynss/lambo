@@ -321,6 +321,9 @@ fn top_tier(
 /// write durable beside a still-unconsumed intent).
 pub type CommitHook = Box<dyn FnOnce(&mut Graph, &DeriveOutcome) + Send>;
 
+pub(crate) type JournalCommitHook =
+    Box<dyn FnOnce(&mut Graph, &DeriveOutcome, crate::store::replay_flush::Checkpoint) + Send>;
+
 /// The per-concept resolution computed by the async gather phase.
 enum Resolution {
     /// Canonical key already matched an existing concept — reuse it (byte-identical
@@ -618,7 +621,10 @@ pub async fn derive(
         semantic_match_threshold,
         None,
         &PinnedCitations::default(),
-        on_commit,
+        on_commit.map(|hook| {
+            Box::new(move |graph: &mut Graph, outcome: &DeriveOutcome, _| hook(graph, outcome))
+                as JournalCommitHook
+        }),
     )
     .await
 }
@@ -668,7 +674,7 @@ pub(crate) async fn derive_with(
     semantic_match_threshold: f64,
     supplied: Option<&SuppliedVector>,
     pinned: &PinnedCitations,
-    on_commit: Option<CommitHook>,
+    on_commit: Option<JournalCommitHook>,
 ) -> Result<DeriveOutcome, LamboError> {
     validate_limits(concepts, parent_of, semantic_match_threshold)?;
     if let Some(supplied) = supplied {
@@ -1021,7 +1027,7 @@ async fn derive_planned(
     io_deadline: tokio::time::Instant,
     supplied: Option<&SuppliedVector>,
     pinned: &PinnedCitations,
-    on_commit: Option<CommitHook>,
+    on_commit: Option<JournalCommitHook>,
 ) -> Result<DeriveOutcome, LamboError> {
     let is_supplied =
         |content: &str| supplied.is_some_and(|supplied| supplied.content.as_str() == content);
@@ -1504,6 +1510,10 @@ async fn derive_planned(
         // construction rolls it back and leaves both live state and its
         // ordered mutation log untouched, as the whole-graph clone this
         // replaced did, at a cost proportional to what the call writes.
+        if guard.replay_flush.deferred() {
+            return Err(crate::types::LamboError::ReplayRestartRequired);
+        }
+        let start = crate::store::replay_flush::Checkpoint::capture(&guard);
         let committed = guard.transaction(|g| {
             // #36 PR 4: every citation must still name what it named at the
             // ack, checked against the graph as it is now and before this
@@ -1945,7 +1955,7 @@ async fn derive_planned(
         // committed mutations and whatever the hook appends travel in one
         // batch, i.e. one store transaction. See `CommitHook`.
         if let Some(hook) = on_commit.take() {
-            hook(&mut guard, &outcome);
+            hook(&mut guard, &outcome, start);
         }
         #[cfg(test)]
         LAST_COMMIT.with(|d| d.set(Some(commit_started.elapsed())));

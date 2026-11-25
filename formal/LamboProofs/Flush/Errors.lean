@@ -26,7 +26,8 @@ carry over (`no_silent_loss_split`).
 
 Boundary: which SQLSTATE or SQLite code falls in which class is the adapters'
 table, stated in the doc comments, not derived; the classification is an
-input to the loop.
+input to the loop. This file models the ordinary flush path. See
+`Flush.replayRecoveryLog` in `Loop.lean` for startup replay isolation (#324).
 -/
 
 namespace Lambo.Flush

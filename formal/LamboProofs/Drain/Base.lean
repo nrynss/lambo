@@ -61,10 +61,11 @@ are abstract (`done`, `live`).
 
 **Atomicity assumption.** Concurrency is out of scope. Each worker step (run,
 commit with its consume, settle) and each replay step is one atomic
-operation, as the Rust's locks and its "no `.await` between a completed graph
-write and its settle" rule make them; an aborted worker is a job that was not
-run. A flush carries whole batches (one lock hold each), so a crash leaves a
-prefix of the batch log durable.
+operation for the graph and mutation log; an aborted worker is a job that
+was not run. The replay steps model proposed answers. A successful replay's
+live receipt waits for the store to confirm the span. A crash leaves a
+prefix of the batch log durable, except on a deterministic rejection, where
+`Flush.replayRecoveryLog` describes the confirmed prefix and failed consume.
 
 Rows and consumes are keyed by the receipt id, modelled as its (epoch,
 sequence) pair (`Job.key`), as the adapters key them by the full receipt

@@ -87,6 +87,7 @@ struct FlakyStore {
     /// Flushes still to refuse with a constraint violation, before any
     /// `fail_remaining` count: the flush loop dead-letters each (#345).
     dead_letter_remaining: AtomicUsize,
+    rejected_content: Option<&'static str>,
     /// Every batch it was handed, whole: the ordering assertions need the
     /// mutation **sequence**, not just the lengths.
     batches: PlMutex<Vec<MutationBatch>>,
@@ -100,6 +101,7 @@ impl FlakyStore {
             inner,
             fail_remaining: AtomicUsize::new(fail_next),
             dead_letter_remaining: AtomicUsize::new(0),
+            rejected_content: None,
             batches: PlMutex::new(Vec::new()),
             stats_panics: false,
         }
@@ -110,6 +112,11 @@ impl FlakyStore {
     /// goes on (#345).
     fn with_dead_letters(self, n: usize) -> Self {
         self.dead_letter_remaining.store(n, Ordering::SeqCst);
+        self
+    }
+
+    fn with_rejected_content(mut self, content: &'static str) -> Self {
+        self.rejected_content = Some(content);
         self
     }
 
@@ -143,6 +150,17 @@ impl GraphStore for FlakyStore {
     }
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         self.batches.lock().push(batch.clone());
+        if let Some(content) = self.rejected_content
+            && batch.mutations.iter().any(|mutation| {
+                matches!(
+                    mutation,
+                    Mutation::UpsertNode { node: crate::types::Node::Concept(concept) }
+                        if concept.content == content
+                )
+            })
+        {
+            return Err(StoreError::Constraint("23514".into()));
+        }
         let dead_letter = self
             .dead_letter_remaining
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {

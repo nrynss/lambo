@@ -829,12 +829,12 @@ impl WritePipeline {
         // the job is visible to a worker. A worker pops under the lanes lock
         // and consumes under the graph lock, so with both held here the log
         // can never carry a `ConsumeWriteIntent` ahead of its
-        // `PutWriteIntent`. No other site nests these two locks (workers take
-        // them strictly in sequence), so the order cannot deadlock.
+        // `PutWriteIntent`. Workers also take the graph first whenever they
+        // need both locks.
         let refusal = {
             let mut graph = self.ctx.graph.write();
             let mut lanes = self.lanes.lock();
-            let refusal = if lanes.sealed {
+            let refusal = if graph.ensure_replay_writable().is_err() || lanes.sealed {
                 Some((DropReason::Closed, WRITE_QUEUE_LANE_MAX))
             } else if lanes.lane_outstanding(&agent) + lanes.lane_held(&agent)
                 >= WRITE_QUEUE_LANE_MAX

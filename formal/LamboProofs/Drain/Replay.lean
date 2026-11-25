@@ -59,6 +59,7 @@ is one more attempt, not a timer.
 -/
 
 import LamboProofs.Drain.Base
+import LamboProofs.Flush.Loop
 
 namespace Lambo.Drain
 
@@ -1591,5 +1592,17 @@ theorem hold_then_serveQ_order (out : Nat → Job → RunResult) (now : Int) (s 
     ((fixedLoad_perm rows).map _).nodup_iff.mpr hnd
   rw [(serveQ_log live rout rout' s' _).2]
   exact (replayP_preserves stepQ live rout rout' s' _ _ hnd' (fixedLoad_sorted rows) hI).1
+
+/-- #324. After a mixed batch is rejected, the confirmed failure consume
+leaves the bad receipt settled and its neighbor owed. The second restart
+has just one row to run. Once it commits, neither intent is owed again. -/
+theorem replay_dead_letter_two_restarts (bad good : Job) (hne : bad.key ≠ good.key) :
+    let rows : List Intent := [⟨bad, none⟩, ⟨good, none⟩]
+    let goodSpan : Batch := [.write good.key, .consume good.key .appliedAfterRestart]
+    let first := applyLog rows (Flush.replayRecoveryLog
+      [.settledRejection [.consume bad.key .failed], .committed goodSpan])
+    pendingOf first = [⟨good, none⟩] ∧
+      applyLog first [goodSpan] = [⟨bad, some .failed⟩, ⟨good, some .appliedAfterRestart⟩] := by
+  simp [Flush.replayRecoveryLog, applyLog, applyMut, pendingOf, hne, Ne.symm hne]
 
 end Lambo.Drain

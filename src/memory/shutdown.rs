@@ -836,6 +836,7 @@ impl Memory {
         // from here until it is durable those mutations exist nowhere else,
         // and `close()` is a future its caller may drop.
         let mut tail = TailCustody::new(&self.graph, batch);
+        crate::store::replay_flush::defer_suffix(&self.graph, &mut tail.batch);
 
         // A degraded session errors **before** the empty-log shortcut.
         // While degraded the flush task keeps draining the log and DROPPING
@@ -901,13 +902,29 @@ impl Memory {
         // here rather than spanning the arms.
         let count = tail.len();
         let step = CloseStep::start(&self.session, 9, "final_flush");
-        let flushed = final_flush(self.store.as_ref(), tail.batch(), Some(self.lease_token)).await;
+        crate::store::replay_flush::stamp_attempt(&self.graph, &mut tail.batch);
+        let mut flushed =
+            final_flush(self.store.as_ref(), tail.batch(), Some(self.lease_token)).await;
+        if matches!(flushed, Err(StoreError::Constraint(_)))
+            && crate::store::replay_flush::has_replay(&self.graph, tail.batch())
+        {
+            flushed = crate::store::replay_flush::recover(
+                &self.graph,
+                &mut tail.batch,
+                self.store.as_ref(),
+                Some(self.lease_token),
+                Some(&self.lease_lost),
+                || self.flush.count_replay_dead_letter(),
+            )
+            .await;
+        }
         step.done();
         match flushed {
             Ok(()) => {
                 // Custody ends: the tail is durable, so it must NOT go back
                 // on the log. Nothing awaits between here and the return, so
                 // no cancellation can land in this window.
+                crate::store::replay_flush::committed(&self.graph, tail.batch());
                 tail.durable();
                 // Only now are the set-aside receipts true to call
                 // `intent_durable` (#117), all but those whose put an

@@ -78,6 +78,7 @@ impl Memory {
         if self.lease_lost() {
             return Err(self.lease_lost_error());
         }
+        self.graph.read().ensure_replay_writable()?;
         Ok(permit)
     }
 
@@ -122,6 +123,7 @@ impl Memory {
         if self.lease_lost() {
             return Err(self.lease_lost_error());
         }
+        self.graph.read().ensure_replay_writable()?;
         Ok(permit)
     }
 }

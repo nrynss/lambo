@@ -123,10 +123,33 @@ pub(super) fn truncate_ids(ids: &[NodeId]) -> Vec<String> {
 /// `"applied_after_restart"` when a later serve replays it. `at` is the
 /// consumer's clock at job start; it stamps [`WriteIntentOutcome::consumed_at`]
 /// and therefore starts the consumed row's retention window.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct ConsumeStamp {
     pub(super) tag: &'static str,
     pub(super) at: DateTime<Utc>,
+    pub(super) replay: Option<std::sync::Arc<crate::store::replay_flush::Completion>>,
+}
+
+impl ConsumeStamp {
+    fn append(
+        self,
+        graph: &mut Graph,
+        start: crate::store::replay_flush::Checkpoint,
+        receipt: String,
+        summary: &str,
+        destination: Option<&crate::types::SessionId>,
+    ) {
+        let outcome = WriteIntentOutcome {
+            tag: self.tag.into(),
+            summary: super::receipts::durable_summary(summary, destination),
+            consumed_at: self.at,
+        };
+        if let Some(completion) = self.replay {
+            graph.consume_replayed_write(receipt, outcome, start, completion);
+        } else {
+            graph.consume_write_intent(receipt, outcome);
+        }
+    }
 }
 
 /// What the lane worker does at a write's commit, run by [`WriteCtx::run`]
@@ -372,6 +395,9 @@ impl WriteCtx {
         consume: Option<ConsumeStamp>,
         worker: Option<&WorkerCommit>,
     ) -> Result<AppliedSummary, LamboError> {
+        if self.graph.read().replay_flush.deferred() {
+            return Err(LamboError::ReplayRestartRequired);
+        }
         match &job.payload {
             JobPayload::Derive {
                 concepts, pairs, ..
@@ -429,24 +455,20 @@ impl WriteCtx {
                         let ctx = self.clone();
                         let destination = job.receipt_destination.clone();
                         let worker = worker.cloned();
-                        let on_commit: Option<hybrid::CommitHook> = Some(Box::new(
-                            move |g: &mut Graph, outcome: &crate::graph::derive::DeriveOutcome| {
+                        let on_commit: Option<hybrid::JournalCommitHook> = Some(Box::new(
+                            move |g: &mut Graph,
+                                  outcome: &crate::graph::derive::DeriveOutcome,
+                                  start| {
                                 if let Some(worker) = &worker {
                                     worker.at_commit(g, &receipt);
                                 }
                                 if let Some(stamp) = consume {
-                                    g.consume_write_intent(
+                                    stamp.append(
+                                        g,
+                                        start,
                                         receipt,
-                                        WriteIntentOutcome {
-                                            tag: stamp.tag.into(),
-                                            summary: super::receipts::durable_summary(
-                                                &derive_sentence_of(
-                                                    strategy, submitted, outcome, image,
-                                                ),
-                                                destination.as_ref(),
-                                            ),
-                                            consumed_at: stamp.at,
-                                        },
+                                        &derive_sentence_of(strategy, submitted, outcome, image),
+                                        destination.as_ref(),
                                     );
                                 }
                                 *report_slot.lock() = ctx.stale_report(g, &targets);
@@ -471,6 +493,10 @@ impl WriteCtx {
                     }
                     MatchStrategy::Canonical => {
                         let mut g = self.graph.write();
+                        if g.replay_flush.deferred() {
+                            return Err(LamboError::ReplayRestartRequired);
+                        }
+                        let start = crate::store::replay_flush::Checkpoint::capture(&g);
                         let outcome = derive_cited(
                             &mut g,
                             job.interaction,
@@ -485,16 +511,12 @@ impl WriteCtx {
                             worker.at_commit(&mut g, &job.receipt.to_string());
                         }
                         if let Some(stamp) = consume {
-                            g.consume_write_intent(
+                            stamp.append(
+                                &mut g,
+                                start,
                                 job.receipt.to_string(),
-                                WriteIntentOutcome {
-                                    tag: stamp.tag.into(),
-                                    summary: super::receipts::durable_summary(
-                                        &derive_sentence(strategy, submitted, &outcome),
-                                        job.receipt_destination.as_ref(),
-                                    ),
-                                    consumed_at: stamp.at,
-                                },
+                                &derive_sentence(strategy, submitted, &outcome),
+                                job.receipt_destination.as_ref(),
                             );
                         }
                         *report_slot.lock() = self.stale_report(&g, &pinned.against);
@@ -590,6 +612,10 @@ impl WriteCtx {
                     } else {
                         depends_on_pins.clone()
                     };
+                    if g.replay_flush.deferred() {
+                        return Err(LamboError::ReplayRestartRequired);
+                    }
+                    let start = crate::store::replay_flush::Checkpoint::capture(&g);
                     let outcome = record_action_against(
                         &mut g,
                         job.interaction,
@@ -605,16 +631,12 @@ impl WriteCtx {
                         worker.at_commit(&mut g, &job.receipt.to_string());
                     }
                     if let Some(stamp) = consume {
-                        g.consume_write_intent(
+                        stamp.append(
+                            &mut g,
+                            start,
                             job.receipt.to_string(),
-                            WriteIntentOutcome {
-                                tag: stamp.tag.into(),
-                                summary: super::receipts::durable_summary(
-                                    &action_sentence(self.match_strategy, &outcome),
-                                    job.receipt_destination.as_ref(),
-                                ),
-                                consumed_at: stamp.at,
-                            },
+                            &action_sentence(self.match_strategy, &outcome),
+                            job.receipt_destination.as_ref(),
                         );
                     }
                     let report = self.stale_report(&g, against);
@@ -775,6 +797,9 @@ impl WritePipeline {
                 // One write per turn, under the lock admission takes, so a
                 // held write is counted (held, then running) until it settles.
                 let next = {
+                    // Read the graph before taking lanes. A rejected replay
+                    // is permanent for this attach, including held retries.
+                    let restart_required = ctx.graph.read().replay_flush.deferred();
                     let mut l = lanes.lock();
                     let fenced = ctx.lease_lost.load(Ordering::Acquire);
                     let has_held = l.lane_held(&agent) > 0;
@@ -786,7 +811,7 @@ impl WritePipeline {
                         .copied()
                         .unwrap_or_else(tokio::time::Instant::now);
                     let retry_due = due <= tokio::time::Instant::now();
-                    if has_held && (fenced || (retry_due && !l.sealed)) {
+                    if has_held && (fenced || (retry_due && !l.sealed && !restart_required)) {
                         // The oldest held write first: retried, or refused
                         // below if the lease is gone.
                         let job = l.held.get_mut(&agent).and_then(VecDeque::pop_front);
@@ -804,9 +829,9 @@ impl WritePipeline {
                     } else if let Some(job) = l.queues.get_mut(&agent).and_then(VecDeque::pop_front)
                     {
                         l.queued -= 1;
-                        if has_held {
-                            // Its retry not due yet (or closing): it keeps its
-                            // place behind the held writes, counted, unrun.
+                        if has_held || (restart_required && !fenced) {
+                            // Keep its place behind older owed writes,
+                            // counted and unrun.
                             let id = job.receipt;
                             l.held.entry(agent.clone()).or_default().push_back(job);
                             Next::Held(id)
@@ -815,7 +840,7 @@ impl WritePipeline {
                             *l.running_per_lane.entry(agent.clone()).or_insert(0) += 1;
                             Next::Run(Box::new(job))
                         }
-                    } else if has_held && !l.sealed {
+                    } else if has_held && !l.sealed && !restart_required {
                         Next::Wait(due)
                     } else {
                         // Exit decision and liveness bookkeeping happen under
@@ -889,6 +914,7 @@ impl WritePipeline {
                     let started = tokio::time::Instant::now();
                     let stamp = ConsumeStamp {
                         tag: "applied",
+                        replay: None,
                         at: (clock)(),
                     };
                     let raw_outcome = ctx.run(&job, Some(stamp), Some(&worker_commit)).await;
@@ -921,7 +947,7 @@ impl WritePipeline {
                     // write's last attempt, and settles `failed` if the lookup
                     // times out again, so one input slow every time cannot
                     // hold the lane.
-                    let hold_cause = match &raw_outcome {
+                    let mut hold_cause = match &raw_outcome {
                         Ok(_) => {
                             // No `lookup_streak` reset here: `run` reset it
                             // inside the commit (`WorkerCommit`, #346). Here is
@@ -964,20 +990,24 @@ impl WritePipeline {
                         };
                         let receipt = job.receipt.to_string();
                         let mut g = ctx.graph.write();
-                        g.consume_write_intent(
-                            receipt.clone(),
-                            WriteIntentOutcome {
-                                tag: "failed".into(),
-                                summary: super::receipts::durable_summary(
-                                    &why,
-                                    job.receipt_destination.as_ref(),
-                                ),
-                                consumed_at: (clock)(),
-                            },
-                        );
-                        // Consumed, not yet settled, in the consume's own
-                        // lock hold (`WorkerCommit`, #345).
-                        g.mark_consumed_unsettled(&receipt);
+                        if g.replay_flush.deferred() {
+                            hold_cause = Some("replay was rejected; restart required");
+                        } else {
+                            g.consume_write_intent(
+                                receipt.clone(),
+                                WriteIntentOutcome {
+                                    tag: "failed".into(),
+                                    summary: super::receipts::durable_summary(
+                                        &why,
+                                        job.receipt_destination.as_ref(),
+                                    ),
+                                    consumed_at: (clock)(),
+                                },
+                            );
+                            // Consumed, not yet settled, in the consume's own
+                            // lock hold (`WorkerCommit`, #345).
+                            g.mark_consumed_unsettled(&receipt);
+                        }
                     }
                     // Two strings from here on: the class for the model, the
                     // error for the operator.
@@ -1003,7 +1033,8 @@ impl WritePipeline {
                     // receipt answers `pending_replay`. No `.await` from here
                     // to the `continue`.
                     let receipt = job.receipt;
-                    let (attempts, held) = {
+                    let (attempts, held, retry_in) = {
+                        let graph = ctx.graph.read();
                         let mut l = lanes.lock();
                         l.running -= 1;
                         if let Some(n) = l.running_per_lane.get_mut(&agent) {
@@ -1014,29 +1045,44 @@ impl WritePipeline {
                             _ => 1,
                         };
                         l.held_attempts.insert(agent.clone(), (receipt, attempts));
-                        l.held_due.insert(
-                            agent.clone(),
-                            tokio::time::Instant::now() + held_retry_backoff(attempts),
-                        );
+                        let retry_in = if graph.replay_flush.deferred() {
+                            l.held_due.remove(&agent);
+                            None
+                        } else {
+                            let delay = held_retry_backoff(attempts);
+                            l.held_due
+                                .insert(agent.clone(), tokio::time::Instant::now() + delay);
+                            Some(delay)
+                        };
                         l.held.entry(agent.clone()).or_default().push_front(job);
-                        (attempts, l.lane_held(&agent))
+                        (attempts, l.lane_held(&agent), retry_in)
                     };
                     hold_one(&receipts, &receipt);
-                    tracing::warn!(
-                        session = %ctx.session,
-                        agent = %agent,
-                        receipt = %receipt,
-                        attempts,
-                        held,
-                        retry_in = ?held_retry_backoff(attempts),
-                        error = %detail,
-                        "write queue: {cause} for this agent's oldest owed write ({attempts} \
-                         attempt(s) in this server); it and the agent's {held} held write(s) answer \
-                         pending_replay and are retried in the background, oldest first, so none \
-                         applies ahead of it. At close they stay durable intents for the next \
-                         serve. A write that never succeeds (too large for the embed budget, say) \
-                         holds this agent's writes until a restart"
-                    );
+                    if let Some(retry_in) = retry_in {
+                        tracing::warn!(
+                            session = %ctx.session,
+                            agent = %agent,
+                            receipt = %receipt,
+                            attempts,
+                            held,
+                            ?retry_in,
+                            error = %detail,
+                            "write queue: {cause} for this agent's oldest owed write ({attempts} \
+                             attempt(s) in this server); it and the agent's {held} held write(s) answer \
+                             pending_replay and are retried in the background, oldest first, so none \
+                             applies ahead of it. At close they stay durable intents for the next \
+                             serve. A write that never succeeds (too large for the embed budget, say) \
+                             holds this agent's writes until a restart"
+                        );
+                    } else {
+                        tracing::warn!(
+                            session = %ctx.session,
+                            agent = %agent,
+                            receipt = %receipt,
+                            held,
+                            "write queue: replay requires a restart; held writes await the next serve"
+                        );
+                    }
                     settled.notify_waiters();
                     continue;
                 }

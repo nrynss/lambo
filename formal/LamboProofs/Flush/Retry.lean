@@ -24,6 +24,9 @@ error, all with one batch (`ladder_length_le`, `ladder_exhausted`,
 acknowledgements included, and a retained batch re-sent with newer mutations
 lands as if sent once (`ladder_ok_effect`, `replay_absorbs`).
 
+Replay consumes use the clock of the successful store attempt for retention.
+Receipt retention is outside this retry model.
+
 Boundary: time is milliseconds on the tokio clock and store calls take no
 time, so a ladder's duration is the sum of its sleeps; nothing else writes
 the store between attempts (`Idempotent`'s assumption). The fence check the

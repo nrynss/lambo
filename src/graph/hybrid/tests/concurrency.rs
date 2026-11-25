@@ -538,9 +538,9 @@ async fn the_commit_hook_runs_once_after_a_replan() {
     let embedder =
         Arc::new(TableEmbedder::new(vec![("hooked topic", probe())]).pausing_on("hooked topic"));
     let runs = Arc::new(AtomicUsize::new(0));
-    let hook: CommitHook = {
+    let hook: JournalCommitHook = {
         let runs = runs.clone();
-        Box::new(move |g: &mut Graph, outcome: &DeriveOutcome| {
+        Box::new(move |g: &mut Graph, outcome: &DeriveOutcome, _| {
             runs.fetch_add(1, Ordering::SeqCst);
             assert!(outcome.matched.iter().all(|id| g.node(*id).is_some()));
         })
