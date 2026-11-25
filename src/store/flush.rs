@@ -455,7 +455,7 @@ impl FlushTask {
         self.shared.stats()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory"))]
     pub(crate) fn pause_next_drain(
         &self,
         reached: Arc<tokio::sync::Notify>,

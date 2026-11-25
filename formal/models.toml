@@ -588,7 +588,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Flush/Loop.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:5350f2734bc1121e1ca8dbdeedb2a70e7b3ced09a7aded205ad4d6d3b8952005"
+read_digest = "v2:sha256:3d9008769ac50b2d8ea9c1a658c32cfd320dd793284340957371ce3d78100768"
 rust = [
   "src/memory/shutdown.rs#Memory::close",
   "src/memory/shutdown.rs#Memory::finish_close",
