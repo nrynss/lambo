@@ -7,9 +7,10 @@ Concrete runs of `Machine.lean`'s state machine, checked by `decide`, that
 mirror the tests in `src/store/tiered/tests.rs`: the mirror and served leg,
 the contract refusal, the mirror failure and repair, the #18 cases
 (overtaken repair, lost lease, erase, ahead marker, unleased flush), the #293
-re-take, and the #319 migration and relabel; and the runs that show what the
-current Rust does wrong. The same batches before #319, and the fixes #319 did
-not take, are `History.lean`, which the docs may not cite.
+re-take, the #319 migration and relabel, and the #320 mirror fence. Other
+runs show known disagreements with the intended behavior. The same batches
+before #319, and the fixes #319 did not take, are `History.lean`, which the
+docs may not cite.
 
 Results about the Rust: a re-embed migration (`Graph::reembed_all`, every
 `UpsertNode` before the trailing `SetEmbedding`) switches the contract, so
@@ -20,9 +21,13 @@ read rank two builds together while the bulk lands
 (`inplace_reembed_mixes_builds`). `sync_for_read` re-checks only `Unknown` and
 `Stale`, so a reader that once found the marker in sync trusts the index until
 it reloads (`reader_never_rechecks`; real readers bound the window by reload
-or by being one-shot or pinned). `mirror_session` checks only this store's
-record of the lease, so a writer stalled past its lease writes an erased
-session's vector and marker back (`mirror_lands_after_erase`). `repair_once`
+or by being one-shot or pinned). Before #320, a mirror stalled past its
+lease could write an erased session's vector and marker back
+(`mirror_lands_after_erase`). The #320 runs use `fencedMirrorTick` to model
+a durable lease check at each request submission. A bulk already submitted
+can still land; the separate check prevents the next marker submission
+(`mirror_does_not_submit_after_erase`,
+`mirror_bulk_in_flight_does_not_recreate_marker`). `repair_once`
 reconciles from the older snapshot when `recheck_ahead` finds the marker
 behind, contrary to #18's rule (`repair_from_pre_recheck_snapshot`). A batch
 of only `DeleteEdge`s leaves the marker behind
@@ -329,7 +334,7 @@ theorem reader_never_rechecks :
 example : fellBack (run Pt readerSeeded [.otherWrite [.delete 1] false, .loadBegin, .loadEnd,
     .read 1]) = true := by decide
 
-/-- **A mirror in flight lands after another process's erase.** The mirror
+/-- **Before #320, a mirror lands after another process's erase.** The mirror
 checks only this store's record of the lease, never the durable row
 (`ensure_fenced` guards repairs, not mirrors): a flush that committed before
 the writer stalled past its lease, then an erase by another process that
@@ -340,6 +345,44 @@ theorem mirror_lands_after_erase :
     let s := run Pt seeded ([.write [.upsert 4 (some (0, 40))], .eraseOther] ++ steps .mirStep 3)
     s.d.erased = true ∧ docAt s 1 4 = some (0, 40) ∧ markerEpoch s = some 2 ∧
       s.log.take 2 = [.mirror 1, .mirror 1] := by decide
+
+/-- #320 adds a send step to each mirror request. The Boolean says whether
+the current bulk or marker has been submitted. Check the lease at submission.
+Items from a submitted bulk can still land after erasure. Moving to the
+marker starts a new request and requires a fresh check. -/
+def fencedMirrorTick (run : St × Bool) : St × Bool :=
+  let (s, sent) := run
+  let stop := ({ markStale s with mir := .idle }, false)
+  match s.mir with
+  | .idle => (s, false)
+  | .puts _ _ _ [] => (mirStep s, false)
+  | .puts t _ _ (_ :: _) =>
+    if sent then (mirStep s, true)
+    else if isFenced s t then (s, true) else stop
+  | .marker t _ _ =>
+    if sent then (mirStep s, false)
+    else if isFenced s t then (s, true) else stop
+
+/-- An erase before the mirror submits its bulk leaves the erased session's
+documents and marker absent. -/
+theorem mirror_does_not_submit_after_erase :
+    let ready := step Pt seeded (.write [.upsert 4 (some (0, 40))])
+    let erased := step Pt ready .eraseOther
+    let finished := (fencedMirrorTick (erased, false)).1
+    finished.d.erased = true ∧ docAt finished 1 4 = none ∧
+      markerEpoch finished = none ∧ finished.mir = .idle := by decide
+
+/-- A bulk already submitted can land after erasure, while the next lease
+check prevents submission of the marker for that bulk. -/
+theorem mirror_bulk_in_flight_does_not_recreate_marker :
+    let ready := step Pt seeded (.write [.upsert 4 (some (0, 40))])
+    let sent := fencedMirrorTick (ready, false)
+    let erased := (step Pt sent.1 .eraseOther, sent.2)
+    let landed := fencedMirrorTick erased
+    let markerReady := fencedMirrorTick landed
+    let finished := (fencedMirrorTick markerReady).1
+    finished.d.erased = true ∧ docAt finished 1 4 = some (0, 40) ∧
+      markerEpoch finished = none ∧ finished.mir = .idle := by decide
 
 /-- The repair in the same position writes nothing (#18): its fence reads the
 durable row. -/

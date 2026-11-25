@@ -61,6 +61,20 @@ pub(crate) struct Stored {
 
 type Key = (String, String);
 
+#[cfg(all(test, feature = "store-memory"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PauseBefore {
+    EnsureIndex,
+    Bulk,
+}
+
+#[cfg(all(test, feature = "store-memory"))]
+struct PausedCall {
+    before: PauseBefore,
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    resume: std::sync::Arc<tokio::sync::Notify>,
+}
+
 #[derive(Default)]
 pub(crate) struct FakeIndex {
     /// Realtime view: `(index, node id)` -> stored.
@@ -96,9 +110,41 @@ pub(crate) struct FakeIndex {
     pub bulk_calls: AtomicUsize,
     pub delete_calls: AtomicUsize,
     pub refresh_calls: AtomicUsize,
+    #[cfg(all(test, feature = "store-memory"))]
+    paused_call: Mutex<Option<PausedCall>>,
 }
 
 impl FakeIndex {
+    #[cfg(all(test, feature = "store-memory"))]
+    pub(super) fn pause_next_call(
+        &self,
+        before: PauseBefore,
+    ) -> (
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ) {
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+        *self.paused_call.lock() = Some(PausedCall {
+            before,
+            entered: entered.clone(),
+            resume: resume.clone(),
+        });
+        (entered, resume)
+    }
+
+    #[cfg(all(test, feature = "store-memory"))]
+    async fn pause_before(&self, before: PauseBefore) {
+        let pause = self
+            .paused_call
+            .lock()
+            .take_if(|pause| pause.before == before);
+        if let Some(pause) = pause {
+            pause.entered.notify_one();
+            pause.resume.notified().await;
+        }
+    }
+
     /// Writes are searchable at once (`refresh = "wait_for"`).
     pub(crate) fn new() -> Self {
         Self::default()
@@ -320,12 +366,16 @@ impl RecallIndex for FakeIndex {
 
     async fn ensure_index(&self, contract: &EmbeddingContract) -> Result<(), StoreError> {
         self.check_up()?;
+        #[cfg(all(test, feature = "store-memory"))]
+        self.pause_before(PauseBefore::EnsureIndex).await;
         self.indices.lock().insert(self.index_name(contract));
         Ok(())
     }
 
     async fn bulk(&self, ops: &[DocOp]) -> Result<(), StoreError> {
         self.check_up()?;
+        #[cfg(all(test, feature = "store-memory"))]
+        self.pause_before(PauseBefore::Bulk).await;
         Self::stall(&self.delay_bulk_ms).await;
         assert!(
             !self.panic_next_bulk.swap(false, Ordering::SeqCst),

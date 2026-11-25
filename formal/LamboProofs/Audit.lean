@@ -909,6 +909,8 @@ open Lambo
 #print axioms Lambo.Tiered.inplace_reembed_mixes_builds
 #print axioms Lambo.Tiered.reader_never_rechecks
 #print axioms Lambo.Tiered.mirror_lands_after_erase
+#print axioms Lambo.Tiered.mirror_does_not_submit_after_erase
+#print axioms Lambo.Tiered.mirror_bulk_in_flight_does_not_recreate_marker
 #print axioms Lambo.Tiered.repair_from_pre_recheck_snapshot
 #print axioms Lambo.Tiered.edge_only_batch_leaves_marker_behind
 #print axioms Lambo.Tiered.rerank_partial_not_exact

@@ -591,6 +591,68 @@ async fn a_stale_token_flush_is_refused_and_mirrors_nothing() {
     assert_eq!(fake.marker(&sid), None);
 }
 
+/// A second store can erase while the old writer is suspended. A bulk
+/// request already on the wire may land, but the mirror must stop before
+/// submitting its next index write.
+#[tokio::test(start_paused = true)]
+async fn a_mirror_stops_submitting_index_writes_after_another_store_erases() {
+    use super::fake::PauseBefore;
+    use std::sync::atomic::Ordering;
+
+    for (session, pause, bulk_in_flight) in [
+        ("erase-before-mirror-bulk", PauseBefore::EnsureIndex, false),
+        ("erase-during-mirror-bulk", PauseBefore::Bulk, true),
+    ] {
+        let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+        let store = tier(&primary, &fake);
+        let sid = SessionId::new(session);
+        let writer = holder("old-writer");
+        let token = attach(&store, &sid, &writer).await;
+        let (seed, first) = seed_batch(&sid, 1);
+        store.flush(&first, Some(token)).await.unwrap();
+        settle(&store).await;
+        assert_eq!(fake.marker(&sid), Some(1));
+
+        let (concept, second) = one_more(&sid, &seed, 2);
+        let (entered, resume) = fake.pause_next_call(pause);
+        let before = fake.bulk_calls.load(Ordering::SeqCst);
+        let flush = store.flush(&second, Some(token));
+        tokio::pin!(flush);
+        tokio::select! {
+            result = &mut flush => panic!("mirror finished before the test pause: {result:?}"),
+            () = entered.notified() => {}
+        }
+
+        // Release directly on the primary to simulate a lease lapse without
+        // updating the old tier's local record. The eraser uses its own tier.
+        primary.release_lease(&sid, &writer).await.unwrap();
+        let eraser = tier(&primary, &fake);
+        let erased = eraser.erase_session(&sid, &holder("eraser")).await.unwrap();
+        assert!(matches!(erased, EraseOutcome::Erased(_)));
+        assert_eq!(store.with_state(&sid, |st| st.held), Some(token));
+        assert!(fake.live(&sid).is_empty());
+        assert_eq!(fake.marker(&sid), None);
+
+        resume.notify_one();
+        flush
+            .await
+            .expect("the primary accepted the flush before erasure");
+        assert_eq!(
+            fake.bulk_calls.load(Ordering::SeqCst),
+            before + usize::from(bulk_in_flight),
+            "only a bulk already submitted may land after the erase"
+        );
+        let live = fake.live(&sid);
+        assert_eq!(live.len(), usize::from(bulk_in_flight));
+        assert_eq!(live.contains_key(&concept.0.to_string()), bulk_in_flight);
+        assert_eq!(
+            fake.marker(&sid),
+            None,
+            "the mirror recreated the erased marker"
+        );
+    }
+}
+
 /// A replayed or late older write loses to the newer one already indexed,
 /// within one holder and across a takeover.
 #[tokio::test]

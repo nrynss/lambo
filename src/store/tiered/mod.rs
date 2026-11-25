@@ -618,7 +618,9 @@ impl Tier {
     /// the authority: a takeover or an erase moves its token past `token`
     /// even when this process has not noticed (a stall past the TTL). A
     /// repair checks before each bulk chunk, each sweep pass and the marker
-    /// write, so a lost lease ends it without another write. A request
+    /// write. A mirror checks before its bulk and again before its marker
+    /// write. Once a check detects a lost lease, neither submits another
+    /// session write. A request
     /// already in flight when the lease is lost can still land; that window
     /// is one request, and its version is below anything the next holder
     /// writes. A store without durable leases has only the first check.
@@ -1132,7 +1134,7 @@ impl Tier {
                 return;
             }
         };
-        self.mirror_ops(session, batch, version).await;
+        self.mirror_ops(session, batch, token, version).await;
     }
 
     /// An unleased write (the seed and fixture path) is not mirrored (#18).
@@ -1182,6 +1184,7 @@ impl Tier {
         self: &Arc<Self>,
         session: &SessionId,
         batch: &MutationBatch,
+        token: u64,
         version: Option<u64>,
     ) {
         let before = match self.durable_contract(session).await {
@@ -1217,8 +1220,13 @@ impl Tier {
                 self.recall.ensure_index(contract).await?;
             }
             if !projection.ops.is_empty() {
+                self.ensure_fenced(session, token).await?;
                 self.recall.bulk(&projection.ops).await?;
             }
+            // Provision before the final fence so the marker write can go
+            // straight to its PUT. The lease may have moved during the bulk.
+            self.recall.provision().await?;
+            self.ensure_fenced(session, token).await?;
             self.recall
                 .write_marker(
                     session,
