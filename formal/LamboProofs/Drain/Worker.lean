@@ -28,6 +28,10 @@ Boundary: each event is atomic, as in `Base.lean`; when a retry comes due is
 the Rust's timer, not modelled; a run's result is an input per write. A
 worker that panics after its commit is `Close.lean`'s (`stepK`, `stepP`), not
 `stepW`'s.
+Startup replay admission and restart-required parking are outside the lane
+events below. The writer refuses fresh admissions while replay is staging or
+unconfirmed, and a lane parked for restart keeps its intents owed without
+timed retries.
 -/
 
 import LamboProofs.Drain.Replay

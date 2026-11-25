@@ -78,11 +78,7 @@ impl Memory {
         if self.lease_lost() {
             return Err(self.lease_lost_error());
         }
-        if self.graph.read().replay_flush.deferred() {
-            return Err(LamboError::Config(
-                "replay was rejected; restart required before writing".into(),
-            ));
-        }
+        self.graph.read().ensure_replay_writable()?;
         Ok(permit)
     }
 
@@ -127,11 +123,7 @@ impl Memory {
         if self.lease_lost() {
             return Err(self.lease_lost_error());
         }
-        if self.graph.read().replay_flush.deferred() {
-            return Err(LamboError::Config(
-                "replay was rejected; restart required before writing".into(),
-            ));
-        }
+        self.graph.read().ensure_replay_writable()?;
         Ok(permit)
     }
 }

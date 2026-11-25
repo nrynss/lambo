@@ -1104,6 +1104,7 @@ impl FlushLoop {
         let mut retries_used: u32 = 0;
         let mut backoff = BACKOFF_BASE;
         loop {
+            super::replay_flush::stamp_attempt(&self.graph, &mut self.pending);
             let result = flush_attempt(self.store.as_ref(), &self.pending, self.token).await;
             match result {
                 Ok(()) => return Ok(()),
@@ -1914,8 +1915,8 @@ mod tests {
         inner: Arc<dyn GraphStore>,
         flush_calls: AtomicUsize,
         batch_sizes: Mutex<Vec<usize>>,
-        /// Refuse only the first flush, then delegate (#60's pin test).
-        only_first: bool,
+        /// Which attempts to refuse, indexed from the first call.
+        refuses: fn(usize) -> bool,
         /// The error every refused flush returns.
         refusal: Box<dyn Fn() -> StoreError + Send + Sync>,
         /// `write_flush_stats` calls (they succeed and store nothing).
@@ -1928,7 +1929,7 @@ mod tests {
                 inner,
                 flush_calls: AtomicUsize::new(0),
                 batch_sizes: Mutex::new(Vec::new()),
-                only_first: false,
+                refuses: |_| true,
                 refusal: Box::new(|| StoreError::Constraint("23505".into())),
                 stats_writes: AtomicUsize::new(0),
             }
@@ -1947,7 +1948,7 @@ mod tests {
 
         fn only_first(inner: Arc<dyn GraphStore>) -> Self {
             Self {
-                only_first: true,
+                refuses: |call| call == 0,
                 ..Self::new(inner)
             }
         }
@@ -1973,7 +1974,7 @@ mod tests {
         ) -> Result<(), StoreError> {
             let call = self.flush_calls.fetch_add(1, Ordering::SeqCst);
             self.batch_sizes.lock().push(batch.len());
-            if self.only_first && call > 0 {
+            if !(self.refuses)(call) {
                 return self.inner.flush(batch, _token).await;
             }
             Err((self.refusal)())
@@ -4320,6 +4321,66 @@ mod tests {
         assert!(finished.load(Ordering::SeqCst));
         assert_eq!(dead_letters, 1);
         assert_eq!(store.flush_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn ordinary_tail_rejection_keeps_the_writer_open_after_replay_commits() {
+        use crate::store::replay_flush::{defer_suffix, recover, Checkpoint, Completion};
+        use crate::types::WriteIntentOutcome;
+
+        let graph = new_graph();
+        let start = Checkpoint::capture(&graph.read());
+        let replayed = add_interaction(&graph, 1, None);
+        let completion = Arc::new(Completion::default());
+        graph.write().consume_replayed_write(
+            "replay".into(),
+            WriteIntentOutcome {
+                tag: "applied_after_restart".into(),
+                summary: String::new(),
+                consumed_at: Utc::now(),
+            },
+            start,
+            completion.clone(),
+        );
+        let replay_len = graph.read().log_len();
+        let ordinary = add_interaction(&graph, 2, Some(replayed));
+        let mut batch = graph.write().drain_log();
+        let ordinary_len = batch.len() - replay_len;
+
+        let fresh_graph = graph.clone();
+        completion.on_finish(Box::new(move |outcome| {
+            assert!(outcome.is_some());
+            // This runs after the final replay span commits and before the
+            // ordinary tail attempt. A fresh writer can now stage a write.
+            fresh_graph.read().ensure_replay_writable().unwrap();
+            add_interaction(&fresh_graph, 3, Some(ordinary));
+        }));
+        let store = ConstraintStore {
+            refuses: |call| call > 0,
+            ..ConstraintStore::new(Arc::new(MemoryStore::new()))
+        };
+
+        let result = recover(&graph, &mut batch, &store, None, None, || {
+            panic!("ordinary dead letters are handled by the caller")
+        })
+        .await;
+        assert!(matches!(result, Err(StoreError::Constraint(_))));
+        assert_eq!(store.flush_calls(), 2);
+        assert_eq!(
+            batch.len(),
+            ordinary_len,
+            "only the uncommitted tail remains"
+        );
+        let mut fresh = graph.write().drain_log();
+        let fresh_len = fresh.len();
+        assert!(fresh_len > 0, "the fresh write reached the mutation log");
+        defer_suffix(&graph, &mut fresh);
+        assert_eq!(
+            fresh.len(),
+            fresh_len,
+            "the new ordinary write remains flushable"
+        );
+        graph.read().ensure_replay_writable().unwrap();
     }
 
     #[test]

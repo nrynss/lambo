@@ -2,6 +2,74 @@
 
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn rejected_replay_parks_running_and_queued_writes_until_restart() {
+    use crate::store::replay_flush::{discarded, Checkpoint, Completion};
+    use crate::types::{Mutation, WriteIntentOutcome};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let rig = Rig::hybrid(
+        "wq-replay-restart-required",
+        Arc::new(HeldEmbedder {
+            gate: gate.clone(),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+        }),
+    );
+    calibrate_through_gate(&rig, &gate).await;
+    let before = calls.load(Ordering::Relaxed);
+    let agent = AgentId::new("agent-a");
+    let running = rig.derive(&agent, "running write").await;
+    until(|| calls.load(Ordering::Relaxed) > before, "the first embed").await;
+    let queued = rig.derive(&agent, "queued write").await;
+
+    // Simulate the flusher dropping an unrelated replay group while the
+    // worker has already passed its preflight check.
+    let outcome = WriteIntentOutcome {
+        tag: "applied_after_restart".into(),
+        summary: String::new(),
+        consumed_at: *rig.now.lock(),
+    };
+    let receipt = "previous writer".to_string();
+    let session_id = {
+        let mut graph = rig.graph.write();
+        let start = Checkpoint::capture(&graph);
+        graph.consume_replayed_write(
+            receipt.clone(),
+            outcome.clone(),
+            start,
+            Arc::new(Completion::default()),
+        );
+        graph.session_id().clone()
+    };
+    discarded(
+        &rig.graph,
+        &[Mutation::ConsumeWriteIntent {
+            session_id,
+            receipt,
+            outcome,
+        }],
+        false,
+    );
+
+    gate.add_permits(1);
+    until(
+        || rig.pipeline.lanes.lock().workers.is_empty(),
+        "the parked lane to exit",
+    )
+    .await;
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert_eq!(calls.load(Ordering::Relaxed), before + 1);
+    assert!(!rig.pipeline.lanes.lock().held_due.contains_key(&agent));
+    for submitted in [running, queued] {
+        assert_eq!(
+            rig.pipeline.lookup(&agent, submitted.receipt).tag(),
+            "pending_replay"
+        );
+    }
+}
+
 /// The quiesce must not leave a receipt answering `pending` forever in a
 /// process that is exiting.
 #[tokio::test]

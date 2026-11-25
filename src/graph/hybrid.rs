@@ -1511,9 +1511,7 @@ async fn derive_planned(
         // ordered mutation log untouched, as the whole-graph clone this
         // replaced did, at a cost proportional to what the call writes.
         if guard.replay_flush.deferred() {
-            return Err(crate::types::LamboError::Config(
-                "replay was rejected; restart required before writing".into(),
-            ));
+            return Err(crate::types::LamboError::ReplayRestartRequired);
         }
         let start = crate::store::replay_flush::Checkpoint::capture(&guard);
         let committed = guard.transaction(|g| {

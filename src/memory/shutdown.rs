@@ -902,6 +902,7 @@ impl Memory {
         // here rather than spanning the arms.
         let count = tail.len();
         let step = CloseStep::start(&self.session, 9, "final_flush");
+        crate::store::replay_flush::stamp_attempt(&self.graph, &mut tail.batch);
         let mut flushed =
             final_flush(self.store.as_ref(), tail.batch(), Some(self.lease_token)).await;
         if matches!(flushed, Err(StoreError::Constraint(_)))

@@ -187,7 +187,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Receipts.lean"
 read_against = "4cab4380"
-read_digest = "v2:sha256:e7b6e78bb3c82f8e18c13905c6928169cbfba8abda3888c7ebf94b06f2cc784e"
+read_digest = "v2:sha256:a5e30bc8c62aaa97e02c9ffe72592d2eab99d26ef436b4e96a9e1034f85ee382"
 rust = [
   "src/writeq/receipts.rs",
   "src/writeq/admission.rs",
@@ -480,7 +480,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Base.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:0e99f1363fc7bc27183ce5970b262f7396df8f8074b464f28ce455f2cf72da71"
+read_digest = "v2:sha256:bb0d1f83ebbd4f1287f5ab656527d0984d0394d3d8475875f6e885e5b2da0e43"
 rust = [
   "src/writeq/execution.rs#WriteCtx::run",
   "src/writeq/execution.rs#ConsumeStamp",
@@ -514,7 +514,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Replay.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:b238f07816a48d441a745fbc0388d1ba683bb0e147ccc7a8597c12b124ed401b"
+read_digest = "v2:sha256:9b01b7b7eb5f064ba94894a3f87fe12843d555031ba7287b0323d5852a5e7c69"
 rust = [
   "src/writeq/replay.rs",
   "src/store/replay_flush.rs",
@@ -534,7 +534,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Worker.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:f75cf93f6cfae36d635d6ff975f772a9648121c42a39d885cbe149165f4c7aad"
+read_digest = "v2:sha256:14367db80f39209b1818db0e7ddcd6f7b71e33a246acd57eb2b66e65bf8c8b54"
 rust = [
   "src/writeq/execution.rs",
   "src/writeq/admission.rs#Lanes",
@@ -549,7 +549,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Close.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:a43cffccc036520895ab8f5a77b8937134ec0f46b34ea7928c917fc4c4092c5a"
+read_digest = "v2:sha256:156876ee939972d811c8acf65e71a0f237aef71452ea5abc70e3a36f19e58486"
 rust = [
   "src/writeq/drain.rs",
   "src/memory/shutdown.rs#Memory::close",
@@ -571,7 +571,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Flush/Retry.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:255259c7c884ed1d19c4cc5ab3fa816e13f70925dd61e0e00be59b3a416015a2"
+read_digest = "v2:sha256:68e7d2671e9ea004399359593378c781de0a47db23d5674022d3ff32df248445"
 rust = [
   "src/store/flush.rs#flush_with_retry",
   "src/store/flush.rs#flush_attempt",
@@ -587,7 +587,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Flush/Loop.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:8e904941cc1b1b0de152c1a98e4a7a64ba151a17da87219a0459ef0f3f29aeef"
+read_digest = "v2:sha256:c11c81550940c7eddb0a322e44b9fb314f1fbf724a04af7426d3f4e50a37edc4"
 rust = [
   "src/store/flush.rs",
   "src/store/replay_flush.rs",

@@ -626,11 +626,123 @@ async fn a_dead_letter_does_not_replay_the_bad_intent_on_every_restart() {
         store
             .batches()
             .iter()
-            .filter(|batch| consumes(batch, good) && !consumes(batch, bad))
+            .filter(|batch| {
+                consumes(batch, good)
+                    && !consumes(batch, bad)
+                    && batch.mutations.iter().any(|mutation| {
+                        matches!(mutation, Mutation::UpsertNode { node: crate::types::Node::Concept(concept) }
+                            if concept.id == durable.concepts[0].id)
+                    })
+            })
             .count(),
         1,
         "the valid intent commits its effects and consume together on the second restart"
     );
+}
+
+/// The failed attempt can outlive receipt retention. The successful retry
+/// must refresh the durable outcome and lift the fresh-write guard.
+#[tokio::test(start_paused = true)]
+async fn replay_receipt_retention_starts_with_the_successful_store_attempt() {
+    for (session, embedder, expected) in [
+        (
+            "late-replay-success",
+            Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>,
+            "applied_after_restart",
+        ),
+        (
+            "late-replay-refusal",
+            Arc::new(RefusingEmbedder {
+                inner: FixtureEmbedder::new(),
+            }) as Arc<dyn Embedder>,
+            "failed",
+        ),
+    ] {
+        let agent = AgentId::new("agent-a");
+        let sid = SessionId::new(session);
+        let inner = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(
+            Arc::new(VectorSearchable(inner.clone())),
+            0,
+        ));
+        let original = held_write_session(session, store.clone()).await;
+        let receipt = submit_and_hold(&original, &agent, "test replay retention").await;
+        original.close().await.expect("persist the owed intent");
+
+        let anchor = Utc::now();
+        let now = Arc::new(PlMutex::new(anchor));
+        let attach = || {
+            let now = now.clone();
+            Memory::builder()
+                .session(session)
+                .agent("agent-a")
+                .store(store.clone() as Arc<dyn GraphStore>)
+                .embedder(embedder.clone())
+                .embedding_contract(contract("fixture", 1024))
+                .match_strategy(MatchStrategy::Hybrid)
+                .clock(Arc::new(move || *now.lock()))
+                .build()
+        };
+        store.fail_next(usize::MAX);
+        let first = attach().await.expect("first restart");
+        until_mem(&first, "the first replay flush attempt", |_| {
+            store.batches().iter().any(|batch| batch.mutations.iter().any(|m| {
+                matches!(m, Mutation::ConsumeWriteIntent { receipt: id, .. } if *id == receipt.to_string())
+            }))
+        }).await;
+        assert_eq!(
+            first.pipeline().lookup(&agent, receipt).tag(),
+            "pending_replay"
+        );
+        assert!(matches!(
+            first.confirm_human(NodeId::new()),
+            Err(LamboError::ReplayInProgress),
+        ));
+        assert!(matches!(
+            first
+                .derive_async_as(
+                    &agent,
+                    &[("fresh write", ConceptType::Entity)],
+                    &ParentOf::none(),
+                    None
+                )
+                .await,
+            Err(LamboError::ReplayInProgress),
+        ));
+
+        let landed_at = anchor
+            + chrono::Duration::from_std(crate::types::WRITE_INTENT_RETENTION).unwrap()
+            + chrono::Duration::seconds(1);
+        *now.lock() = landed_at;
+        store.fail_next(0);
+        until_mem(&first, "the replay outcome to reach the store", |mem| {
+            mem.pipeline().lookup(&agent, receipt).tag() == expected
+        })
+        .await;
+        first
+            .graph
+            .read()
+            .ensure_replay_writable()
+            .expect("writes may resume");
+        let stored = inner
+            .load_session(&sid)
+            .await
+            .expect("load the settled intent");
+        assert_eq!(
+            stored.write_intents[0]
+                .outcome
+                .as_ref()
+                .unwrap()
+                .consumed_at,
+            landed_at
+        );
+        first.close().await.expect("close first writer");
+
+        let second = attach().await.expect("second restart");
+        assert_eq!(second.pipeline().lookup(&agent, receipt).tag(), expected);
+        assert_eq!(second.pipeline().counters().replayed(), 0);
+        second.close().await.expect("close second writer");
+    }
 }
 
 /// **#345**: a background flush the store refuses with a constraint

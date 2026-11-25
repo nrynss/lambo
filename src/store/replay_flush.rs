@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 
+use crate::daemon::Clock;
 use crate::graph::Graph;
 use crate::store::GraphStore;
 use crate::types::StoreError;
@@ -34,8 +35,17 @@ impl Checkpoint {
 // the flusher can confirm durability as soon as that commit releases the lock.
 type Callback = Box<dyn FnOnce(Option<WriteIntentOutcome>) + Send + Sync>;
 
-#[derive(Default)]
-pub(crate) struct Completion(Mutex<CompletionState>);
+pub(crate) struct Completion {
+    state: Mutex<CompletionState>,
+    clock: Clock,
+}
+
+#[cfg(test)]
+impl Default for Completion {
+    fn default() -> Self {
+        Self::new(Arc::new(chrono::Utc::now))
+    }
+}
 
 #[derive(Default)]
 enum CompletionState {
@@ -46,8 +56,15 @@ enum CompletionState {
 }
 
 impl Completion {
+    pub(crate) fn new(clock: Clock) -> Self {
+        Self {
+            state: Mutex::new(CompletionState::default()),
+            clock,
+        }
+    }
+
     pub(crate) fn on_finish(&self, callback: Callback) {
-        let mut state = self.0.lock();
+        let mut state = self.state.lock();
         if let CompletionState::Finished(outcome) = std::mem::take(&mut *state) {
             drop(state);
             callback(outcome);
@@ -57,7 +74,7 @@ impl Completion {
     }
 
     fn finish(&self, outcome: Option<WriteIntentOutcome>) {
-        let mut state = self.0.lock();
+        let mut state = self.state.lock();
         if let CompletionState::Callback(callback) = std::mem::take(&mut *state) {
             drop(state);
             callback(outcome);
@@ -131,11 +148,16 @@ impl ReplayFlush {
 impl Graph {
     pub(crate) fn ensure_replay_writable(&self) -> Result<(), crate::types::LamboError> {
         if self.replay_flush.deferred {
-            return Err(crate::types::LamboError::Config(
-                "replay was rejected; restart required before writing".into(),
-            ));
+            return Err(crate::types::LamboError::ReplayRestartRequired);
+        }
+        if self.replay_unconfirmed() {
+            return Err(crate::types::LamboError::ReplayInProgress);
         }
         Ok(())
+    }
+
+    fn replay_unconfirmed(&self) -> bool {
+        self.replay_producing || self.replay_flush.has_pending_groups()
     }
 
     pub(crate) fn consume_replayed_write(
@@ -183,6 +205,28 @@ fn finish(
 fn notify(completions: Vec<(Arc<Completion>, Option<WriteIntentOutcome>)>) {
     for (completion, outcome) in completions {
         completion.finish(outcome);
+    }
+}
+
+/// Use the clock of the store attempt for replay retention. Failed attempts
+/// may be held for longer than the retention window before a retry lands.
+pub(crate) fn stamp_attempt(graph: &RwLock<Graph>, batch: &mut MutationBatch) {
+    let graph = graph.read();
+    let groups = &graph.replay_flush.groups;
+    if groups.is_empty() {
+        return;
+    }
+    // All tracked consumes use the same writer clock. Stamp the transaction
+    // once so the store and the in-memory completion use the same time.
+    let mut at = None;
+    for mutation in &mut batch.mutations {
+        if let Mutation::ConsumeWriteIntent {
+            receipt, outcome, ..
+        } = mutation
+            && let Some(group) = groups.get(receipt)
+        {
+            outcome.consumed_at = *at.get_or_insert_with(|| (group.completion.clock)());
+        }
     }
 }
 
@@ -285,7 +329,7 @@ pub(crate) async fn recover(
             ),
         };
         let last = len == batch.len();
-        let chunk = MutationBatch {
+        let mut chunk = MutationBatch {
             mutations: batch.mutations[..len].to_vec(),
             mutation_epoch: if last {
                 batch.mutation_epoch
@@ -299,6 +343,7 @@ pub(crate) async fn recover(
                 "lease lost during replay flush".into(),
             ));
         }
+        stamp_attempt(graph, &mut chunk);
         match super::flush::flush_attempt(store, &chunk, token).await {
             Ok(()) => {
                 committed(graph, &chunk);
@@ -358,10 +403,19 @@ pub(crate) async fn recover(
                     "FlushDeadLettered: the store rejected an isolated replay write; later replay                      intents stay owed for the next serve");
             }
             Err(StoreError::Constraint(code)) => {
-                // An ordinary prefix or bare replay consume was rejected.
-                // Its effects may underpin every remaining replay; none may
-                // acquire a terminal receipt based on this RAM state.
-                graph.write().replay_flush.deferred = true;
+                {
+                    let mut graph = graph.write();
+                    // Once all replay is confirmed, a rejection of the
+                    // ordinary tail follows the caller's usual error path.
+                    // Fresh writes may already be using the committed graph.
+                    if !graph.replay_unconfirmed() {
+                        return Err(StoreError::Constraint(code));
+                    }
+                    graph.replay_flush.deferred = true;
+                }
+                // An ordinary prefix or bare replay consume was rejected
+                // while replay was still unconfirmed. Later outcomes stay
+                // owed because they may depend on the rejected effects.
                 discarded(graph, &batch.mutations, true);
                 batch.mutations.clear();
                 dead_lettered();

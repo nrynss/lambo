@@ -970,11 +970,9 @@ impl MemoryBuilder {
         ));
 
         // Durable intents: replay whatever a previous process acked and
-        // could not apply — one at a time, in admission order, concurrent with
-        // (never ahead of) this session's own calls. Also seeds the
-        // cross-restart receipt answers, so those ids answer
-        // `pending`/`applied_after_restart`/`failed` instead of
-        // `restart_lost`.
+        // could not apply, one at a time in admission order. The producer and
+        // its staged spans guard ordinary writes until the graph is safe to
+        // use. The replay also seeds receipt answers for the previous writer.
         pipeline.spawn_replay(write_intents, Some(flush.replay_waker()));
         // The evaluator can write audit rows directly. Arm the startup replay
         // latch before it can gather any speculative graph effects.

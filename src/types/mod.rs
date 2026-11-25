@@ -2498,6 +2498,12 @@ pub enum LamboError {
     /// The configuration is unusable.
     #[error("config: {0}")]
     Config(String),
+    /// Startup replay can still stage a write or has an unconfirmed flush.
+    #[error("startup replay is in progress; retry the write after replay finishes")]
+    ReplayInProgress,
+    /// Reconstruct the graph from the durable store before accepting more writes.
+    #[error("replay was rejected; restart required before writing")]
+    ReplayRestartRequired,
     /// Another writer holds this session — the single-writer lease, at
     /// build time or lost mid-flight ([`crate::Memory`]'s lease-lost fence).
     ///

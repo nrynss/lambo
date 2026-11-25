@@ -152,19 +152,11 @@ impl WritePipeline {
     ///   runs once more over what it left owed, so each deferred agent gets
     ///   one more attempt in the attach; what is still owed after that the
     ///   next serve replays in order, and `replay_blocked` names why.
-    /// * **Throttling — the open question, decided here**: replay runs
-    ///   sequentially in the background, at most ONE write in flight, and does
-    ///   not pass through admission. A restart over a deep backlog therefore
-    ///   costs the fresh session at most one embedder slot and brief graph
-    ///   locks — it can never *refuse* the fresh session's first calls, which
-    ///   admission-routed replay would do (a lane pre-filled with backlog
-    ///   answers `lane_full` to the very calls the restart interrupted).
-    ///   Admission exists for fairness among live callers; a replayed intent
-    ///   already paid for admission in the session that acked it. The cost of
-    ///   this choice is that a fresh write can land *before* a replayed intent
-    ///   from the same agent — cross-restart interleaving is unordered, which
-    ///   is the same scope §Ordering already declares (one agent's sequential
-    ///   submissions, within a session).
+    /// * **Throttling**: replay runs sequentially in the background, with at
+    ///   most one write in flight. It bypasses lane admission because each
+    ///   intent already paid for it. Fresh writes wait for the producer and
+    ///   its unconfirmed spans, so they cannot stage changes against rejected
+    ///   replay effects.
     /// * **Idempotency**: consumption rides the same commit lock as the apply
     ///   (see [`WriteCtx::run`](super::WriteCtx::run)), so a `kill -9` mid-replay re-replays exactly
     ///   the intents whose applies did not flush — never one whose apply did.
@@ -423,12 +415,15 @@ impl WritePipeline {
                     // serve and counted in `replay_owed` forever; it cannot be
                     // applied (a job needs its id) or answered for (the
                     // receipt map is keyed by it).
-                    failed += 1;
                     let why = "replay after restart was refused (the stored receipt id does not \
                                parse, so this build cannot apply the write or answer for it); \
                                nothing was written"
                         .to_owned();
-                    this.stage_replay_failure(&intent, None, &why, why.clone());
+                    if !this.stage_replay_failure(&intent, None, &why, why.clone()) {
+                        halted = true;
+                        break;
+                    }
+                    failed += 1;
                     tracing::warn!(
                         session = %this.ctx.session,
                         receipt = %intent.receipt,
@@ -460,7 +455,9 @@ impl WritePipeline {
                     payload,
                     admitted: tokio::time::Instant::now(),
                 };
-                let completion = Arc::new(crate::store::replay_flush::Completion::default());
+                let completion = Arc::new(crate::store::replay_flush::Completion::new(
+                    this.clock.clone(),
+                ));
                 let stamp = ConsumeStamp {
                     replay: Some(completion.clone()),
                     tag: "applied_after_restart",
@@ -520,14 +517,17 @@ impl WritePipeline {
                             );
                             break;
                         }
-                        failed += 1;
                         let why = format!(
                             "replay after restart was refused (the vector candidate lookup did \
                              not answer within {:?}, so the write is not retried again); \
                              nothing was written",
                             crate::graph::hybrid::VECTOR_LOOKUP_TIMEOUT
                         );
-                        this.stage_replay_failure(&intent, Some(receipt), &why, why.clone());
+                        if !this.stage_replay_failure(&intent, Some(receipt), &why, why.clone()) {
+                            halted = true;
+                            break;
+                        }
+                        failed += 1;
                         tracing::warn!(
                             session = %this.ctx.session,
                             receipt = %intent.receipt,
@@ -623,7 +623,6 @@ impl WritePipeline {
                         {
                             transient_streak = 0;
                         }
-                        failed += 1;
                         // Same split as the in-session worker's failure
                         // arm: the class for the model, the embedder's own words
                         // for the operator. The "replay after restart was
@@ -652,7 +651,11 @@ impl WritePipeline {
                         };
                         let detail =
                             format!("replay after restart was refused ({e}); nothing was written");
-                        this.stage_replay_failure(&intent, Some(receipt), &why, detail);
+                        if !this.stage_replay_failure(&intent, Some(receipt), &why, detail) {
+                            halted = true;
+                            break;
+                        }
+                        failed += 1;
                         tracing::warn!(
                             session = %this.ctx.session,
                             receipt = %intent.receipt,
@@ -767,12 +770,15 @@ impl WritePipeline {
         receipt: Option<ReceiptId>,
         reason: &str,
         detail: String,
-    ) {
+    ) -> bool {
         use crate::store::replay_flush::{Checkpoint, Completion};
 
-        let completion = Arc::new(Completion::default());
-        self.observe_replay_flush(&completion, intent, receipt, None, Some(detail));
         let mut graph = self.ctx.graph.write();
+        if graph.replay_flush.deferred() {
+            return false;
+        }
+        let completion = Arc::new(Completion::new(self.clock.clone()));
+        self.observe_replay_flush(&completion, intent, receipt, None, Some(detail));
         let start = Checkpoint::capture(&graph);
         graph.consume_replayed_write(
             intent.receipt.clone(),
@@ -787,6 +793,7 @@ impl WritePipeline {
             start,
             completion,
         );
+        true
     }
 
     /// Publish terminal receipt and ledger outcomes only after their consume
@@ -843,7 +850,7 @@ impl WritePipeline {
                 ));
             }
             if let Some(receipt) = receipt {
-                pipeline.settle_replay(receipt, agent, destination, answer);
+                pipeline.settle_replay(receipt, agent, destination, answer, outcome.consumed_at);
             }
             if !rejected {
                 pipeline.counters.replayed.fetch_add(1, Ordering::Relaxed);
@@ -862,6 +869,7 @@ impl WritePipeline {
         agent: AgentId,
         destination: Option<crate::types::SessionId>,
         answer: ReceiptAnswer,
+        consumed_at: chrono::DateTime<chrono::Utc>,
     ) {
         // Durable rows carry only the summary. The bounded live entry
         // carries the replay report and participates in normal eviction.
@@ -882,7 +890,7 @@ impl WritePipeline {
                         .as_ref()
                         .filter(|d| **d != self.ctx.session)
                         .cloned(),
-                    settled_at: Some(now),
+                    settled_at: Some(consumed_at),
                     answer,
                 },
             );
