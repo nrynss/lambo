@@ -1317,8 +1317,8 @@ erase (through this store or another) or a takeover moves the lease past
 every token handed out before it; from then on, once the repair task is off
 its in-flight request (and no aborted request is on the wire), no repair
 write under any earlier token lands, in any run. The one in-flight request
-is the documented window (`ensure_fenced`); the mirror has no such fence
-(`mirror_lands_after_erase`). -/
+is the documented window (`ensure_fenced`). The legacy mirror step in this
+machine lacks the #320 checks, which the runs model with `fencedMirrorTick`. -/
 theorem erase_silences_repair (s : St) (t : Nat) (e : Ev)
     (he : e = .eraseStop ∨ e = .eraseOther ∨ e = .takeover) (hne : s.d.erased = false)
     (ht : t ≤ s.d.lease) (hw : s.rep.writing t = false)
