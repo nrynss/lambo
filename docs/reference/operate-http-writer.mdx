@@ -82,11 +82,11 @@ Use `log_depth`, `flush_lag_ms`, and `degraded` from the MCP response to check w
 1. Pause writes from clients.
 2. Check outstanding receipts with `lambo_stats`. Save receipts that still need follow-up.
 3. Stop the writer through its supervisor. On Linux, run `systemctl --user stop lambo-writer.service`.
-4. Check the shutdown log for the final flush result. Confirm that `lambo stats --store` reports `no writer` for the affected sessions.
+4. Check the shutdown log for the final flush result. Confirm that `lambo --config "$HOME/.config/lambo/lambo.toml" stats --store` reports `no writer` for the affected sessions.
 5. Start the writer again. On Linux, run `systemctl --user start lambo-writer.service`.
 6. Confirm the new lease and check the session through MCP before resuming writes.
 
-If the previous process exited abruptly, its lease can still be active. Check the holder and expiry in `lambo stats --store`. If HTTP returns `503`, inspect the response and the writer log to distinguish a held lease from an attach failure.
+If the previous process exited abruptly, its lease can still be active. Check the holder and expiry in `lambo --config "$HOME/.config/lambo/lambo.toml" stats --store`. If HTTP returns `503`, inspect the response and the writer log to distinguish a held lease from an attach failure.
 
 {/* code: src/memory/shutdown.rs Memory::close, src/cli/stats.rs run_store */}
 

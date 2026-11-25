@@ -139,7 +139,7 @@ With default hybrid matching and a vector-capable store, Lambo embeds new text c
 
 SQLite uses an exact vector scan. A writer scans its in-memory vectors, which include changes it has applied and has yet to flush. A separate `lambo recall` or `lambo serve-web` process scans the database and sees the vectors that have reached the store.
 
-The fixture embedder lets you exercise vector writes and lookups offline. For semantic recall, configure `kind = "candle"` in the Metal build for Apple silicon or `kind = "bge_m3"` with a local llama.cpp server. The walkthrough has stamped `demo` with the fixture embedding contract, so a writer using the new embedder cannot attach to it directly. To keep its concepts, stop the writer, back up the store, and migrate the session at the same vector width. See [Re-embed stored concepts](/cli#re-embed-stored-concepts) for the procedure. To start without those concepts, use a new session name with the new embedder.
+The fixture embedder lets you exercise vector writes and lookups offline. For semantic recall, configure `kind = "candle"` in the Metal build for Apple silicon or `kind = "bge_m3"` with a local llama.cpp server. The walkthrough has stamped `demo` with the fixture embedding contract, so a writer using the new embedder cannot attach to it directly. To keep its concepts, stop the writer, back up the store, and migrate the session at the same vector width. See [Re-embed stored concepts](/lambo/cli/#re-embed-stored-concepts) for the procedure. To start without those concepts, use a new session name with the new embedder.
 
 For an example with SQLite and BGE-M3, refer to the [recorded semantic recall run](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-f-sqlite-bge).
 
