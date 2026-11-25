@@ -2259,6 +2259,48 @@ end CloseProbes
 
 end Unguarded
 
+/-! ## Closing after an internal flush-task panic (#318)
+
+The flush task owns the drained batch. A panicked join can lose that batch
+while the graph log still holds a tail that close can try to flush. The close
+state remembers the panic across attempts, including attempts that were
+cancelled after joining the task. This model covers the returned durability
+verdict. The final tail's durability is supplied by the existing close model. -/
+
+inductive FlushJoinResult where
+  | stopped
+  | cancelled
+  | panicked
+
+/-- A successful, cancelled, or already reaped join preserves the previous
+diagnosis. A panicked join records possible loss of the task's pending batch. -/
+def rememberFlushJoin (panicked : Bool) : FlushJoinResult → Bool
+  | .stopped | .cancelled => panicked
+  | .panicked => true
+
+/-- An empty or successfully flushed tail permits a durable close only if
+the flush-task join never observed a panic. -/
+def closeReportsDurable (panicked tailOk : Bool) : Bool :=
+  !panicked && tailOk
+
+/-- After a flush-task panic, close cannot return success or vouch for an
+intent, even if the surviving tail flushes and later attempts find no task. -/
+theorem close_after_flush_panic_cannot_vouch
+    (priorPanic tailOk : Bool) (laterJoins : List FlushJoinResult) :
+    closeReportsDurable
+      (laterJoins.foldl rememberFlushJoin (rememberFlushJoin priorPanic .panicked))
+      tailOk = false := by
+  change closeReportsDurable (laterJoins.foldl rememberFlushJoin true) tailOk = false
+  induction laterJoins with
+  | nil => rfl
+  | cons joined rest ih =>
+      cases joined <;> simpa [List.foldl, rememberFlushJoin] using ih
+
+/-- A regular flush-task join leaves close's existing tail verdict intact. -/
+theorem close_after_clean_flush_join_reports_tail (tailOk : Bool) :
+    closeReportsDurable (rememberFlushJoin false .stopped) tailOk = tailOk := by
+  cases tailOk <;> rfl
+
 /-! ## Isolating a rejected replay batch (#324)
 
 The first store call has already rejected the whole mixed batch. Each probe

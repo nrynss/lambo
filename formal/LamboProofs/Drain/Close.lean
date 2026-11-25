@@ -61,6 +61,10 @@ lookup-timeout streak resets (#346).
   `timeout_after_commit_settlesW`); both resets would forget a run
   (`streak_both_forgets_run`).
 
+The final durability verdict also depends on the flush-task join.
+`Flush.close_after_flush_panic_cannot_vouch` covers the persistent refusal
+that prevents this close from choosing the durable receipt transition.
+
 Boundary: each step is atomic, as in `Base.lean`; which puts the final flush
 committed is an input (`Landed`), the flush loop itself being `Flush/`; the
 lease fence at the flush is not modelled.
