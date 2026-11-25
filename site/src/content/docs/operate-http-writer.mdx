@@ -1,0 +1,151 @@
+---
+title: "Operate a shared HTTP writer"
+description: "Run Lambo under a supervisor, check session health, and recover writes or restore an SQLite backup."
+---
+
+Run one supervised HTTP writer when multiple clients need stable access to the same sessions. This guide uses a persistent store and gives a Linux systemd example. See [macOS multi-session setup](/lambo/macos/) to run the writer under launchd.
+
+## Prepare the writer
+
+Install Lambo, configure a persistent store and embedder, and provision the store. For SQLite, set `[store] path` to an absolute path so the service and CLI open the same file. See [Installation](/lambo/installation/) to set up and provision your store.
+
+Choose the sessions to keep attached. The example serves `demo`. To serve several sessions, list them in `[serve] sessions` or repeat `--session`. See [Several sessions in one serve](/lambo/cli/#several-sessions-in-one-serve) to configure session routing.
+
+## Configure client access
+
+Lambo listens on `127.0.0.1:7700` by default. With no configured credentials, local clients can access the served sessions without a token. To restrict access to `demo`, add a credential to `lambo.toml`.
+
+```toml
+[[serve.credential]]
+name = "demo-clients"
+token_env = "LAMBO_DEMO_TOKEN"
+sessions = ["demo"]
+```
+
+If you add layers to `demo`, pin each layer and include it in this credential's `sessions`. A credential that reaches a layered session must also reach its layers, or the writer refuses to start. See [Layers](/lambo/config/#layers) to configure them.
+
+Supply the token through the supervisor's environment for the writer process. Configure clients to send the same token in the `Authorization: Bearer <token>` header. Lambo reads the token at startup, so restart the writer when you change it.
+
+Lambo requires a credential for a non-loopback bind. For remote clients, use a TLS-terminating reverse proxy or an encrypted tunnel. See [Credentials](/lambo/config/#credentials) to define each credential's session access and [HTTP transport](/lambo/config/#http-transport) to configure the listener.
+
+{/* code: src/mcp/serve/http_guards.rs authorize_bind, src/mcp/serve/transport.rs session_router */}
+{/* test: tests/serve_bind_preflight.rs an_exposed_bind_without_a_credential_is_refused_before_any_backend */}
+
+## Run the writer under systemd
+
+Save the example as `~/.config/systemd/user/lambo-writer.service`. Adjust the executable and configuration paths to match your installation. If you configure a credential, make its environment variable available to this service before starting it.
+
+```ini
+[Unit]
+Description=Lambo HTTP writer
+
+[Service]
+ExecStart=%h/.local/bin/lambo --config %h/.config/lambo/lambo.toml serve --transport http --session demo --agent http-writer
+Restart=on-failure
+RestartSec=60s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=default.target
+```
+
+Reload the user manager and enable the service.
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now lambo-writer.service
+```
+
+After a crash, the restart delay gives the previous holder’s lease time to expire. The stop timeout gives Lambo time to drain its write queue and attempt a final flush. See [Stopping a writer](/lambo/cli/#stopping-a-writer) to interpret shutdown logs. For the systemd settings, refer to [systemd.service](https://freedesktop.org/software/systemd/man/latest/systemd.service.html).
+
+## Check the writer and store
+
+Check the service and list the leases in the configured store.
+
+```bash
+systemctl --user status lambo-writer.service
+journalctl --user -u lambo-writer.service -n 50
+lambo --config "$HOME/.config/lambo/lambo.toml" stats --store
+```
+
+The store report should show `http-writer` as the lease holder for `demo`. The holder token includes the process ID. If it names a different process, check for a client still launching stdio or another server using the same store.
+
+From an MCP client, connect to `http://127.0.0.1:7700/mcp/s/demo` with the configured credential. Run `lambo_stats` and confirm the session. Recall a known concept to confirm that the endpoint reads the expected memory.
+
+Use `log_depth`, `flush_lag_ms`, and `degraded` from the MCP response to check whether the writer is keeping up. A backlog that persists or grows calls for checking the writer log and store connectivity. See [lambo_stats](/lambo/mcp/#lambo_stats) to interpret the counters.
+
+{/* code: src/cli/stats.rs run_store, src/mcp/server/tools/stats.rs LamboServer::stats_with */}
+{/* test: tests/serve_multi_session.rs one_hub_serves_two_pinned_sessions_fenced_proxied_and_released */}
+
+## Restart the writer
+
+1. Pause writes from clients.
+2. Check outstanding receipts with `lambo_stats`. Save receipts that still need follow-up.
+3. Stop the writer through its supervisor. On Linux, run `systemctl --user stop lambo-writer.service`.
+4. Check the shutdown log for the final flush result. Confirm that `lambo --config "$HOME/.config/lambo/lambo.toml" stats --store` reports `no writer` for the affected sessions.
+5. Start the writer again. On Linux, run `systemctl --user start lambo-writer.service`.
+6. Confirm the new lease and check the session through MCP before resuming writes.
+
+If the previous process exited abruptly, its lease can still be active. Check the holder and expiry in `lambo --config "$HOME/.config/lambo/lambo.toml" stats --store`. If HTTP returns `503`, inspect the response and the writer log to distinguish a held lease from an attach failure.
+
+{/* code: src/memory/shutdown.rs Memory::close, src/cli/stats.rs run_store */}
+
+## Recover outstanding writes
+
+A write acknowledgment gives you a receipt for checking its outcome. Ask `lambo_stats` through the session you wrote through, using the original `agent_id`. Add `wait_ms` if the write is still pending.
+
+| Receipt state | What to do |
+| --- | --- |
+| `applied` or `applied_after_restart` | Inspect or recall the result through the writer. A separate reader sees a newly applied write after it flushes. |
+| `pending` or `pending_replay` | Check again. If replay stays pending, inspect the log and confirm the embedder and store are available. |
+| `intent_durable` | Check the same receipt on the next writer. The durable intent is available for replay. |
+| `failed` or `dropped` | Read `detail` and address the cause. If the writer lost its lease, check the receipt with the new holder before retrying. |
+| `close_unflushed`, `expired`, or `restart_lost` | Inspect or recall the expected result before retrying. The receipt alone may leave the outcome unresolved. |
+
+If a disconnect leaves you without a receipt, reconnect and verify whether the change already exists. See [lambo_stats](/lambo/mcp/#lambo_stats) for the complete receipt states and [Troubleshoot missing memory](/lambo/troubleshoot-missing-memory/) to check the session and read path.
+
+{/* test: src/memory/tests/replay.rs an_acked_write_survives_a_clean_close_as_a_durable_intent_and_replays; a_dead_embedder_at_attach_leaves_the_backlog_durable_and_a_later_serve_applies_it */}
+
+## Back up SQLite
+
+Pause clients and stop the writer before taking this backup. Check the shutdown result and confirm that the session leases are released. Keep the matching Lambo version and configuration with the backup.
+
+This example assumes the SQLite database is at `~/.local/share/lambo/lambo.db`. Set `db` to your configured absolute database path. The example creates a separate backup directory beside it.
+
+```bash
+db="$HOME/.local/share/lambo/lambo.db"
+backup_dir=$(mktemp -d "$(dirname "$db")/backup.XXXXXX") || exit
+(
+  cd "$backup_dir" &&
+  sqlite3 -readonly "$db" ".backup lambo.db" &&
+  sqlite3 'file:lambo.db?immutable=1' 'PRAGMA quick_check;'
+) && printf '%s\n' "$backup_dir/lambo.db"
+```
+
+The integrity check opens the completed backup as an immutable file. Continue when `quick_check` returns `ok`. Record the backup path before restarting the writer. For SQLite's backup command, refer to the [SQLite command-line shell](https://sqlite.org/cli.html).
+
+For PostgreSQL or CockroachDB, use your database's consistent backup and restore procedures. Back up the complete Lambo database and validate the restored database before repointing a writer.
+
+## Restore SQLite to a separate file
+
+A restore returns memory to the backup's point in time. Keep the current database and configuration so you can recover newer writes or reverse the switch.
+
+Copy the backup and a matching configuration into a new directory. Set `backup_db` to the file you want to restore. Set `restore_parent` to an existing directory where you want to stage the restore.
+
+```bash
+backup_db="/absolute/path/to/backup/lambo.db"
+restore_parent="$(dirname "$backup_db")"
+restore_dir=$(mktemp -d "$restore_parent/restore.XXXXXX") || exit
+cp "$backup_db" "$restore_dir/lambo.db" &&
+cp "$HOME/.config/lambo/lambo.toml" "$restore_dir/lambo.toml" &&
+(cd "$restore_dir" && sqlite3 'file:lambo.db?immutable=1' 'PRAGMA quick_check;')
+```
+
+Set `[store] path` in the copied configuration to the absolute path of the restored file. Check that Lambo can read the expected sessions and concepts. Substitute a session and query you expect to find in the backup.
+
+```bash
+lambo --config "$restore_dir/lambo.toml" stats --store
+lambo --config "$restore_dir/lambo.toml" recall --session demo --query "user schema"
+```
+
+Pause clients and stop the original writer before pointing the supervisor at the restored configuration. Reload the supervisor if you edited its service definition. Start the writer and confirm the restored session through MCP before resuming writes.

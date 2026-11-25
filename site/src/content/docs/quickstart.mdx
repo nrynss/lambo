@@ -1,9 +1,9 @@
 ---
 title: "Quickstart"
-description: "Install the binary, write a config, and recall memory in about 30 seconds."
+description: "Create a local SQLite session and recall your first concept."
 ---
 
-This guide gets a running session in about 30 seconds. It uses SQLite and the fixture embedder, so you need no external services, no model files, and no toolchain.
+Use SQLite and the fixture embedder to write and recall your first concept. The release binary runs this example locally without a model download or an external service.
 
 ## Install the binary
 
@@ -15,7 +15,7 @@ curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh |
 
 The script picks the binary for your platform, verifies its SHA-256 checksum, and installs it to `~/.local/bin`. Confirm it with `lambo --version`.
 
-On Apple silicon, you can instead install the Metal build (`LAMBO_FLAVOR=metal`) to run real BGE-M3 embeddings in-process with zero sidecar:
+On Apple silicon, install the Metal build if you plan to run BGE-M3 in the Lambo process.
 
 ```bash
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
@@ -25,7 +25,7 @@ See [Installation](/lambo/installation/) for version pinning and building from s
 
 ## Configure a quick session
 
-Create a `lambo.toml` that selects a local SQLite file and the fixture embedder. This file is how you choose backends. The binary already carries all of them.
+Create a `lambo.toml` that selects a local SQLite file and the fixture embedder. Both are included in the release binary.
 
 ```toml lambo.toml
 [store]
@@ -37,7 +37,7 @@ kind = "fixture"
 dim = 1024
 ```
 
-SQLite rather than the in-memory store, because each command below runs as its own process. The in-memory store lives inside one process and is gone when that process exits, so a write from one command would not be visible to the next.
+SQLite lets separate commands share the session file.
 
 Create the schema once.
 
@@ -51,7 +51,7 @@ sqlite schema provisioned (init_schema, idempotent)
 
 ## Write memory
 
-Each small agent writes memory as one deterministic line. This command derives one concept into the `demo` session.
+Write a concept to the `demo` session.
 
 ```bash
 lambo --config lambo.toml derive --session demo --agent agent-a \
@@ -62,7 +62,7 @@ The one-shot command takes the session write lease, writes the concept, and rele
 
 ## Recall memory
 
-Read the concept back with recall. Recall is a read, so it works whether or not a server holds the session.
+Query the session for the concept you wrote. You can run this command while the session is served.
 
 ```bash
 lambo --config lambo.toml recall --session demo --query "user schema"
@@ -72,24 +72,18 @@ lambo --config lambo.toml recall --session demo --query "user schema"
 user schema [Entity] (score 0.29)
 ```
 
-The recall returns the matching concept with its type and score.
+The result includes the concept text, type, and score.
 
 ## Serve a session
 
-Start the server to let MCP clients connect. The server owns the session as its single writer.
+Start an HTTP server to connect MCP clients to the session you created.
 
 ```bash
-lambo serve --config lambo.toml --session demo --agent agent-a
+lambo --config lambo.toml serve --session demo --agent agent-a --transport http
 ```
 
-The server runs and waits for MCP clients. Leave it running in its own terminal. Do not run another command line write in the same terminal, because the server already holds the write lease.
+Configure your MCP client to connect to `http://127.0.0.1:7700/mcp`. Send writes through MCP while the server holds the session lease.
 
 ## What to try next
 
-Pick whichever direction matches what you want to build.
-
-- Connect an MCP client with an `mcpServers` block in [Installation](/lambo/installation/).
-- Point the same binary at a durable store by editing `lambo.toml`. See [Configuration](/lambo/config/).
-- Run a full walkthrough in [End to end](/lambo/end-to-end/).
-- Run the scripted two-agent demo described in [Demo](/lambo/demo/).
-- Explore the nine [MCP tools](/lambo/mcp/).
+See [Choose an MCP transport](/lambo/mcp-transports/) to choose how your client starts or connects to Lambo. See [End to end](/lambo/end-to-end/) to write through MCP and check your receipt.

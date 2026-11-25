@@ -1,12 +1,12 @@
 ---
 title: "Evidence and evaluation"
-description: "Multi-agent dogfood helpfulness audit, release re-pin gates, recall calibration, cross-store parity, durability proofs, and negative research results."
+description: "Benchmarks and test results for recall, storage, durability, and multi-agent workloads."
 ---
 import Note from '../../components/MdxNote.astro';
 import Warning from '../../components/MdxWarning.astro';
 import CockroachTable from '../../components/CockroachTable.astro';
 
-Every claim in Lambo's documentation maps to a raw capture, benchmark JSON, or test harness committed in [`evidence/`](https://github.com/nrynss/lambo/tree/main/evidence) or [`research/`](https://github.com/nrynss/lambo/tree/main/research). Captures are kept verbatim as recorded rather than retouched after the fact; negative findings and regressions caught by the gates stay on the record beside the wins.
+Use these results to inspect the workloads, hardware, and versions tested. The repository keeps raw captures, benchmark data, and test harnesses, including runs that found regressions. For the original files, refer to the [evidence directory](https://github.com/nrynss/lambo/tree/main/evidence) and [research directory](https://github.com/nrynss/lambo/tree/main/research).
 
 ## Release re-pin gates and performance
 
@@ -144,13 +144,13 @@ Setting `DEFAULT_VECTOR_BEAM_SIZE = 64` lifts Dataset B recall@50 from `0.938` t
 ### Concurrency, SIGTERM durability, and SIGKILL crash boundary
 
 - **K=12 concurrent MCP clients + mid-burst SIGTERM ([`evidence/concurrency/`](https://github.com/nrynss/lambo/tree/main/evidence/concurrency)):** 3,423 calls recorded, rate-limit `429` overdrive (`1,682` refused) and `32/32` session-cap `503` verified live. SIGTERM mid-burst exited cleanly in `1,419 ms` (`exit 0`) with the exact line `lambo serve: session closed, tail durable` (`0` `tail lost on exit`). Store readback held `862` interactions vs `841` ledger-acked writes (store AHEAD by 21 in-flight writes) and `1,359` concepts vs `1,466` created — the 107 shortfall matched `concepts_collected=107` from one daemon GC sweep exactly. Wire-hygiene scan across all 3,423 responses and stderr found **`0` leaked DSNs, keys, or driver messages**.
-- **SIGKILL crash boundary ([`evidence/0.5.0-vs-0.4.0/`](https://github.com/nrynss/lambo/tree/main/evidence/0.5.0-vs-0.4.0)):** Clean SIGTERM loses zero acked writes. Hard SIGKILL can lose writes acknowledged inside the final flush interval (`12` of `1,136` acked writes on 0.5.0), while every intent flushed prior to the kill replays in order on restart (`152` replayed).
+- **SIGKILL crash boundary ([`evidence/0.5.0-vs-0.4.0/`](https://github.com/nrynss/lambo/tree/main/evidence/0.5.0-vs-0.4.0)):** The SIGTERM run lost no acknowledged writes. In the 0.5.0 SIGKILL run, `12` of `1,136` acknowledged writes were lost. The next writer replayed all `152` intents that had reached the store.
 - **Durable write intents across embedder outages ([`evidence/mooshik-j3-durable-intents/`](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-j3-durable-intents)):** 16 agents × 4 derives (`64` acked) closed immediately held the exact invariant `acked == applied-with-embedding + durable-intent` (`64 == 1 + 63`, `0` NULL embeddings). Re-attaching while the embedder endpoint was unreachable left all `62` pending intents unconsumed (`write_queue_replay_owed=62`, receipts `pending_replay`, `0` failed); the next healthy attach replayed all `62` (`applied_after_restart`, `64/64` embedded).
 - **Multi-client stdio-to-HTTP forwarding ([`evidence/j4-live-multiclient/`](https://github.com/nrynss/lambo/tree/main/evidence/j4-live-multiclient)):** Starting a second `lambo serve` against a held session automatically forwards over the private Unix socket rather than exiting on lease refusal, preserving per-call `agent_id` attribution and logging `refused`, `proxying`, `refused_takeover`, and `proxying_stopped` in the shared ledger.
 
 ### Deterministic convergence (`lambo demo`)
 
-The demo's rendered OUTCOME block is asserted **byte-identical** across two runs of the same scenario — no tolerance, ordering leniency, or rounding. Measured on 2026-08-16 at commit `0006824` ([`evidence/demo-determinism/`](https://github.com/nrynss/lambo/tree/main/evidence/demo-determinism)):
+The demo's rendered OUTCOME block is asserted **byte-identical** across two runs of the same scenario — no tolerance, ordering leniency, or rounding. Measured on August 16, 2026, at commit `0006824` ([`evidence/demo-determinism/`](https://github.com/nrynss/lambo/tree/main/evidence/demo-determinism)):
 
 | What was measured | Result |
 |---|---|
@@ -159,7 +159,7 @@ The demo's rendered OUTCOME block is asserted **byte-identical** across two runs
 | Distinct places two runs can differ at all | **3**, all intentional, all outside the asserted block |
 | Rendered scores across all 20 pairs | Identical |
 
-The three permitted difference sites are the freshly-minted session id, a random node id quoted in the high-risk warning, and a narration line's canonization cycle index. Earlier live-cluster captures (`evidence/demo-live-1.txt` and `demo-live-2.txt`) predate the script-clock fix, when wall-clock recency jitter made identical output hold roughly nine runs in ten; those captures are preserved unedited alongside the determinism proof.
+The three permitted difference sites are the freshly-minted session id, a random node id quoted in the high-risk warning, and a narration line's canonization cycle index. Earlier live-cluster captures (`evidence/demo-live-1.txt` and `demo-live-2.txt`) predate the script-clock fix, when wall-clock recency jitter made identical output hold roughly nine runs in ten; those captures are preserved unedited alongside the parity captures.
 
 ### Immutable canonization audit trail
 

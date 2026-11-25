@@ -54,6 +54,6 @@ The first deploy runs on the next push to `main`. You can also trigger it manual
 
 ## Reference content
 
-Update shared prose in both `docs/reference/` and `src/content/docs/`, preserving the site's component imports, `/lambo/` link prefixes and marked site-only sections. Run `scripts/docs/check-mirror-drift.sh` from the repository root; it checks the CLI, MCP, installation, configuration, API, migration and macOS setup pages. Then run `npm run build` from `site/` to validate MDX and generate the site.
+Update shared prose in both `docs/reference/` and `src/content/docs/`, preserving the site's component imports, `/lambo/` link prefixes and marked site-only sections. Run `scripts/docs/check-mirror-drift.sh` from the repository root to compare the mirrored pages. Then run `npm run build` from `site/` to validate MDX and generate the site.
 
 Add new pages to `astro.config.mjs`'s sidebar and, for shared reference pages, `docs/reference/docs.json`. The migration guide covers existing-memory upgrades and repair; keep it linked from installation and the interface references when their upgrade requirements change.

@@ -3,11 +3,11 @@ title: "Configuration"
 description: "The lambo.toml keys, features, and provisioning"
 ---
 
-Lambo reads a `lambo.toml` file. It looks for the file in this order: the `--config` path, then the `LAMBO_CONFIG` environment variable, then `./lambo.toml`. An environment variable always wins over the file for any key it sets.
+Use `lambo.toml` to configure the store, embedder, and serving options. Lambo checks the `--config` path first, then `LAMBO_CONFIG`, then `./lambo.toml`. The supported environment variables override their matching file settings.
 
 ## What lambo.toml contains
 
-The file has `[store]`, `[embedder]` and `[daemon]` sections, an optional `[serve]` section for [multi-session serving](#multi-session-serving), an optional `[web]` section for [the read-only window's views](#read-only-window-views), an optional `[fusion]` section for [recall fusion](#recall-fusion), an optional `[selection]` section for [redundancy-aware selection](#redundancy-aware-selection), plus a small number of top-level process settings. It chooses which compiled backends this process runs, the cadence the background work runs at, and the canonization policy the serving verbs run them under.
+Use `[store]` and `[embedder]` to select backends compiled into your binary. Use `[daemon]` to set how often background work runs. Add `[serve]` for [multi-session serving](#multi-session-serving) or `[web]` for [read-only browsing](#read-only-window-views). The `[fusion]`, `[selection]`, and `[recall]` tables configure candidate ranking, duplicate selection, and the optional Elasticsearch recall tier.
 
 ```toml
 # Top-level keys must come BEFORE the first [table] header, or TOML scopes them
@@ -428,7 +428,7 @@ LAMBO_ELASTIC_EMBED_URL=https://my-cluster.es.example.com \
 ```
 
 <Warning>
-Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable. The kind, the model, and the width together form the session's embedding contract.
+The embedder kind, model, and vector width form the session’s embedding contract. See [Re-embed stored concepts](/cli#re-embed-stored-concepts) to move a session to a different contract. See [Repairing a canary drift](/cli#repairing-a-canary-drift) if an unchanged contract starts producing different vectors.
 </Warning>
 
 ## Daemon cadence

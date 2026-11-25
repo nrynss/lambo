@@ -3,15 +3,15 @@ title: "Library API"
 description: "The Rust API for embedding Lambo in a program"
 ---
 
-Both surfaces, the MCP tools and the command line verbs, are thin wrappers over one type, `Memory`. If you embed Lambo in a Rust program, this is the type you work with. For full signatures, run `cargo doc --open`.
+Use `Memory` to embed Lambo in a Rust program. It manages the graph and the workers that flush writes and run canonization. Run `cargo doc --open` for the complete Rust signatures.
 
 ## Memory
 
-`Memory` holds the in-memory graph together with its background workers, which handle write-behind flushing and canonization. Exactly one `Memory` writes a given session. See [The single-writer lease](#the-single-writer-lease).
+At most one `Memory` holds the writer lease for a session. See [The single-writer lease](#the-single-writer-lease) to understand how Lambo handles contention and takeover.
 
 ### Build a Memory
 
-Use the builder. Prefer `backends`, which supplies the store, embedder, and their compatibility in one value, because it is the single place backends are constructed.
+Call `Memory::builder()` to configure the session. Pass the resolved store and embedder through `backends`, and pass the process settings through `config`.
 
 ```rust
 let mem = Memory::builder()
@@ -593,14 +593,14 @@ The implementations are the fixture embedder, BGE-M3 over `llama-server` (or any
 
 ## The single-writer lease
 
-A session has exactly one writer. Lambo enforces this in the store with a per-session lease that records the current holder and a time-to-live.
+The store allows at most one writer lease per session. The lease records the holder and when it expires.
 
 - `build()` acquires the lease or fails, naming the process that holds it. `close()` releases it.
 - A heartbeat keeps a live holder's lease fresh and lets a crashed holder's lease expire.
 - If a holder's lease is taken over, that holder is fenced. Its further writes are refused and its pending writes are dropped, so it cannot overwrite the new holder. It is fenced at the first flush the store refuses for its stale token or at its next heartbeat, whichever comes first, and also when its own heartbeat takes the lease back at a new token (after an operator takeover, for example).
 
 <Note>
-There is one known limitation. The fence trips when the holder notices the loss, at its next heartbeat or at the first flush the store refuses for its stale token, not at the instant it happens. After a lease expires and a new writer takes over, the old holder can still write for a short, bounded window. This matters most when many writers contend on one session. It is tracked in [issue #1](https://github.com/nrynss/lambo/issues/1).
+After a takeover, the store rejects flushes that carry the old fencing token. The previous writer may still accept changes in memory until a heartbeat or flush detects the lost lease. Those changes can be discarded. For background, refer to [issue #1](https://github.com/nrynss/lambo/issues/1).
 </Note>
 
 See [MCP tools](/mcp) and [Configuration](/config).

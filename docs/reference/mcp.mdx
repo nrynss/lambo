@@ -3,15 +3,15 @@ title: "MCP tools"
 description: "The MCP tools your agents call, with their arguments and limits"
 ---
 
-Lambo is agentic graph memory. It runs as an MCP server with eight core tools for storing what your agents learn, recalling prior memory, auditing stale citations, and coordinating edits. A ninth tool, `lambo_derive_image`, is listed when the server's embedder embeds images or the operator accepts client vectors. {/* test: src/mcp/server/tests/schemas.rs the_router_publishes_exactly_the_eight_core_tools; the_image_tool_is_listed_only_where_it_can_work */} {/* code: src/mcp/server.rs image_tool_listed */} A running `lambo serve --session <id>` process is the single writer for that session, and your agents connect to it as MCP clients. {/* test: tests/serve_single_writer_lease.rs a_second_process_on_one_session_is_refused_by_the_lease */}
+Connect your agents to Lambo over MCP to write memory, recall concepts, audit stale citations, and coordinate edits. Lambo exposes eight core tools. A ninth tool, `lambo_derive_image`, is listed when the server's embedder embeds images or the operator accepts client vectors. {/* test: src/mcp/server/tests/schemas.rs the_router_publishes_exactly_the_eight_core_tools; the_image_tool_is_listed_only_where_it_can_work */} {/* code: src/mcp/server.rs image_tool_listed */} Agents that share a session send their writes to the process holding its writer lease. {/* test: tests/serve_single_writer_lease.rs a_second_process_on_one_session_is_refused_by_the_lease */}
 
 ## Transports
 
-Lambo serves over stdio by default, and over HTTP when you ask for it. {/* code: src/main.rs Commands::Serve transport (default stdio) */}
+Use stdio to let your client launch Lambo. Use HTTP to connect clients to a running server. {/* code: src/main.rs Commands::Serve transport (default stdio) */}
 
 | Transport | Command | Notes |
 |---|---|---|
-| stdio | `lambo serve --session demo` | The default. Works with any MCP client through the standard `mcpServers` configuration. |
+| stdio | `lambo serve --session demo` | The default. Configure a client that supports stdio to start the command. |
 | HTTP | `lambo serve --session demo --transport http` | Streamable HTTP on port `7700`, bound to `127.0.0.1`. Change them with `--port` and `--bind`. |
 
 {/* code: src/main.rs Commands::Serve port bind (defaults 7700 and 127.0.0.1), src/mcp/serve.rs ServeOptions::new */}
@@ -92,26 +92,7 @@ leaving it, because the next holder clears it under the session lease.
 
 ### HTTP for a machine with several independent clients
 
-Stdio is the default transport, and it suits a single orchestrator and its subagents:
-that is one connection to one server, configured through the client's `mcpServers`
-entry. When a machine runs more than one *independent* client (OMP, Claude Code and Pi,
-say, each a distinct product), use HTTP instead. Run one
-`lambo serve --session <id> --transport http` and point every client's `mcpServers` at that one URL, so one process
-owns the session as its writer. With stdio, each client spawns its own `serve`, and each
-one but the holder forwards to it, with the limits listed above. What calls for HTTP is
-the number of independent clients on one machine, not the number of agents under one
-orchestrator.
-
-{/* code: src/mcp/serve/roles.rs resolve_role */}
-
-Moving a client from `command` to `url` is a migration across *every* config layer that
-names the server, and a stale entry anywhere rejects it. A client reads the project
-`.mcp.json`, the user or global scope, and the per-client files (Pi's
-`~/.pi/agent/mcp.json`, Cursor's `~/.cursor/mcp.json`, an OMP workspace `.mcp.json`,
-Codex's `~/.codex/config.toml`), and a layer that still holds `command` beside the new
-`url` is rejected even when the endpoint itself responds. Migrate by copying the
-registration into each layer that names the server; never by editing one file and
-assuming the others pick it up.
+Run one HTTP writer when independent clients need a stable server URL. See [Choose an MCP transport](/mcp-transports) to move an existing session or decide when local stdio forwarding fits. {/* code: src/mcp/serve/roles.rs resolve_role */}
 
 ## What every tool expects
 
@@ -193,6 +174,8 @@ When a tool runs and fails, the error comes back as a normal tool result with `i
 These are the eight core tools every server lists, plus `lambo_derive_image`, which a server lists only when its embedder embeds images or it accepts client vectors (see [lambo_derive_image](#lambo_derive_image)).
 
 ### lambo_recall
+
+See [Troubleshoot missing memory](/troubleshoot-missing-memory) to check why an expected concept is absent.
 
 Recall relevant memory for a query. This returns the Lambo context block, the memories recall ranks highest for the query, with markers for canonical facts, blast-radius warnings, conflicts, and contradictions. The block is the first text content of the result, and the individual hits come back as structured content alongside it.
 

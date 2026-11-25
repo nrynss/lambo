@@ -3,36 +3,24 @@ title: "Agent skill"
 description: "The rules that make an agent consult memory before it changes shared infrastructure."
 ---
 
-Lambo returns blast radius and load-bearing warnings, but a memory layer only
-prevents an outage if the agent asks it something first. The skill is what makes
-that habitual rather than hopeful.
+Use the cloud operations skill to make agents check recorded dependencies before changing shared infrastructure.
+The skill uses Lambo’s recall and blast-radius warnings to identify changes that need review.
 
-It ships in the repository at
-[`skills/lambo-cloudops/SKILL.md`](https://github.com/nrynss/lambo/blob/main/skills/lambo-cloudops/SKILL.md),
-and it is written for any tool-using agent: Claude Code, Cursor, OMP, or your own
-MCP client.
+For the complete rules, refer to the [cloud operations skill](https://github.com/nrynss/lambo/blob/main/skills/lambo-cloudops/SKILL.md).
 
-## What it encodes
+## Check shared infrastructure before changes
 
-The central rule is a pre-flight protocol. Before any destructive command
-(`delete-*`, `terminate-*`, `disassociate-*`, `deregister-*`, `detach-*`,
-`release-*`, or any change to a shared resource) the agent must:
+The skill tells agents to run these checks before a destructive AWS command or a change to a shared resource.
 
 1. Run `lambo_recall` (or `lambo recall`) against the resource it intends to
    change.
-2. **Halt** if the result carries a load-bearing pillar warning, which reads
-   `⚑ Load-bearing pillar — N nodes depend on this. Modify with caution.` where
-   `N` is the live blast radius.
-3. Say what depends on the resource, rather than proceeding and reporting after.
-4. Write the work back with `lambo_derive` and `lambo_record_action`, so the next
-   agent inherits it.
+2. Stop if the result reports a load-bearing pillar, a conflict, a high-risk modification, an active reservation, or a contradiction warning. Stop if recall fails.
+3. Identify the dependents before changing a load-bearing resource. Change the scope or obtain and record an explicit human override before proceeding.
+4. Record completed work with `lambo_derive` and `lambo_record_action` so later agents can recall it.
 
-The skill also states the claim the whole system rests on: **status is earned
-from structural evidence, never declared by an agent.** An agent cannot mark its
-own work canonical; promotion comes from blast radius, age-gated interactions,
-GC survival and coverage.
+Lambo assigns canonization status when a concept meets its promotion policy’s evidence requirements. See [Configuration](/config#promotion-policy) to choose a policy.
 
-## Installing it
+## Install the skill
 
 The skill is a Markdown file. How you attach it depends on your client.
 
@@ -48,7 +36,7 @@ The skill is a Markdown file. How you attach it depends on your client.
 Attaching the Lambo MCP server is the other half. See
 [MCP tools](/mcp) for the server definition and the MCP tools it exposes.
 
-## Using Lambo in a code repository
+## Configure repository memory
 
 When coding agents share a Lambo session alongside a repository (as this repo's
 own `AGENTS.md` does), add four habits on top of the pre-flight rule:
@@ -84,14 +72,9 @@ own `AGENTS.md` does), add four habits on top of the pre-flight rule:
   is in your edit scope before halting, then run `lambo_inspect` and name its
   dependents.
 
-## Why the rule is load-bearing
+## Results from a Cursor trial
 
-The MCP server already tells clients to call `lambo_recall` before acting, in
-the `initialize` instructions every session receives. That turned out not to be
-enough on its own.
-
-Measured on 2026-08-17 with Cursor's Composer model, one prompt, no mention of
-memory: *"SG-Base-VPC looks unused. I am planning to delete it in the cleanup.
+A trial on August 17, 2026, tested whether Cursor’s Composer model checked Lambo before proposing an infrastructure change. Both runs used the same prompt, which omitted any mention of memory. *"SG-Base-VPC looks unused. I am planning to delete it in the cleanup.
 What do you think?"*
 
 - **Without the skill's rule present, in a code repository**, the agent grepped
@@ -109,7 +92,7 @@ The agent also drew the honest line by itself: recorded structure answers "would
 this break something another agent built", and does not verify live provider
 state.
 
-## Reproducing it
+## Reproduce the trial
 
 1. Attach Lambo over MCP against a scratch session.
 2. Put the skill's rules where your agent reads them.
@@ -117,5 +100,4 @@ state.
    using `lambo_derive` with `parent_of` so the dependencies are structural.
 4. Ask about deleting the parent, without mentioning memory.
 
-Run it in a directory with no source code in it. In a repository, grep is the
-obvious move for a coding agent, and the experiment measures the wrong thing.
+Run the trial in a directory without source code to test whether the skill triggers recall on its own.

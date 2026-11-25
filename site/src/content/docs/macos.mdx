@@ -5,9 +5,9 @@ description: "One warm Lambo writer on an Apple silicon Mac, shared by every cod
 import Note from '../../components/MdxNote.astro';
 import Warning from '../../components/MdxWarning.astro';
 
-This guide sets up Lambo as personal memory for one developer on an Apple silicon Mac. When it is done, one `lambo serve` runs in the background under launchd, holds one SQLite file and one copy of the BGE-M3 model on the GPU, and every coding agent you use (Claude Code, Cursor, Codex, or any MCP client) connects to it by URL. Each repository gets its own session, a shared `general` session carries the preferences that hold everywhere, and promotion uses the `Solo` policy, which is built for a single developer.
+Set up shared memory for your coding agents on an Apple silicon Mac. Run one HTTP writer under launchd with a SQLite store and the BGE-M3 model on the GPU. Give each repository its own session and keep cross-project preferences in a shared `general` session. This setup uses the `Solo` promotion policy.
 
-Everything here already ships in the Metal release build. The kit is the configuration that ties it together:
+Install the Metal release build to use this setup. The repository provides the configuration, LaunchAgent, and agent skill.
 
 | File | What it is |
 |---|---|
@@ -19,9 +19,9 @@ The starter config is checked by the test suite: it must parse with every key it
 
 ## Why one background writer
 
-Each Lambo session has exactly one writer. A stdio MCP server started by a client holds the session itself and loads its own copy of the model (about 1.1 GB of weights) when it is the first; a later one forwards to it. The writer then lives and dies with whichever client started it, so closing that client takes memory away from every other one until something starts a new writer.
+At most one process writes to a session at a time. With stdio, the first client can start the writer and later clients can forward to it. Closing the first client can stop the writer that the other clients share.
 
-A writer owned by launchd instead of by a client fixes both. It loads the model once, it outlives every client, and launchd restarts it if it dies. Clients connect to it over HTTP on loopback and never hold the session themselves.
+Launchd keeps the writer independent of the clients and restarts it if it exits. The writer loads one copy of the model. Clients connect over HTTP on loopback and use the same writer.
 
 ## Set it up with one prompt
 
@@ -384,7 +384,7 @@ The first call after an idle spell may then be slower. The setting is not part o
 |---|---|
 | The port never answers | Read `~/Library/Logs/lambo/serve.log`. A config error names the key and its line. `device = "metal"` refuses to start without a Metal device. The first start may still be downloading weights. |
 | `launchctl print` shows the job restarting | The serve exits at startup. The log's last lines say why: a config error, a port already in use (`lsof -nP -iTCP:7720 -sTCP:LISTEN`), a store that needs `provision`, or a pinned session that cannot be attached, such as one whose embedding contract does not match the configured embedder (a changed model or `dim`). With several pinned sessions, as in the kit, a session another writer holds does not stop the start; it answers `503` instead. |
-| A project URL answers `404` | That session is not in `[serve] sessions`. Add it and restart the agent. |
+| A project URL answers `404` | Check the session name in the URL. If it is missing from `[serve] sessions`, add it and restart the LaunchAgent. |
 | A project URL answers `503` | The serve is not serving that session right now. If `lambo stats --store` names another lease holder for it, that writer has it, and a stdio entry is the usual one; see [Directory-aware stdio instead of URLs](#directory-aware-stdio-instead-of-urls). Right after a crash the holder can be the LaunchAgent's own previous process, whose lease lapses within 45 seconds. The serve tries to take the session again 5 to 6 seconds after each failed attempt, and the answer carries a `Retry-After` header. A `503` with no `Retry-After` comes only after such a retry, or after the serve lost a session's lease, when attaching the session again failed in a way a retry cannot fix (an embedding contract mismatch, for example); the log names the error, and the serve does not try again until it restarts. |
 | `lambo_stats` in a repository names `general-usage` | The client is using the fallback URL there. Add the project registration in that directory. |
 | Recall in a repository never shows `general` hits | Layer hits must clear a similarity floor, so an unrelated query shows none. A session that is not pinned is not layered either. |

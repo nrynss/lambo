@@ -15,6 +15,7 @@ them important.
 [Command line](https://nrynss.github.io/lambo/cli/) ·
 [Configuration](https://nrynss.github.io/lambo/config/) ·
 [Canonization](https://nrynss.github.io/lambo/canonization/) ·
+[Formal verification with Lean](https://nrynss.github.io/lambo/formal-verification/) ·
 [Migration](https://nrynss.github.io/lambo/migration/) ·
 [Library API](https://nrynss.github.io/lambo/api/) ·
 [Evidence](https://nrynss.github.io/lambo/evidence/)
@@ -355,7 +356,7 @@ calibration benchmarks, and negative research results are summarized on the
 
 | Page | What it covers |
 |---|---|
-| [Quickstart](https://nrynss.github.io/lambo/quickstart/) | Install Lambo, configure SQLite, and run your first recall in 30 seconds |
+| [Quickstart](https://nrynss.github.io/lambo/quickstart/) | Install Lambo and recall a concept from a local SQLite session |
 | [Installation](https://nrynss.github.io/lambo/installation/) | Prebuilt binaries, Apple Silicon Metal build, MCP client setup, and Cargo features |
 | [macOS multi-session setup](https://nrynss.github.io/lambo/macos/) | One LaunchAgent-supervised writer shared by every agent and project on an Apple Silicon Mac, with a single-prompt setup |
 | [MCP tools](https://nrynss.github.io/lambo/mcp/) | All nine MCP tools (eight always-on plus `lambo_derive_image`), arguments, receipts, and limits |

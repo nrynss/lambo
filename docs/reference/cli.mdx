@@ -3,11 +3,11 @@ title: "Command line"
 description: "Read and write session memory from the terminal"
 ---
 
-Lambo has command line verbs that mirror the MCP tools, so you can read and write session memory from the terminal without an MCP client. The command line is the primary surface for large swarms of small agents, because each call is one deterministic line with no tool schema overhead.
+Use the Lambo CLI to read sessions, write to sessions without an active writer, and administer a store. Agents that share a running writer send their writes over MCP.
 
 ## Global options
 
-`--config <PATH>` is a global flag, so it comes before the subcommand.
+Use the global `--config <PATH>` flag to select a configuration file.
 
 ```bash
 lambo --config lambo.toml recall --session demo --query "user schema"
@@ -19,7 +19,7 @@ Lambo looks for the config file in this order: the `--config` path, then the `LA
 
 ## Exit codes
 
-Every verb uses the same three codes, so you can branch on them in a script.
+Check the exit status when you run Lambo in a script.
 
 | Code | Meaning |
 |---|---|
@@ -243,7 +243,17 @@ session 'beta'
 
 For flush lag and write-log depth, ask the writer through the `lambo_stats` MCP tool instead.
 
-Hybrid writers on vector-search stores warn at attach when text concepts have been missing vectors for at least 60 seconds. Check the live `lambo_stats` MCP result or configure `--ledger-heartbeat` to catch gaps that develop during a serve. Stop the writer for the affected session, then run the repair with the same store and embedder configuration.
+### Re-embed stored concepts
+
+Use `lambo re-embed` to migrate an existing session to a different embedding contract at the same vector width. Stop the session writer and back up the store. Point the configuration at the new embedder, then run the command for that session.
+
+```bash
+lambo --config lambo.toml re-embed --session demo --agent operator
+```
+
+If the session contains image vectors, the command refuses by default. `--drop-image-vectors` clears them during the migration and preserves the image concepts. Re-derive their images under the new contract to restore image search.
+
+To fill missing text vectors in the current embedding space, use `--missing-only`. Hybrid writers on vector-search stores warn at attach when text concepts have been missing vectors for at least 60 seconds. Check the live `lambo_stats` MCP result or configure `--ledger-heartbeat` to catch gaps that develop during a serve. Stop the writer for the affected session, then run the repair with the same store and embedder configuration.
 
 ```bash
 lambo re-embed --missing-only --session <id> --agent <id>
@@ -449,19 +459,7 @@ While it holds the session, `lambo serve` keeps the embedder warm. With the in-p
 
 ### stdio versus HTTP for several clients
 
-`stdio` is the default and fits a single orchestrator plus its subagents — one
-connection, nothing to configure. When a machine runs more than one *independent*
-client (OMP and Claude Code and Pi, say), make HTTP the default instead: run one
-`lambo serve --transport http` and point every client's `mcpServers` at that one URL,
-so one process owns the session rather than each client spawning its own stdio
-`serve`. The reason is single-writer, not subagents. See the Transports section of the
-MCP reference for the full walkthrough.
-
-Pointing a client at the URL touches every config layer that names the server — the
-project `.mcp.json`, the user or global scope, and the per-client files (Pi's
-`~/.pi/agent/mcp.json`, Cursor's `~/.cursor/mcp.json`). A layer still holding `command`
-beside the new `url` is rejected even when the endpoint responds, so migrate by
-copying the registration across all of them, never by editing one file.
+Use `--transport stdio` when a local client launches the process. Use `--transport http` to start an independent writer with a stable URL. See [Choose an MCP transport](/mcp-transports) to compare the transports and switch an existing session.
 
 The ledger is the input to the report generators in `scripts/observability/`, which answer recall-first compliance, re-derivation savings, score-band drift, duplicate creation, and which blast-radius warnings actually fired. Keep the file outside the repository: it carries recall queries and truncated concept text, so it inherits the store's hygiene rules.
 
@@ -624,6 +622,8 @@ On shutdown every session, pinned and on-demand, is drained and closed concurren
 With `--ledger`, every line carries its `session`. A call made through a configured credential also carries `credential`. The heartbeat writes one `stats` line per session.
 
 ### Stopping a writer
+
+See [Operate a shared HTTP writer](/operate-http-writer#restart-the-writer) to restart a supervised service and check outstanding writes.
 
 Stop the server with `Ctrl-C` or a clean client disconnect. On the way out it flushes whatever has not reached the store yet. It then releases the session lease. The next writer can take the session immediately instead of waiting for the lease to expire.
 
@@ -914,20 +914,21 @@ $ lambo canon suspected --store lambo.db --session lambo-dev --cosine 0.85 --app
 
 | Flag | Required | Default |
 |---|---|---|
-| `--scenario <SCENARIO>` | No | `rest-api`, the only scenario in v0.1. An unknown value is a usage error. |
+| `--scenario <SCENARIO>` | No | `rest-api`. An unknown value is a usage error. |
 | `--session <SESSION>` | No | A fresh session id per run. |
 
 The harness takes and releases the single-writer lease across the two acts, so provision a durable store first if you persist it. See [End to end](/end-to-end) for the topology it exercises.
 
-## The swarm idiom
+## Write from scripts
 
-Run one `lambo serve` writer for the session, then give each small agent a single deterministic line to run. One `lambo derive` per agent is the intended high-throughput pattern, because the agent needs no tool schema in its context and the call either succeeds or exits non-zero.
+A one-shot write acquires the session lease and releases it when the command finishes. Run this example against a persistent store while the session is unserved.
 
 ```bash
-lambo derive --session demo --agent agent-7 --content "retry budget is 3" --kind constraint
+lambo --config lambo.toml derive --session demo --agent agent-7 \
+  --content "retry budget is 3" --kind constraint
 ```
 
-Canonization collapses the duplicate observations many agents produce into single canonical facts. See [End to end](/end-to-end) for the full topology.
+If another writer holds that session, the command exits with status `1`. See [Run a swarm](/end-to-end#run-a-swarm) to send concurrent writes through one MCP writer.
 
 ## Limits
 

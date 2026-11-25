@@ -108,6 +108,14 @@ COMMENT_WORD = re.compile(r"\{\s*/\*\s*(?P<word>[A-Za-z][A-Za-z0-9_]*)")
 # Pages that carry anchors today, and the kinds each must keep.
 REQUIRED: dict[str, tuple[str, ...]] = {
     "site/src/content/docs/canonization.mdx": ("lean", "const", "code", "oracle"),
+    "site/src/content/docs/formal-verification.mdx": ("lean", "const", "code", "test", "oracle"),
+    "docs/reference/formal-verification.mdx": ("lean", "const", "code", "test", "oracle"),
+    "site/src/content/docs/mcp-transports.mdx": ("code", "test"),
+    "docs/reference/mcp-transports.mdx": ("code", "test"),
+    "site/src/content/docs/operate-http-writer.mdx": ("code", "test"),
+    "docs/reference/operate-http-writer.mdx": ("code", "test"),
+    "site/src/content/docs/troubleshoot-missing-memory.mdx": ("code", "test"),
+    "docs/reference/troubleshoot-missing-memory.mdx": ("code", "test"),
     "site/src/content/docs/config.mdx": ("code",),
     "docs/reference/config.mdx": ("code",),
     "site/src/content/docs/mcp.mdx": ("lean", "const", "code", "test"),

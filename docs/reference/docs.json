@@ -17,6 +17,7 @@
             "pages": [
               "index",
               "installation",
+              "mcp-transports",
               "macos"
             ]
           },
@@ -30,11 +31,19 @@
             ]
           },
           {
+            "group": "Operate and troubleshoot",
+            "pages": [
+              "operate-http-writer",
+              "troubleshoot-missing-memory",
+              "migration"
+            ]
+          },
+          {
             "group": "Guides",
             "pages": [
               "agent-skill",
-              "migration",
-              "end-to-end"
+              "end-to-end",
+              "formal-verification"
             ]
           }
         ]

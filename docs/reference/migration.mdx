@@ -3,9 +3,9 @@ title: "Migration and memory repair"
 description: "Upgrade existing memory to durable concept names, review alias repairs, and verify the result"
 ---
 
-Durable names let agents cite a concept by a short, stable name instead of repeating its full text. Each name belongs to one session and stays bound to one concept ID. Existing IDs and correct citations continue to work. This guide covers the durable-name upgrade introduced by #146; it does not require clearing memory or re-embedding existing concepts.
+Upgrade an existing store to let agents cite concepts by durable name. Each name belongs to one session and stays bound to one concept ID. The upgrade preserves existing IDs, correct citations, and embeddings.
 
-The commands below require a binary that includes `lambo names` and the feature for your configured store. MemoryStore, SQLite, Postgres and Cockroach use the same migration path. MemoryStore is process-local: use a persistent adapter for memory that must survive a restart.
+Use a binary with `lambo names` and the feature for your store. Use SQLite, PostgreSQL, or CockroachDB to migrate memory that must persist across commands.
 
 ## Choose the operation
 
@@ -23,7 +23,7 @@ Names are normalized like canonical keys, including case, Unicode composition, t
 1. Let accepted writes finish, including replay of any pending intents with the existing writer. Check write receipts with [`lambo_stats`](/mcp#lambo_stats). Migration refuses unconsumed intents.
 2. Stop every writer attached to this store, including any supervisor that would restart one. Provisioning can also re-key older canonical keys and refuses while a session is held. Name assignment and repair themselves take the addressed session's single-writer lease.
 3. Take a consistent backup and keep the previous binary and configuration. For SQLite, use SQLite's backup facility, or a completed checkpoint with all connections closed; copying only an active `.db` file can omit its WAL. For Postgres or Cockroach, use the backend's consistent backup procedure.
-4. With the new binary and the same store configuration, provision the additional schema. Provisioning is idempotent; it installs the name and retired-alias tables.
+4. With the new binary and the same store configuration, provision the additional schema. Provisioning installs the name and retired-alias tables. You can run it again safely.
 
 ```bash
 lambo --config lambo.toml provision

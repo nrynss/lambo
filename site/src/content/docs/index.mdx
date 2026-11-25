@@ -6,7 +6,7 @@ description: "Shared, self-consolidating graph memory for coding agents and mult
 template: doc
 hero:
   title: "Lambo"
-  tagline: "Shared, self-consolidating graph memory for coding agents across harnesses and models. Importance is earned from structural evidence, never declared."
+  tagline: "Shared graph memory for coding agents. Record decisions and recall what depends on them."
   actions:
     - text: "Get started"
       link: "/lambo/quickstart/"
@@ -24,17 +24,16 @@ import Mermaid from '../../components/Mermaid.astro';
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 <div class="lambo-meta-bar">
-  <span class="lambo-version">v0.14.0</span>
-  <span>9 MCP tools · SQLite, PostgreSQL (pgvector), CockroachDB, Memory · Optional Elasticsearch recall tier</span>
+  <span>8 core MCP tools · SQLite, PostgreSQL with pgvector, CockroachDB, in-memory store · Optional Elasticsearch recall tier</span>
   <span class="lambo-badges">
     <img src="https://img.shields.io/github/actions/workflow/status/nrynss/lambo/ci.yml?branch=main&label=ci&logo=github" alt="CI status" height="20" />
     <img src="https://img.shields.io/github/license/nrynss/lambo?color=%2315803d&label=license" alt="License" height="20" />
   </span>
 </div>
 
-Lambo stores what your agents learn across **Cursor, Claude Code, Codex, OMP, Pi**, and custom MCP clients, recalls it by meaning and dependency structure, and protects load-bearing decisions before another agent breaks them.
+Connect Cursor, Claude Code, Codex, OMP, Pi, or a custom MCP client to shared memory. Your agents can record decisions and see which other work depends on them.
 
-One `lambo serve` process owns each session (or a multi-session stack with shared layers such as `general`) as its single writer. Agents share its in-memory graph while mutations flush asynchronously to your durable store, and a background daemon consolidates and canonizes concepts from structure alone.
+Agents that share a served session send writes to the same writer. The writer updates its in-memory graph and flushes changes to the configured store. A background worker promotes concepts as they meet the promotion policy’s evidence requirements.
 
 ```bash
 # Try the deterministic two-agent REST API scenario with zero config
@@ -42,14 +41,15 @@ curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh |
 lambo demo
 ```
 
-On Apple Silicon, pass `LAMBO_FLAVOR=metal` to include the in-process Candle BGE-M3 embedder on the Metal GPU — local SQLite plus real semantic search with no `llama-server` sidecar. See [Installation](/lambo/installation/).
+On Apple silicon, install the Metal build to run Candle BGE-M3 and SQLite locally. See [Installation](/lambo/installation/) to select a build.
 
 <Mermaid
-  caption="Architecture — multi-session single-writer graph, pluggable durable stores, and optional Elasticsearch recall tier"
+  caption="Session writer, readers, and optional vector index"
   code={`flowchart LR
     subgraph Surfaces["Agent and operator surfaces"]
         MCP["MCP clients<br/>(Cursor, Claude Code, Codex, OMP, Pi)<br/>stdio / HTTP /mcp/s/session"]
-        CLI["CLI verbs<br/>(derive, recall, inspect, names, stats)"]
+        CLI["CLI reads<br/>(recall, inspect, stats)"]
+        WRITE["One-shot CLI writes<br/>(derive, record-action)"]
         WEB["lambo serve-web<br/>(browser, read-only)"]
     end
     subgraph Writer["lambo serve (single writer per session)"]
@@ -63,8 +63,9 @@ On Apple Silicon, pass `LAMBO_FLAVOR=metal` to include the in-process Candle BGE
         ES[("Optional recall tier<br/>Elasticsearch HNSW<br/>(fallback to store)")]
     end
     MCP --> GRAPH
-    CLI --> GRAPH
-    WEB -. "read-only" .-> DB
+    CLI -. "read through persistent store" .-> DB
+    WEB -. "read through persistent store" .-> DB
+    WRITE -. "acquire writer lease" .-> DB
     GRAPH --> EMB
     GRAPH --> DAEMON
     DAEMON --> CANON
@@ -82,19 +83,19 @@ Lambo models each session as a typed bipartite graph of interactions and concept
 <div class="lambo-pillars">
   <div class="lambo-pillar">
     <h3>Consolidates duplicates</h3>
-    <p>Near-identical restatements merge by canonical key and cosine similarity — guarded against conflicting versions, paths, and identifiers — so recall returns one sharp fact instead of fifty noisy notes.</p>
+    <p>Lambo matches repeated concepts by canonical key and, where supported, vector similarity. Merge checks account for differences such as paths, versions, and identifiers.</p>
   </div>
   <div class="lambo-pillar">
     <h3>Promotes by evidence</h3>
-    <p>No agent can declare a memory canonical. The daemon evaluates survival, independent dependent interactions, temporal spread, and blast radius across three audited gates under <code>Swarm</code> or <code>Solo</code> policy. <a href="/lambo/canonization/">Read the arithmetic</a>.</p>
+    <p>The background worker checks evidence before promoting a concept. See <a href="/lambo/canonization/">Canonization</a> to understand the requirements under <code>Swarm</code> and <code>Solo</code>.</p>
   </div>
   <div class="lambo-pillar">
-    <h3>Flags blast radius &amp; drift</h3>
-    <p>Every recall returns live blast-radius warnings, concurrent-edit conflicts, declared contradictions (<code>against</code>), stale-citation alerts, and suspected undeclared supersessions before work lands.</p>
+    <h3>Reports dependencies and conflicts</h3>
+    <p>Recall can report a concept’s blast radius, recent edits, contradictions, and suspected supersession. Use <code>lambo_stale</code> to check for stale citations.</p>
   </div>
 </div>
 
-## Capabilities in v0.14.0
+## Capabilities
 
 <div class="lambo-capabilities">
   <div class="lambo-cap">
@@ -130,10 +131,11 @@ Lambo models each session as a typed bipartite graph of interactions and concept
 ## Explore
 
 <CardGrid cols={2}>
-  <LinkCard title="Quickstart" href="/lambo/quickstart/" description="Install the binary, provision local SQLite, and run your first recall in 30 seconds." />
+  <LinkCard title="Quickstart" href="/lambo/quickstart/" description="Install Lambo and recall a concept from a local SQLite session." />
   <LinkCard title="Demo" href="/lambo/demo/" description="Run two agents building one REST API and watch load-bearing memory form deterministically." />
-  <LinkCard title="MCP tools" href="/lambo/mcp/" description="All nine MCP tools (eight always-on plus lambo_derive_image), schemas, receipts, and limits." />
+  <LinkCard title="MCP tools" href="/lambo/mcp/" description="Find tool schemas, limits, write receipts, and image support." />
   <LinkCard title="Canonization" href="/lambo/canonization/" description="The composite score formula, Stage 1–3 evidence gates, Solo policy, and supersession." />
   <LinkCard title="Configuration" href="/lambo/config/" description="Every lambo.toml table: stores, embedders, layers, credentials, calibration, and fusion." />
-  <LinkCard title="Evidence & evaluation" href="/lambo/evidence/" description="Release re-pin gates, calibration benchmarks, cross-store parity, durability proofs, and negative results." />
+  <LinkCard title="Evidence and evaluation" href="/lambo/evidence/" description="Read benchmarks and test results for recall, storage, and durability." />
+  <LinkCard title="Formal verification with Lean" href="/lambo/formal-verification/" description="Find the model guarantees, assumptions, and local verification commands." />
 </CardGrid>

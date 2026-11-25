@@ -7,26 +7,28 @@ import Step from '../../components/MdxStep.astro';
 import Note from '../../components/MdxNote.astro';
 import Warning from '../../components/MdxWarning.astro';
 
-This page shows how the parts fit together, from serving a session to driving it with agents.
+Write and recall memory in a local SQLite session, then connect agents to the same session over MCP.
 
 ## The model
 
-A session has exactly one writer, which is a `lambo serve` process that holds the session's lease. Readers query the store directly and never open a writer.
+At most one writer holds the session lease at a time. A running `lambo serve` holds it for its attached session. A one-shot CLI write takes the lease for the duration of the command. Separate readers query the store without acquiring it.
 
-Writes flow through one in-memory graph. They land in a write-behind log and flush to the durable store on an interval, so durability is eventual, not immediate. Call `lambo_stats` on the writer to see the current lag. Each flush goes out as a few batched statements rather than one per change. A burst of writes then costs a handful of round trips instead of one per change.
+The writer applies changes to its in-memory graph and flushes the write-behind log to the store in batches. A separate reader sees changes after they reach the store. Call `lambo_stats` on the writer to check flush lag.
 
-Canonization runs in the background. It promotes concepts to canonical facts when they earn it from structural evidence, not when an agent declares them important.
+Canonization runs in the background. Lambo promotes concepts when they meet the promotion policy’s evidence requirements.
 
-Every concept written this way keeps its embedding, so memory your agents produce is recallable by meaning and not only by keyword, on a store that supports vector search. See [What recall searches](#what-recall-searches).
+A store with vector search and a semantic embedder supports recall by meaning. See [What recall searches](#what-recall-searches).
 
-Text is checked on the way in. Lambo refuses control characters other than tab and newline. It also refuses invisible formatting characters such as bidi overrides and zero-width spaces. Nothing a reviewer cannot see reaches the graph. See [What Lambo accepts in text](/lambo/cli/#what-lambo-accepts-in-text).
+Lambo validates text before writing. It refuses control characters other than tab and newline and rejects certain invisible formatting characters, including bidirectional overrides and zero-width spaces. See [What Lambo accepts in text](/lambo/cli/#what-lambo-accepts-in-text).
+
+See [Formal verification with Lean](/lambo/formal-verification/) to check which behaviors the models cover.
 
 ## A walkthrough you can run
 
-This uses SQLite and the fixture embedder, so it needs no external services. A released binary already carries both, so you only have to point the config at them. If you build from source instead, include `--features store-sqlite`.
+Use SQLite and the fixture embedder to run the walkthrough locally without an external service. If you build from source with default features, add `--features store-sqlite`.
 
 <Steps>
-  <Step title="Write the config">
+  <Step title="Configure the store and embedder">
     ```toml lambo.toml
     [store]
     kind = "sqlite"
@@ -44,9 +46,8 @@ This uses SQLite and the fixture embedder, so it needs no external services. A r
     ```
     sqlite schema provisioned (init_schema, idempotent)
     ```
-    Skip this step only if you use the in-memory store.
   </Step>
-  <Step title="Write some memory">
+  <Step title="Write a concept and record an action">
     ```bash
     lambo --config lambo.toml derive --session demo --agent agent-a \
       --content "user schema" --kind entity \
@@ -60,7 +61,7 @@ This uses SQLite and the fixture embedder, so it needs no external services. A r
       --depends-on "user schema"
     ```
   </Step>
-  <Step title="Read it back">
+  <Step title="Read the session">
     ```bash
     lambo --config lambo.toml recall --session demo --query "update user schema"
     lambo --config lambo.toml inspect --session demo --focus "user schema"
@@ -71,13 +72,15 @@ This uses SQLite and the fixture embedder, so it needs no external services. A r
 
 ## Drive the same session over MCP
 
-Start the writer, and connect an MCP client to it.
+For stdio, configure your MCP client to launch `lambo serve` for the `demo` session. See [Connect an MCP client](/lambo/installation/#connect-an-mcp-client) to register the command.
+
+For HTTP, start the writer in a terminal.
 
 ```bash
-lambo --config lambo.toml serve --session demo --agent agent-a
+lambo --config lambo.toml serve --session demo --agent agent-a --transport http
 ```
 
-Point your client at that command over stdio. See [Installation](/lambo/installation/) for the `mcpServers` block.
+Point your MCP client at `http://127.0.0.1:7700/mcp`.
 
 To watch the wire yourself, pipe JSON-RPC frames into the server, one per line. This handshake, tool listing, and single call is what a client does for you.
 
@@ -93,16 +96,24 @@ To watch the wire yourself, pipe JSON-RPC frames into the server, one per line. 
 } | lambo --config lambo.toml serve --session wire-demo --agent agent-a
 ```
 
-The `initialize` reply names the session and carries the server's instructions, `tools/list` returns the server's MCP tools with their schemas (eight core tools on text-only deployments, plus `lambo_derive_image` when image embedding or client vectors are enabled), and the call returns a background write acknowledgement carrying a receipt id.
+The `initialize` reply includes the server instructions. The `tools/list` reply includes the available tools and their schemas. A successful `lambo_derive` acknowledgment includes a receipt in `result.structuredContent`. The example value below represents that part of the reply.
 
 ```json
-{"content":[{"type":"text","text":"derived 1 concept(s): 1 created, 0 matched existing"}],"isError":false}
+{
+  "summary": "accepted 1 concept(s) for background write; validated and ordered, not yet applied",
+  "receipt": "<receipt-id>",
+  "receipt_state": "pending",
+  "agent_id": "agent-a",
+  "warnings": []
+}
 ```
 
-Stop the server with `Ctrl-C` or a clean disconnect. Lambo flushes whatever has not reached the store yet and releases the lease, even on a signal. Because a flush is batched, even a heavy burst written moments before you stop drains quickly rather than trickling out one change at a time.
+Pass the returned receipt and `wait_ms` to `lambo_stats`. Wait for an `applied` or `applied_after_restart` state before you depend on the new concept. See [MCP write receipts](/lambo/mcp/#lambo_stats) to interpret the receipt state.
+
+Stop a terminal server with `Ctrl-C`, or let your stdio client close the connection. On clean shutdown, Lambo attempts a final flush and releases the lease. A later writer can replay write intents that reached the persistent store.
 
 <Warning>
-Shutdown is time-bounded, so it gives up rather than hanging when the store is unreachable. Anything still un-flushed when it gives up is lost, because there is no on-disk journal to replay it from. Let the process finish, and do not `kill -9` a writer whose most recent writes matter to you.
+A failed final flush or a forced stop can lose changes that exist only in the writer process. If you receive `close_unflushed`, check the receipt or recall after restart before resubmitting the write.
 </Warning>
 
 To watch the session in a browser while the writer runs, add a read-only `lambo serve-web` window on the same store:
@@ -115,7 +126,7 @@ It serves on port `7710` (loopback, unauthenticated by default) and only reads. 
 
 ## What recall searches
 
-Recall has three legs: keyword matching, vector similarity, and expansion through the graph edges around what it found. The vector leg needs a store with vector search.
+Recall gathers candidates from keywords, recent interactions, and vector similarity. Vector similarity requires a store with vector search and an available query vector. Lambo then expands through graph edges from those candidates.
 
 | Store | Keyword | Vector | Graph expansion |
 |---|---|---|---|
@@ -124,13 +135,17 @@ Recall has three legs: keyword matching, vector similarity, and expansion throug
 | CockroachDB | Yes | Yes | Yes |
 | In-memory | Yes | No | Yes |
 
-Concepts your agents write through `derive` and `record-action` store their embedding along with their text. On a store with vector search, that means recall finds memory the swarm wrote itself by meaning, not just memory you loaded in bulk ahead of time. This matters most for the swarm pattern below, where many agents write the same idea in different words.
+With default hybrid matching and a vector-capable store, Lambo embeds new text concepts written through `derive` and `record-action`. A semantic embedder can help recall concepts whose text shares few or no words with the query.
 
-The walkthrough above uses SQLite, so it exercises all three. On SQLite the vector leg is an exact scan rather than an index lookup, which is the right trade while a session's concept count stays small and returns exact nearest neighbours rather than approximate ones. The process serving a session (`lambo serve`, or an embedded `Memory`) runs that scan over the vectors it already holds in memory, so recall and `derive` never read vectors back from the database and see a concept as soon as it is written, before it is flushed. A separate reader such as `lambo recall` or `lambo serve-web` scans the database, with the same ranking. The in-memory store has no vector leg at all: recall there cannot match on meaning under any embedder.
+SQLite uses an exact vector scan. A writer scans its in-memory vectors, which include changes it has applied and has yet to flush. A separate `lambo recall` or `lambo serve-web` process scans the database and sees the vectors that have reached the store.
 
-**The walkthrough exercises the vector leg mechanically, not semantically.** Its config is `[embedder] kind = "fixture"`, and the fixture embedder is *deterministic, not semantic*: it hashes the normalized phrase to a pseudo-random unit vector, so two phrasings of the same idea are near-orthogonal unless they happen to fall in its one hardcoded family. Running the walkthrough proves vectors are written, queried, and ranked; it does not show a semantic hit, and the scores you see for non-keyword matches will be flat. For recall by meaning, point `[embedder]` at a real embedder — `kind = "candle"` on Apple silicon Metal builds or `kind = "bge_m3"` against a local llama.cpp server. A captured run of exactly that, where a query sharing no vocabulary with a derived concept recalls it, is in [`evidence/mooshik-f-sqlite-bge/`](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-f-sqlite-bge).
+The fixture embedder lets you exercise vector writes and lookups offline. For semantic recall, configure `kind = "candle"` in the Metal build for Apple silicon or `kind = "bge_m3"` with a local llama.cpp server. The walkthrough has stamped `demo` with the fixture embedding contract, so a writer using the new embedder cannot attach to it directly. To keep its concepts, stop the writer, back up the store, and migrate the session at the same vector width. See [Re-embed stored concepts](/lambo/cli/#re-embed-stored-concepts) for the procedure. To start without those concepts, use a new session name with the new embedder.
 
-One asymmetry to know when you write your own queries: `derive` embeds the concept *with its context* — the string `"{content} — {origin}"` — while `recall` embeds your query text bare. So a query is compared against the framed string, not against the concept's content alone. With a real embedder this costs a little similarity and the ranking survives it; with the fixture embedder, which has no notion of similarity, it is the difference between a hit and a miss.
+For an example with SQLite and BGE-M3, refer to the [recorded semantic recall run](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-f-sqlite-bge).
+
+`derive` embeds the concept together with the originating call text. `recall` embeds the query as you enter it. The fixture embedder can give those inputs different vectors even when the query matches the concept text.
+
+See [Troubleshoot missing memory](/lambo/troubleshoot-missing-memory/) to check the session, write receipt, and search results when a concept is missing.
 
 ## Readers and the writer
 
@@ -165,15 +180,8 @@ If a holder crashes, its lease expires and the next writer takes the session. Th
 
 ## Run a swarm
 
-Run one `lambo serve` writer for the session, then have many small agents each write with a single command line call.
+Connect each agent to the same session over MCP and give it a distinct `agent_id`. Agents write through `lambo_derive` or `lambo_record_action` and check their receipts through `lambo_stats`.
 
-```bash
-lambo --config lambo.toml derive --session demo --agent agent-7 \
-  --content "retry budget is 3" --kind constraint
-```
-
-Because each agent call is one deterministic line, a small local model can drive it reliably, and no tool schema takes up the model's context. Canonization collapses the duplicate observations that many agents produce into single canonical facts.
-
-For coordination, use `lambo_reserve` from the writer before editing a shared concept. A reservation taken by a one-shot command line call ends when that command exits, so the durable coordination point is the writer. See [Command line](/lambo/cli/).
+Use `lambo_reserve` on that writer to coordinate edits to shared concepts. See [MCP tools](/lambo/mcp/) to find the write, receipt, and reservation arguments.
 
 See [Installation](/lambo/installation/), [MCP tools](/lambo/mcp/), [Command line](/lambo/cli/), [Library API](/lambo/api/), and [Configuration](/lambo/config/).

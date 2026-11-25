@@ -5,17 +5,17 @@ description: "Run the scripted two-agent scenario and watch shared memory form."
 import Warning from '../../components/MdxWarning.astro';
 import Note from '../../components/MdxNote.astro';
 
-`lambo demo` replays two agents building one REST API against one session. It is the fastest way to watch the memory layer work end to end, and it needs no cluster, no model files, and no config.
+Run `lambo demo` to see two scripted agents share memory while building a REST API. The demo shows concept promotion and the warnings an agent receives before editing shared work.
 
-The demo is a permanent part of the binary rather than a sample you delete. Use it to evaluate Lambo before you wire it into anything. Use it to check a new store or embedder end to end. Use it to see what recall output looks like on a graph that has earned some structure.
+## Run the demo
 
-## Run it
+Run the command in a directory without a Lambo configuration to use the in-memory store.
 
 ```bash
 lambo demo
 ```
 
-With no config file present it runs against the in-memory store and finishes in a few seconds. It mints a fresh session id per run, so repeated runs never collide.
+By default, each run creates a fresh session ID.
 
 | Flag | Default | What it does |
 |---|---|---|
@@ -23,37 +23,37 @@ With no config file present it runs against the in-memory store and finishes in 
 | `--session` | fresh id per run | Writes into a session id you choose. |
 
 <Warning>
-The scenario is not re-runnable into a session that has already been used, because canonization state is not restored over an existing graph. Let it mint a fresh id unless you have a reason not to.
+If you pass `--session`, choose a fresh session ID. Existing memory changes the scenario’s starting state and can cause its assertions to fail.
 </Warning>
 
 ## What the scenario does
 
-Agent A builds the API across nine interactions. It lays down `user schema`, `auth middleware`, and `session store`, then records the actions that depend on them.
+Agent A records `user schema`, `auth middleware`, and `session store`, then records the actions that depend on them.
 
-Agent B joins on a separate feature and adds rate limiting, which quietly depends on `auth middleware` and `user schema`.
+Agent B adds rate limiting and records its dependencies on `auth middleware` and `user schema`.
 
-Agent A returns for one last edit and adds `oauth_id` to `user schema`.
+Agent A adds `oauth_id` to `user schema`.
 
-Agent B then asks `recall("update user schema")`. Memory answers that the thing it is about to change is load-bearing, carries a blast radius of 15, and was touched seconds ago by another agent. No colleague told it that.
+Agent B calls `recall("update user schema")`. The result marks the concept as load-bearing, shows its 15 dependents, and reports Agent A’s recent edit.
 
-## What it proves
+## What the demo checks
 
 Each act demonstrates one claim you can check in the output.
 
-- **Consolidation.** Twelve interactions produce 27 concepts rather than 27 unrelated notes, because repeated ideas match existing concepts instead of duplicating them.
-- **Promotion by evidence.** `user schema` walks Candidate, then Venerable, then Canonical. The canonization engine decides that from structural evidence. No line in the demo writes a status.
-- **Blast radius.** The recall block marks `user schema` as a load-bearing pillar with 15 dependents: its nine child columns and artifacts, and the six actions that depend on it.
-- **Conflict awareness.** The recall block names the other agent and how recently it wrote.
+- Twelve interactions produce 27 concepts. Repeated ideas can match concepts that the agents have already written.
+- The canonization engine promotes `user schema` through Candidate, Venerable, and Canonical based on its recorded evidence.
+- Recall reports a blast radius of 15 for `user schema`, reflecting nine child concepts and six dependent actions.
+- The conflict notice names the other agent and reports the age of its write.
 
-## Nothing is staged
+## How the demo runs
 
-The demo drives the same public `Memory` API an MCP client drives. Every concept, edge, and canonization transition comes from the real engine running against the real store. The context block you see is the actual renderer output, not a formatted string.
+The demo uses the public `Memory` API. Lambo builds the graph, applies canonization, and renders the recall block.
 
-The run asserts its own claims before reporting success. It expects 12 interactions, 27 concepts, and `user schema` at blast radius 15. A run that produces a different graph fails with a diagnosis rather than quietly showing you something else.
+The run checks the interaction count, concept count, and blast radius before it reports success.
 
-## The knobs it compresses
+## Timing overrides
 
-The demo has to finish in seconds rather than in an afternoon, so it compresses intervals. It weakens no threshold, and it prints this table on every run so you can check that claim yourself.
+The demo changes background intervals and the conflict window to finish quickly. Its promotion thresholds match the defaults.
 
 | Knob | Default | Demo |
 |---|---|---|
@@ -70,7 +70,7 @@ Every admission threshold stays at its default. Those are `gc_survived` at least
 
 ## Why two runs match
 
-Canonization advances on session mutations rather than on a clock, so a naive scripted demo settles wherever the daemon happened to be when the script ended. This one drives the state machine to a unique fixed point instead.
+The demo controls when canonization runs so the outcome stays stable across repeated runs.
 
 After the last write it declares session synonyms one at a time until every concept clears the `gc_survived` floor, which opens Stage 1's survival gate uniformly. Then it polls until the audit trail stops growing across three consecutive canonization cycles. With the graph frozen and every scoring dimension measured against the session rather than the wall clock, the outcome becomes a pure function of the graph.
 
@@ -80,7 +80,7 @@ The run prints a normalized summary with the volatile parts masked. Session ids,
 Waits are bounded polls on observable conditions, never fixed sleeps. The demo either observes the condition it needs or fails naming the condition it was waiting for.
 </Note>
 
-## Reading the output
+## Read the output
 
 The canonization section shows the engine promoting one concept across three cycles, then confirming it reached a fixed point.
 
@@ -93,20 +93,15 @@ The canonization section shows the engine promoting one concept across three cyc
   no transitions for 3 consecutive cycles — the state machine is at its fixed point
 ```
 
-The final recall is the payoff. This is the block an agent receives, verbatim.
+The normalized outcome includes the warning about `user schema`. The summary replaces variable values with placeholders.
 
-```
-  user schema [Entity, canonical] (score 2.27, blast radius 15)
-  ⚑ Load-bearing pillar — 15 nodes depend on this. Modify with caution.
-  Agent A wrote to it 0 seconds ago
-  High-risk modification: high-value node d034055c (Canonical, blast radius 15) modified within 30s
-
-  add oauth_id to user schema [Resource] (score 1.50)
-
-  user fixtures [Resource] (score 0.78)
+```text
+    user schema [Entity, canonical] (score <s>, id <node>, blast radius 15, names ["user document","user entity","user model"])
+    ⚑ Load-bearing pillar — 15 nodes depend on this. Modify with caution.
+    Agent A wrote to it <n> seconds ago
 ```
 
-The age reads 0 seconds because the whole session replays in under a second. On a real session it reads the true age of the other agent's write.
+In the live recall block, ages reflect the demo’s scripted timestamps.
 
 ## Run it against a durable store
 
@@ -136,18 +131,8 @@ ORDER BY occurred_at;
 
 Run through the managed MCP server, that returns the status walk as the demo told it: the parent concept moving Candidate, then Venerable, then Canonical, with the blast radius recorded on the promotion and left null on the earlier hops.
 
-## What it is not
+## Test your own session
 
-The demo is a correctness showcase rather than a benchmark. Its compressed intervals make its timings meaningless as performance figures.
+See [End to end](/lambo/end-to-end/) to connect clients over HTTP and write through MCP. See [Evidence and evaluation](/lambo/evidence/) to compare measured workloads and release performance.
 
-It also covers one scenario. It does not exercise reservations, drift detection, or the HTTP transport. Use [End to end](/lambo/end-to-end/) for a walkthrough you drive yourself.
-
-## Where to go next
-
-Follow whichever thread the demo made interesting.
-
-- Read [End to end](/lambo/end-to-end/) for the topology this scenario exercises.
-- Read [MCP tools](/lambo/mcp/) for the nine MCP tools your agents call.
-- Read [Command line](/lambo/cli/) for the verbs a swarm uses.
-- Read [Configuration](/lambo/config/) to point Lambo at a durable store.
-- Read [`docs/demo.md`](https://github.com/nrynss/lambo/blob/main/docs/demo.md) in the repository for the operator's view of this same scenario: every knob and its committed value, what determinism does and does not cover, why each run gets a fresh session, and the tests that hold the behaviour in place.
+For the scenario’s implementation details and determinism tests, refer to the [demo reference](https://github.com/nrynss/lambo/blob/main/docs/demo.md).
