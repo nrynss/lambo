@@ -138,5 +138,80 @@ respective fix PRs. [Replay #354](https://github.com/nrynss/lambo/pull/354) ·
 [PostgreSQL #360](https://github.com/nrynss/lambo/pull/360) ·
 [Elasticsearch #361](https://github.com/nrynss/lambo/pull/361)
 
-[Aggregate results](results.json) include per-run latency distributions,
-write totals, timing samples, release commits, and asset checksums.
+[Aggregate results](results.json) include write totals, client-side latency
+summaries, offline timing samples, release commits, and asset checksums.
+The HTTP harnesses export client-side quantiles as summaries.
+
+[HTTP samples](http-samples.json) contain the underlying server-side
+measurements and all 200 ranked comparisons. Each hit has a report-local
+integer that lets you match it between releases. The capture omits query
+text, memory text, private paths, and store identifiers.
+
+Each load run contains batches of numeric call rows and batches of apply
+lags. Flatten each set of batches before calculating quantiles. Divide
+microseconds by 1,000 to report milliseconds. Use sorted index
+`round(p * (n - 1))` for percentile `p` and sample count `n`. For recall,
+filter out rows ending within five seconds of the first tool call.
+
+## Reproduce the measurements
+
+Run the commands from the repository root with the release binaries and
+scratch paths in the variables shown. Remove inherited `LAMBO_*`
+environment overrides. Keep the snapshot, configs, and ledgers outside
+the checkout.
+
+Replay uses the SQLite and Metal config template. Use separate output and
+work directories for a reconstruction-only pass with `--dry-run`.
+
+```bash
+python3 scripts/loadtest/replay_parity.py \
+  --bin-a "$BIN_15" --bin-b "$BIN_16" \
+  --snapshot "$SNAPSHOT" --config-template "$CONFIG_TEMPLATE" \
+  --session lambo --groups 300 --variants 30 \
+  --canon-eval-secs 100000000 --canon-wait 0 \
+  --out "$REPLAY_RESULTS" --work "$PRIVATE_REPLAY"
+```
+
+Before each HTTP run, copy the database and set the scratch config to that
+copy. Use `candle`, `device = "metal"`, and `dim = 1024`. Serve
+`lambo` with the `general` layer at weight and minimum similarity 0.5.
+Use a separate port and runtime directory for each writer.
+
+```bash
+"$BIN" --config "$CONFIG" provision
+XDG_RUNTIME_DIR="$RUNTIME_DIR" "$BIN" --config "$CONFIG" serve \
+  --transport http --bind 127.0.0.1 --port "$PORT" --ledger "$LEDGER"
+```
+
+Add `--rate-limit-rps 0` for both sequential A/B servers. Wait 90 seconds
+after both ports open and use their loopback `/mcp` URLs.
+
+```bash
+python3 scripts/loadtest/mcp_ab.py ab \
+  --a "0.15.0=$URL_15" --b "0.16.0=$URL_16" \
+  --rounds 10 --derives 30 --out "$AB_RESULTS"
+```
+
+Keep the default rate limit for concurrent runs. Wait 15 seconds after
+the serving port opens, or after both ports open for a concurrent pair.
+Set `WORKERS=8` with `THINK=1.0`, or `WORKERS=16` with `THINK=0.5`.
+
+```bash
+python3 scripts/loadtest/mcp_concurrent.py \
+  --endpoint "$URL" --out "$LOAD_RESULTS" --workers "$WORKERS" \
+  --think "$THINK" --secs 120 --seed 1 --receipt-max 5000 \
+  --server-ledger "$LEDGER"
+```
+
+Set `CANON_CLOCK` to `2026-11-26T20:39:21Z` to reproduce the clock used
+with this backup. Swap the command order for the second timing batch.
+
+```bash
+hyperfine --shell=none --warmup 2 --runs 30 --export-json "$STATS_TIMINGS" \
+  --command-name 0.15.0 "$BIN_15 --config $CONFIG stats --session lambo" \
+  --command-name 0.16.0 "$BIN_16 --config $CONFIG stats --session lambo"
+
+hyperfine --shell=none --warmup 1 --runs 8 --export-json "$CANON_TIMINGS" \
+  --command-name 0.15.0 "$BIN_15 canon dry-run --store $STORE --session lambo --at $CANON_CLOCK --json" \
+  --command-name 0.16.0 "$BIN_16 canon dry-run --store $STORE --session lambo --at $CANON_CLOCK --json"
+```
