@@ -101,15 +101,11 @@ pub(super) fn unregister_session(session: &SessionId, agent: &AgentId) {
 /// This type carries the two things a *serve* additionally needs in order to
 /// **act** on the latch rather than merely obey it:
 ///
-/// * a wake-up, so a wind-down does not have to poll for a transition that
-///   happens at most once in a process's life; and
-/// * the id of the writer that took the session, captured at the latch, so the
-///   exit line can name it instead of saying "someone".
+/// * a wake-up for a serve waiting to wind down this handle; and
+/// * the new holder's id, when the latch identifies it.
 ///
-/// Deliberately not folded into the `AtomicBool`: `FlushTask::with_fence`'s
-/// contract is a plain flag shared with the write gate, and widening it would
-/// put a notifier on the flush hot path to serve one waiter that only ever wakes
-/// once.
+/// The write gate continues reading the shared flag. The flush task wakes
+/// this signal through a callback on the first stale-write transition.
 #[derive(Debug, Default)]
 pub(crate) struct LeaseLostSignal {
     /// The new holder's token, from the refresh that found the lease gone.
@@ -130,7 +126,7 @@ impl LeaseLostSignal {
         }
     }
 
-    /// Wake every waiter (a latch [`Self::record`] made quietly).
+    /// Wake every waiter after the shared fence has latched.
     pub(super) fn wake(&self) {
         self.woken.notify_waiters();
     }
@@ -407,7 +403,7 @@ impl Memory {
         self.lease_lost_signal.latch(winner);
     }
 
-    /// `true` once the heartbeat latched a lost lease.
+    /// `true` once this handle's lease fence has latched.
     ///
     /// `pub(crate)` so `mcp::serve` can tell a fenced exit from an
     /// ordinary one — it is the difference between "we released the lease" and
@@ -416,8 +412,8 @@ impl Memory {
         self.lease_lost.load(Ordering::Acquire)
     }
 
-    /// Resolve once this handle's single-writer lease has been lost, with the
-    /// id of the writer that took it.
+    /// Resolve once this handle's single-writer lease has been lost. Return
+    /// the new holder's id when known, or a generic label after a stale flush.
     ///
     /// **Waits forever on a healthy holder**, which is the point: it is one arm
     /// of `serve`'s wind-down `select!`, beside SIGTERM. The fence latches at
@@ -425,8 +421,8 @@ impl Memory {
     ///
     /// Race-free by construction, and the ordering is the whole of it: the
     /// waiter is registered (`enable`) *before* the flag is re-read, so a latch
-    /// landing between the read and the await is still delivered. Both latch
-    /// sites set the flag before they notify, so a wake always finds it set —
+    /// landing between the read and the await is still delivered. Latches
+    /// set the flag before they notify, so a wake always finds it set —
     /// but the flag, never the notification, is the authority, and the loop is
     /// what makes a spurious wake harmless.
     pub(crate) async fn lease_lost_latched(&self) -> String {

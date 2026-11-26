@@ -598,7 +598,7 @@ The store allows at most one writer lease per session. The lease records the hol
 
 - `build()` acquires the lease or fails, naming the process that holds it. `close()` releases it.
 - A heartbeat keeps a live holder's lease fresh and lets a crashed holder's lease expire.
-- If a holder's lease is taken over, that holder is fenced. Its further writes are refused and its pending writes are dropped, so it cannot overwrite the new holder. It is fenced at the first flush the store refuses for its stale token or at its next heartbeat, whichever comes first, and also when its own heartbeat takes the lease back at a new token (after an operator takeover, for example).
+- If a holder's lease is taken over, that holder is fenced. Its further writes are refused and its pending writes are dropped, so it cannot overwrite the new holder. It is fenced at the first flush the store refuses for its stale token or at its next heartbeat, whichever comes first, and also when its own heartbeat takes the lease back at a new token (after an operator takeover, for example). When a stale flush first fences the handle, it wakes the serve to start shutting that handle down. {/* lean: Registry.stale_latches_and_wakes */} {/* test: src/memory/tests/leases.rs issue303_a_stale_flush_wakes_a_parked_lease_waiter_before_the_heartbeat */}
 
 <Note>
 After a takeover, the store rejects flushes that carry the old fencing token. The previous writer may still accept changes in memory until a heartbeat or flush detects the lost lease. Those changes can be discarded. For background, refer to [issue #1](https://github.com/nrynss/lambo/issues/1).

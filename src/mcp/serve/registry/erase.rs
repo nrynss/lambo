@@ -56,12 +56,12 @@
 //!
 //! # A session that is not attached
 //!
-//! Held by another process, failed, erased already, or never attached
-//! here: the store erase runs with the CLI's own eraser identity. The slot
-//! was claimed under every attach permit, so no background attach of the
-//! id was in flight then, and none starts over the `Erasing` slot after. A
-//! live lease held elsewhere is [`EraseAnswer::HeldElsewhere`] (409), as the
-//! CLI's exit 1. A repeat finds the tombstone and reports `already_absent`.
+//! The store erase runs with the CLI's eraser identity. The slot was
+//! claimed under every attach permit, so no background attach of the id was
+//! in flight then, and none starts over the `Erasing` slot after. A live
+//! lease under a different identity returns [`EraseAnswer::HeldElsewhere`]
+//! (409). That identity can belong to this serve after it detaches a session.
+//! A repeat finds the tombstone and reports `already_absent`.
 //!
 //! # A one-session serve
 //!
@@ -117,8 +117,8 @@ pub(in crate::mcp::serve) const ERASE_PERMIT_WAIT: Duration = Duration::from_sec
 pub(in crate::mcp::serve) enum EraseAnswer {
     /// The store committed (200). `already_absent` on a repeat.
     Erased(EraseReport),
-    /// A live writer in another process holds the session (409); nothing
-    /// was touched.
+    /// A live lease under a different holder identity prevents erasure (409).
+    /// A detached session can still carry this serve's holder identity.
     HeldElsewhere { holder: String, age: Duration },
     /// The session is being erased, attached or detached right now, an
     /// attach in flight kept the permits past [`ERASE_PERMIT_WAIT`], or the
@@ -401,8 +401,8 @@ impl SessionRegistry {
         }
     }
 
-    /// The erase of a session this process does not hold, as the CLI does
-    /// it. `prior` is the slot it had, put back when nothing was erased.
+    /// Erase a session with no attached handle using the CLI's eraser
+    /// identity. Restore `prior` when the store refuses the erase.
     async fn erase_unattached(self: &Arc<Self>, id: &str, prior: Option<Slot>) -> EraseAnswer {
         let Some(store) = self.shared_store() else {
             self.restore(id, prior);

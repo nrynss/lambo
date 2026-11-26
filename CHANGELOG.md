@@ -105,6 +105,12 @@
 
 ### Fixed
 
+- An HTTP erase conflict explains that the live lease can still belong to
+  the same serve after it detaches the session (#314).
+- A stale background flush wakes serve as soon as it fences the writer
+  (#303).
+- Dependency-question classification and subject matching use the same
+  Unicode normalization for marker boundaries (#306).
 - Updated the shipped MCP, SQLite, TLS, and Candle dependencies to address
   RustSec advisories. A scheduled scan now checks every release profile
   and runs on dependency changes (#352).

@@ -707,6 +707,71 @@ async fn fence_for_erase_closes_without_flushing_or_releasing_and_the_holder_era
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn issue303_a_stale_flush_wakes_a_parked_lease_waiter_before_the_heartbeat() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("stale-flush-wake");
+    let mem = Arc::new(
+        Memory::builder()
+            .session(session.as_str())
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(1))
+            .store(store.clone() as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .unwrap(),
+    );
+    mem.derive(&[("pending write", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap();
+
+    let (parked, registered) = tokio::sync::oneshot::channel();
+    let waiter = {
+        let mem = Arc::clone(&mem);
+        tokio::spawn(async move {
+            let lost = mem.lease_lost_latched();
+            tokio::pin!(lost);
+            tokio::select! {
+                biased;
+                _ = &mut lost => panic!("the writer still holds the lease"),
+                () = std::future::ready(()) => {}
+            }
+            parked.send(()).unwrap();
+            lost.await
+        })
+    };
+    registered.await.unwrap();
+
+    store
+        .release_lease(&session, mem.lease_holder())
+        .await
+        .unwrap();
+    let replacement = LeaseHolder::for_this_process(&AgentId::new("replacement"));
+    assert!(matches!(
+        store
+            .acquire_lease(&session, &replacement, LEASE_TTL)
+            .await
+            .unwrap(),
+        LeaseOutcome::Acquired(_)
+    ));
+
+    // The timeout polls the join handle only. It cannot make the waiter's
+    // stale fence check pass by polling the parked future at the deadline.
+    let result =
+        tokio::time::timeout(crate::store::lease::LEASE_HEARTBEAT_INTERVAL / 2, waiter).await;
+    assert!(
+        mem.lease_lost(),
+        "the stale flush must have fenced the handle"
+    );
+    let holder = result
+        .expect("the flush must wake serve before the heartbeat")
+        .unwrap();
+    assert_eq!(holder, "another writer");
+    let _ = mem.close().await;
+}
+
 /// #32 PR 7: `fence_for_erase` fences at once (writes are refused
 /// as erased) but does not wake a waiter on the fence (a one-session
 /// serve's wind-down) until `announce_fence`, so the erase can answer its

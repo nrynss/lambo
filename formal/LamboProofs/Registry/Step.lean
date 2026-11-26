@@ -51,7 +51,7 @@ flight nor a pinned one, and an eviction takes only an idle, unpinned session
 leaves its slot (`detach_release`, `detach_leaves`); a lost lease fences the
 handle, then detaches the entry (#293: `write_refused_fenced`,
 `write_through_live`, `beat_own_gen`, `beat_latches`, `stale_not_own_gen`,
-`stale_quiet`, `parked_needs_wake`, `watcher_fires_after_latch`,
+`stale_latches_and_wakes`, `parked_needs_wake`, `watcher_fires_after_latch`,
 `erase_fence_not_lost`, `lostRun_matching_live`, `lostRun_preserves_other_handle`);
 the erase's claim, 503s and commit (`eClaim_fences`, `eClaim_refuses_busy`,
 `eEnd_commit`). `stale_release_fences` is part of the dropped-flight race
@@ -857,13 +857,14 @@ def evBeat (s : St) (i : Nat) : Option St :=
         rows := upd s.rows i r' }
   | none => none
 
-/-- The flush loop's `StaleWrite` (#293): the store refuses the handle's
-token, and the loop latches the shared flag alone, without the wake-up. -/
+/-- The generic stale-flush refusal (#293, #303) latches the fence and
+wakes the parked watcher when it first sets the flag. An already latched
+fence keeps its wake-up state so a quiet erase can announce its own fence. -/
 def evStale (s : St) (i : Nat) : Option St :=
   match ldHandle (s.slots i) with
   | some h =>
     if h.token < (s.rows i).token ∨ (s.rows i).holder = .tomb then
-      some { s with slots := upd s.slots i (mapLD (s.slots i) (fun h => { h with fenced := true })) }
+      some { s with slots := upd s.slots i (mapLD (s.slots i) (fun h => { h with fenced := true, woken := h.woken || !h.fenced })) }
     else none
   | none => none
 
@@ -2319,9 +2320,8 @@ theorem beat_latches {i : Nat} {h : H} (hl : ldHandle (s.slots i) = some h)
   simp only [upd_same]
   exact ldHandle_mapLD hl _
 
-/-- A flush the store refuses as stale is never on the handle's own
-generation, so the next beat latches with the wake-up (#293: "serve is woken
-by the next heartbeat"). -/
+/-- A stale flush refusal means the durable row has advanced past the
+handle's generation or become an erasure tombstone. -/
 theorem stale_not_own_gen {r : Row} {h : H} (hs : h.token < r.token ∨ r.holder = .tomb) :
     ownGen r h = false := by
   unfold ownGen
@@ -2329,10 +2329,11 @@ theorem stale_not_own_gen {r : Row} {h : H} (hs : h.token < r.token ∨ r.holder
   · simp; omega
   · simp [hs]
 
-/-- **The stale-write latch is quiet** (#293): it sets the fence alone,
-without the wake-up. -/
-theorem stale_quiet {i : Nat} {h : H} (hl : ldHandle (s.slots i) = some h)
-    (he : evStale s i = some s') : ldHandle (s'.slots i) = some { h with fenced := true } := by
+/-- A stale flush fences the handle and wakes its watcher on the first
+transition. A previously latched fence keeps its existing wake-up state. -/
+theorem stale_latches_and_wakes {i : Nat} {h : H} (hl : ldHandle (s.slots i) = some h)
+    (he : evStale s i = some s') :
+    ldHandle (s'.slots i) = some { h with fenced := true, woken := h.woken || !h.fenced } := by
   unfold evStale at he
   rw [hl] at he
   simp only at he
@@ -2342,8 +2343,7 @@ theorem stale_quiet {i : Nat} {h : H} (hl : ldHandle (s.slots i) = some h)
     exact ldHandle_mapLD hl _
   · cases he
 
-/-- So a watcher already parked on the wake-up does not fire on it: the
-session stays live (writes refused) until a beat wakes it. -/
+/-- A parked watcher can fire only after it is notified. -/
 theorem parked_needs_wake {i : Nat} {h : H} (hl : ldHandle (s.slots i) = some h)
     (hw : h.watch = .parked) (hk : h.woken = false) : evWatchFire s i = none := by
   unfold evWatchFire

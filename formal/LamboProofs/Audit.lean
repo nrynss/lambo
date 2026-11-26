@@ -756,7 +756,7 @@ open Lambo
 #print axioms Lambo.Registry.detach_release
 #print axioms Lambo.Registry.write_refused_fenced
 #print axioms Lambo.Registry.beat_latches
-#print axioms Lambo.Registry.stale_quiet
+#print axioms Lambo.Registry.stale_latches_and_wakes
 #print axioms Lambo.Registry.watcher_fires_after_latch
 #print axioms Lambo.Registry.lost_detach_preserves_replacement
 #print axioms Lambo.Registry.dropped_flight_fences_next
