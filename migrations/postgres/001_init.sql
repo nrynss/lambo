@@ -123,9 +123,48 @@ ALTER TABLE concepts ADD COLUMN IF NOT EXISTS embedding_source TEXT;
 -- Spec §4 errata: canonical-key uniqueness is partial (non-Observation
 -- only). Demoted Observations may share a key. The DROP covers a
 -- table-level UNIQUE a pre-errata cluster might still carry.
-CREATE UNIQUE INDEX IF NOT EXISTS concepts_key_non_obs_idx
-    ON concepts (session_id, canonical_key)
+-- #323: store the full key in the row and index a fixed-width digest.
+-- The database encoding is fixed and the conversion target is UTF-8. Pin the
+-- search path so the conversion uses the built-in PostgreSQL catalog.
+CREATE OR REPLACE FUNCTION lambo_canonical_key_digest(TEXT)
+RETURNS BYTEA
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE
+SET search_path = pg_catalog
+AS 'SELECT pg_catalog.sha256(pg_catalog.convert_to($1, ''UTF8''))';
+
+CREATE UNIQUE INDEX IF NOT EXISTS concepts_key_digest_non_obs_idx
+    ON concepts (session_id, lambo_canonical_key_digest(canonical_key))
     WHERE concept_type <> 'Observation';
+-- IF NOT EXISTS can skip an unrelated relation with this name. Refuse the
+-- entire atomic DDL batch before removing the old protection in that case.
+DO $$
+DECLARE
+    legacy_index regclass;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index i
+        JOIN pg_class idx ON idx.oid = i.indexrelid
+        JOIN pg_am am ON am.oid = idx.relam
+        WHERE i.indexrelid = to_regclass('concepts_key_digest_non_obs_idx')
+          AND i.indrelid = 'concepts'::regclass
+          AND i.indisunique AND i.indisvalid AND i.indisready AND i.indislive
+          AND i.indnkeyatts = 2 AND i.indnatts = 2 AND am.amname = 'btree'
+          AND pg_get_indexdef(i.indexrelid, 1, true) = 'session_id'
+          AND pg_get_indexdef(i.indexrelid, 2, true) = 'lambo_canonical_key_digest(canonical_key)'
+          AND pg_get_expr(i.indpred, i.indrelid) = '(concept_type <> ''Observation''::text)'
+    ) THEN
+        RAISE EXCEPTION 'invalid concepts_key_digest_non_obs_idx; remove the conflicting relation and run lambo provision';
+    END IF;
+    -- Never let search_path resolve the legacy name to another table's index.
+    SELECT i.indexrelid::regclass INTO legacy_index
+    FROM pg_index i
+    JOIN pg_class idx ON idx.oid = i.indexrelid
+    WHERE i.indrelid = 'concepts'::regclass
+      AND idx.relname = 'concepts_key_non_obs_idx';
+    IF legacy_index IS NOT NULL THEN
+        EXECUTE format('DROP INDEX %s', legacy_index);
+    END IF;
+END $$;
 ALTER TABLE concepts DROP CONSTRAINT IF EXISTS concepts_session_id_canonical_key_key;
 
 -- Partial: NULL embeddings must not enter the index. The recall query

@@ -1303,6 +1303,200 @@ async fn live_store_at(test: &str, dsn: &str, dim: usize) -> PostgresStore {
     store
 }
 
+/// Re-provision must not remove a different schema's legacy index merely
+/// because it is visible later in the connection's search path.
+#[tokio::test]
+#[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+async fn provision_preserves_legacy_index_in_later_search_path_schema() {
+    let Some((_db, store)) = unique_live_store(
+        "provision_preserves_legacy_index_in_later_search_path_schema",
+        8,
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = store.pool().await.expect("pool");
+    let mut tx = pool.begin().await.expect("transaction");
+    sqlx::raw_sql(
+        "CREATE SCHEMA shadow; \
+         CREATE TABLE shadow.concepts (session_id text, canonical_key text); \
+         CREATE UNIQUE INDEX concepts_key_non_obs_idx \
+         ON shadow.concepts (session_id, canonical_key); \
+         SET LOCAL search_path = public, shadow",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("install shadow index and search path");
+    let ddl = PostgresDialect::init_sql(8).expect("DDL");
+    sqlx::raw_sql(&ddl)
+        .execute(&mut *tx)
+        .await
+        .expect("re-provision");
+    let shadow_index: bool =
+        sqlx::query_scalar("SELECT to_regclass('shadow.concepts_key_non_obs_idx') IS NOT NULL")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("lookup shadow index");
+    assert!(
+        shadow_index,
+        "re-provision must preserve the other schema's index"
+    );
+    tx.rollback().await.expect("rollback test schema");
+}
+
+/// An old schema converges on provision, and a large admitted key survives
+/// a close with the original full text key.
+#[cfg(feature = "embed-fixture")]
+#[tokio::test]
+#[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+async fn long_canonical_keys_survive_postgres_provision_and_close() {
+    use crate::embed::{Embedder, FixtureEmbedder};
+    use crate::graph::{canonical::canonical_key, derive::ParentOf};
+    use crate::memory::Memory;
+    use sha2::{Digest, Sha256};
+    use std::{sync::Arc, time::Duration};
+
+    let Some((_db, store)) = unique_live_store(
+        "long_canonical_keys_survive_postgres_provision_and_close",
+        8,
+    )
+    .await
+    else {
+        return;
+    };
+    let store = Arc::new(store);
+    let pool = store.pool().await.expect("pool");
+    sqlx::raw_sql(
+        "DROP INDEX IF EXISTS concepts_key_digest_non_obs_idx; \
+         CREATE UNIQUE INDEX IF NOT EXISTS concepts_key_non_obs_idx \
+         ON concepts (session_id, canonical_key) WHERE concept_type <> 'Observation'",
+    )
+    .execute(&pool)
+    .await
+    .expect("install the old index in the private test database");
+    let err = store
+        .verify_schema()
+        .await
+        .expect_err("legacy index must refuse attach");
+    assert!(err.to_string().contains("lambo provision"), "{err}");
+
+    // A same-name relation makes CREATE INDEX IF NOT EXISTS skip creation.
+    // Provision must roll back without removing the old unique index.
+    sqlx::query("CREATE TABLE concepts_key_digest_non_obs_idx (id integer)")
+        .execute(&pool)
+        .await
+        .expect("install decoy relation");
+    let err = store
+        .init_schema()
+        .await
+        .expect_err("decoy must refuse provision");
+    assert!(
+        err.to_string().contains("concepts_key_digest_non_obs_idx"),
+        "{err}"
+    );
+    let old_index: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('concepts_key_non_obs_idx')::text")
+            .fetch_one(&pool)
+            .await
+            .expect("old index lookup");
+    assert!(
+        old_index.is_some(),
+        "failed provision must preserve old uniqueness"
+    );
+    sqlx::query("DROP TABLE concepts_key_digest_non_obs_idx")
+        .execute(&pool)
+        .await
+        .expect("remove decoy");
+    store.init_schema().await.expect("provision existing store");
+    store
+        .verify_schema()
+        .await
+        .expect("upgraded schema must attach");
+    store.init_schema().await.expect("repeat provisioning");
+
+    let sid = SessionId::new("long-key");
+    let agent = AgentId::new("writer");
+    let content = (0_u64..96)
+        .map(|n| format!("key0{:x}", Sha256::digest(n.to_be_bytes())))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let key = canonical_key(&content, |_| None);
+    assert!(content.len() <= crate::surface::limits::MAX_CONTENT_BYTES);
+    assert!(key.len() > 2704, "the full key exceeds an 8 KiB B-tree row");
+    let memory = Memory::builder()
+        .session(sid.as_str())
+        .agent(agent.as_str())
+        .store(store.clone() as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::with_dimensions(8).unwrap()) as Arc<dyn Embedder>)
+        .embedding_contract(EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: 8,
+        })
+        .flush_interval(Duration::from_secs(3600))
+        .build()
+        .await
+        .expect("attach writer");
+    let submitted = memory
+        .derive_async_as(
+            &agent,
+            &[(&content, ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("admit the long key");
+    assert!(!submitted.dropped());
+    assert_eq!(
+        memory
+            .pipeline()
+            .wait(&agent, submitted.receipt, Duration::from_secs(10))
+            .await
+            .tag(),
+        "applied"
+    );
+    memory.close().await.expect("flush on close");
+
+    let saved = store
+        .load_session(&sid)
+        .await
+        .expect("read durable session");
+    assert_eq!(
+        saved.concepts.len(),
+        1,
+        "the admitted concept must be durable"
+    );
+    assert_eq!(saved.concepts[0].canonical_key, key);
+
+    // The new index still enforces uniqueness for non-Observations.
+    let copy_concept = "INSERT INTO concepts \
+        (id, session_id, content, canonical_key, concept_type, origin_interaction, origin_agent, created_at) \
+        SELECT $1, session_id, content, canonical_key, $2, origin_interaction, origin_agent, created_at \
+        FROM concepts WHERE id = $3";
+    let duplicate = sqlx::query(copy_concept)
+        .bind(NodeId::new().0)
+        .bind("Entity")
+        .bind(saved.concepts[0].id.0)
+        .execute(&pool)
+        .await
+        .expect_err("duplicate non-Observation key must fail");
+    assert_eq!(
+        duplicate
+            .as_database_error()
+            .and_then(|e| e.code())
+            .as_deref(),
+        Some("23505")
+    );
+    sqlx::query(copy_concept)
+        .bind(NodeId::new().0)
+        .bind("Observation")
+        .bind(saved.concepts[0].id.0)
+        .execute(&pool)
+        .await
+        .expect("an Observation may share the key");
+}
+
 /// Camera-proof EXPLAIN of the production `vector_candidates` SQL.
 ///
 /// `extra_set` is the inverse GUC that proves hnsw *can* be used

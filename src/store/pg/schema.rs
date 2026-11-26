@@ -164,6 +164,18 @@ impl<D: Dialect> PgStore<D> {
             }
         }
         self.assert_live_schema_width(pool).await?;
+        if let Some(sql) = D::canonical_index_preflight_sql() {
+            let valid: bool = sqlx::query_scalar(sql)
+                .fetch_one(pool)
+                .await
+                .map_err(backend)?;
+            if !valid {
+                return Err(StoreError::Backend(format!(
+                    "{}: canonical-key index requires an upgrade or repair; stop the writer and run `lambo provision`",
+                    D::NAME
+                )));
+            }
+        }
         Ok(())
     }
 }

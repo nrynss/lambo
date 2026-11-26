@@ -98,6 +98,9 @@
 
 ### Fixed
 
+- PostgreSQL now accepts canonical keys beyond the B-tree text size limit
+  (#323). Stop the writer and run `lambo provision` after upgrading to install
+  the replacement index.
 - MCP errors for control characters in an `agent_id` now explain the
   single-line rule and show the offending code point (#338).
 - A delayed lease-loss detach can only close the HTTP attachment that lost

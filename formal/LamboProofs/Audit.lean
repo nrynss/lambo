@@ -199,6 +199,8 @@ open Lambo
 #print axioms Canonical.keyF_eq_iff_perm
 #print axioms Canonical.keyF0_tidy
 #print axioms Canonical.issue301_fixed
+#print axioms Canonical.pgIndexKey_width
+#print axioms Canonical.pgIndexKey_same_key
 -- Reciprocal rank fusion (#173) and the name step under RRF
 #print axioms Fusion.rrf_range
 #print axioms Fusion.rrfSum_mono

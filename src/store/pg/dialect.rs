@@ -89,6 +89,11 @@ pub trait Dialect: Send + Sync + 'static {
         None
     }
 
+    /// Optional catalog check for dialect-specific schema invariants at attach.
+    fn canonical_index_preflight_sql() -> Option<&'static str> {
+        None
+    }
+
     /// Operator-facing dialect name in preflight errors (`"cockroach"` /
     /// `"postgres"`). Discovered by splitting B0-N1: the shared
     /// `preflight_schema` had hard-coded `"cockroach"`.
