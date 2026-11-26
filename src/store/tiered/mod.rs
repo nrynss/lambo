@@ -559,21 +559,27 @@ impl Tier {
 
     /// The next external version for a write to `session` under `token`.
     /// Only leased writes are mirrored, so there always is a token.
-    fn next_version(&self, session: &SessionId, token: u64) -> Result<u64, String> {
+    fn next_version(&self, session: &SessionId, token: u64) -> Result<u64, StoreError> {
         self.with_state(session, |st| {
-            if st.token != token {
-                st.token = token;
-                st.counter = 0;
+            if token < st.token {
+                return Err(StoreError::StaleWrite(format!(
+                    "fencing token {token} is older than mirror token {} for session {session}",
+                    st.token
+                )));
             }
-            let counter = st.counter.checked_add(1).ok_or_else(|| {
-                format!(
+            let counter = if token == st.token { st.counter } else { 0 };
+            let counter = counter.checked_add(1).ok_or_else(|| {
+                StoreError::Backend(format!(
                     "flush counter for session {session} under token {token} is exhausted; \
                      refusing to wrap the mirror version"
-                )
+                ))
             })?;
             let version = mirror_version(token, counter).ok_or_else(|| {
-                format!("fencing token {token} is too large to version a recall-index write")
+                StoreError::Backend(format!(
+                    "fencing token {token} is too large to version a recall-index write"
+                ))
             })?;
+            st.token = token;
             st.counter = counter;
             Ok(version)
         })
@@ -618,7 +624,7 @@ impl Tier {
     /// the authority: a takeover or an erase moves its token past `token`
     /// even when this process has not noticed (a stall past the TTL). A
     /// repair checks before each bulk chunk, each sweep pass and the marker
-    /// write. A mirror checks before its bulk and again before its marker
+    /// write. A mirror checks before each bulk chunk and again before its marker
     /// write. Once a check detects a lost lease, neither submits another
     /// session write. A request
     /// already in flight when the lease is lost can still land; that window
@@ -728,10 +734,10 @@ impl Tier {
     /// Re-check against a fresh load; never repair from the older snapshot
     /// (#18). Still ahead after the re-load: leave the session
     /// `Unknown` (reads fall back) and re-check after the backoff.
-    async fn recheck_ahead(&self, session: &SessionId) -> Marker {
+    async fn recheck_ahead(&self, session: &SessionId) -> (Option<GraphSnapshot>, Marker) {
         let fresh = match self.load_durable(session).await {
             Ok(snap) => snap,
-            Err(_) => return Marker::Unreachable,
+            Err(_) => return (None, Marker::Unreachable),
         };
         let marker = self.check_marker(session, fresh.as_ref()).await;
         let first = self.with_state(session, |st| {
@@ -750,7 +756,7 @@ impl Tier {
                 self.repair_backoff.as_secs()
             );
         }
-        marker
+        (fresh, marker)
     }
 
     /// Settle the session's state after a durable load: cache the contract,
@@ -767,7 +773,7 @@ impl Tier {
         });
         let mut marker = self.check_marker(session, snap).await;
         if marker == Marker::Ahead {
-            marker = self.recheck_ahead(session).await;
+            marker = self.recheck_ahead(session).await.1;
         }
         match (marker, held) {
             (Marker::Behind, Some(_)) => self.request_repair(session),
@@ -908,10 +914,10 @@ impl Tier {
     }
 
     async fn repair_once(&self, session: &SessionId, token: u64) -> Result<(), StoreError> {
-        let snap = self.load_durable(session).await?;
+        let mut snap = self.load_durable(session).await?;
         let mut marker = self.check_marker(session, snap.as_ref()).await;
         if marker == Marker::Ahead {
-            marker = self.recheck_ahead(session).await;
+            (snap, marker) = self.recheck_ahead(session).await;
         }
         match marker {
             Marker::Behind => {}
@@ -960,10 +966,7 @@ impl Tier {
         epoch: u64,
         token: u64,
     ) -> Result<RecallBackfillReport, StoreError> {
-        let version = Some(
-            self.next_version(session, token)
-                .map_err(StoreError::Backend)?,
-        );
+        let version = Some(self.next_version(session, token)?);
         // Reads fall back while documents are being replaced.
         self.with_state(session, |st| {
             if st.sync == TierSync::InSync {
@@ -1130,7 +1133,7 @@ impl Tier {
         let version = match self.next_version(session, token) {
             Ok(v) => Some(v),
             Err(e) => {
-                self.mark_stale(session, &e);
+                self.mark_stale(session, &e.to_string());
                 return;
             }
         };
@@ -1219,9 +1222,9 @@ impl Tier {
             for contract in &projection.contracts {
                 self.recall.ensure_index(contract).await?;
             }
-            if !projection.ops.is_empty() {
+            for chunk in projection.ops.chunks(self.repair_chunk) {
                 self.ensure_fenced(session, token).await?;
-                self.recall.bulk(&projection.ops).await?;
+                self.recall.bulk(chunk).await?;
             }
             // Provision before the final fence so the marker write can go
             // straight to its PUT. The lease may have moved during the bulk.

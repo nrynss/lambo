@@ -154,7 +154,9 @@ inductive RPc where
   deriving DecidableEq, Repr
 
 /-- The mirror of the last committed batch (`mirror_ops`): the bulk's items
-still to land, then the marker. A bulk is applied item by item by the engine. -/
+still to land, then the marker. This models one submitted bulk, applied item by
+item by the engine; it does not model Rust splitting a mirror into chunks or
+fencing each chunk separately. -/
 inductive MPc where
   | idle
   | puts (t v e : Nat) (ops : List Op)
@@ -399,12 +401,12 @@ def repStep (s : St) : St :=
     { s with tier := { s.tier with contract := some (snapContract snap) }, rep := .check t snap }
   | .check t snap =>
     let m₀ := checkMarker s.down s.mark snap
-    let m := if m₀ = .ahead then checkMarker s.down s.mark (snapOf s.d) else m₀
+    let checked := if m₀ = .ahead then snapOf s.d else snap
+    let m := if m₀ = .ahead then checkMarker s.down s.mark checked else m₀
     let s := if m₀ = .ahead then
-      { s with tier := { s.tier with contract := some (snapContract (snapOf s.d)) } } else s
+      { s with tier := { s.tier with contract := some (snapContract checked) } } else s
     match m with
-    -- Reconciles from `snap`, the snapshot loaded before any re-check.
-    | .behind => { s with rep := .version t snap }
+    | .behind => { s with rep := .version t checked }
     | .unreachable => passFail P s
     | m =>
       passOk { s with
@@ -414,7 +416,7 @@ def repStep (s : St) : St :=
           nextCheck := (if m = .ahead then some (s.now + P.backoff) else s.tier.nextCheck) } }
   | .version t snap =>
     match nextVersion s.tier.tok s.tier.cnt t with
-    | none => passFail P s
+    | none => if t < s.tier.tok then passLost s t else passFail P s
     | some (tok, cnt, v) =>
       let tr := { s.tier with
         tok := tok
@@ -707,7 +709,7 @@ theorem repStep_d (s : St) : (repStep P s).d = s.d := by
     · rw [passFail_d]; split <;> rfl
     · rw [passOk_d]; split <;> rfl
   · split
-    · rfl
+    · split <;> rfl
     · simp only; split <;> rfl
   · split
     · rfl
@@ -1742,9 +1744,8 @@ is untouched.
 
 Version dominance is an assumption, not an invariant of the code.
 `nextVersion_gt` and `version_holder_first` give it while this store's
-recorded token never runs ahead of the pass's, but `next_version` also
-resets to an older token, and a stale pass makes the next write repeat a
-version already in the index (`stale_pass_rewinds_version`). -/
+recorded token is at most the pass's. Allocation refuses an older token
+and preserves the newer holder's counter (`nextVersion_refuses_older`). -/
 theorem repair_converges (s : St) (t tok cnt v : Nat) (hr : s.rep = .load t)
     (hh : s.tier.held = some t) (hl : s.d.lease = t) (hrow : s.d.row ≠ .none)
     (he : s.d.erased = false) (hd : s.down = false)

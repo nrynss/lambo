@@ -906,6 +906,7 @@ open Lambo
 #print axioms Lambo.Tiered.rerank_exact
 #print axioms Lambo.Tiered.rerank_ignores_engine
 #print axioms Lambo.Tiered.knnFetch_bounds
+#print axioms Lambo.Tiered.nextVersion_refuses_older
 #print axioms Lambo.Tiered.nextVersion_gt
 #print axioms Lambo.Tiered.noteRefresh_never_adopts
 #print axioms Lambo.Tiered.reembed_migration_misindexed
@@ -914,10 +915,10 @@ open Lambo
 #print axioms Lambo.Tiered.mirror_lands_after_erase
 #print axioms Lambo.Tiered.mirror_does_not_submit_after_erase
 #print axioms Lambo.Tiered.mirror_bulk_in_flight_does_not_recreate_marker
-#print axioms Lambo.Tiered.repair_from_pre_recheck_snapshot
+#print axioms Lambo.Tiered.repair_uses_rechecked_snapshot
 #print axioms Lambo.Tiered.edge_only_batch_leaves_marker_behind
 #print axioms Lambo.Tiered.rerank_partial_not_exact
-#print axioms Lambo.Tiered.stale_pass_rewinds_version
+#print axioms Lambo.Tiered.stale_pass_keeps_newer_version
 #print axioms Lambo.Tiered.mirTimeout_ends
 #print axioms Lambo.Tiered.run_lease_mono
 #print axioms Lambo.Tiered.fenced_write_refused

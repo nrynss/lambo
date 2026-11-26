@@ -24,17 +24,16 @@ it reloads (`reader_never_rechecks`; real readers bound the window by reload
 or by being one-shot or pinned). Before #320, a mirror stalled past its
 lease could write an erased session's vector and marker back
 (`mirror_lands_after_erase`). The #320 runs use `fencedMirrorTick` to model
-a durable lease check at each request submission. A bulk already submitted
+a durable lease check before one bulk and its marker. The model does not split
+the bulk into chunks; Rust fences each chunk. A bulk already submitted
 can still land; the separate check prevents the next marker submission
 (`mirror_does_not_submit_after_erase`,
 `mirror_bulk_in_flight_does_not_recreate_marker`). `repair_once`
-reconciles from the older snapshot when `recheck_ahead` finds the marker
-behind, contrary to #18's rule (`repair_from_pre_recheck_snapshot`). A batch
-of only `DeleteEdge`s leaves the marker behind
-(`edge_only_batch_leaves_marker_behind`). `next_version` restarts the counter
-on any other token, an older one included, so a stale repair pass rewinds the
-version and leaves the session in sync serving an old vector for good
-(`stale_pass_rewinds_version`).
+reconciles from the snapshot it used to recheck the marker (#321,
+`repair_uses_rechecked_snapshot`). A batch of only `DeleteEdge`s leaves the
+marker behind (`edge_only_batch_leaves_marker_behind`). `next_version`
+refuses an older token so a stale repair pass preserves the next writer's
+counter (#321, `stale_pass_keeps_newer_version`).
 
 Boundary: each run is one interleaving; the general statements are
 `Machine.lean`'s. `mirror_lands_after_erase` needs the writer's lease to have
@@ -391,47 +390,22 @@ example :
       [.eraseOther] ++ steps .repStep 20)
     s.log.filter (· matches .repair _) = [] ∧ s.mark = none := by decide
 
-/-- **A repair can reconcile from the snapshot it loaded before re-checking an
-ahead marker** (`repair_once`). #18 says a marker ahead of a load is re-checked
-against a fresh load and never repaired from; but when the fresh re-check
-finds the marker *behind* (another flush committed in between), `repair_once`
-reconciles from the first, older snapshot. The holder loads while its own e2
-mirror is in flight (marker behind: a repair is queued while the session is
-still in sync), e2's mirror lands, the repair loads e2, e3 (deleting node 2)
-commits and mirrors, e4 commits; the repair's check finds the marker (e3)
-ahead of e2, the re-check finds it behind e4, and the pass re-indexes node 2
-and rewinds the marker to e2. The overtaken-repair guard (#18) sends it round again, which
-repairs it: for the holder, reads fall back meanwhile; another process's
-reader in sync (`reader_never_rechecks`) serves the deleted node. -/
-def rewound : St :=
+/-- A repair loaded epoch 2. A mirrored deletion at epoch 3 and an unmirrored
+addition at epoch 4 make its first check ahead and its re-check behind. The
+repair uses the snapshot from the re-check. -/
+def rechecked : St :=
   run Pt seeded ([.write [.upsert 4 (some (0, 40))], .loadBegin, .loadEnd] ++ steps .mirStep 3 ++
     [.repStep, .repStep, .write [.delete 2]] ++ steps .mirStep 3 ++
     [.write [.upsert 5 (some (0, 50))]] ++ steps .repStep 14)
 
-/-- A repair pass can reconcile from the snapshot it loaded before re-checking
-an advanced marker, so it rewinds the index to that older snapshot. -/
-theorem repair_from_pre_recheck_snapshot :
-    lookup 2 rewound.d.vecs = none ∧ rewound.d.epoch = 4 ∧
-      docAt rewound 1 2 = some (0, 20) ∧ markerEpoch rewound = some 2 ∧
-      rewound.tier.sync ≠ .inSync ∧ rewound.rep = .head := by decide
+/-- A repair uses the fresh snapshot that confirmed the marker was behind. -/
+theorem repair_uses_rechecked_snapshot :
+    rechecked.d.epoch = 4 ∧ docAt rechecked 1 2 = none ∧
+      docAt rechecked 1 5 = some (0, 50) ∧ markerEpoch rechecked = some 4 ∧
+      rechecked.tier.sync = .inSync := by decide
 
-set_option maxRecDepth 8000 in
-example :
-    let s := run Pt rewound (steps .mirStep 3 ++ steps .repStep 30)
-    s.tier.sync = .inSync ∧ docAt s 1 2 = none ∧ docAt s 1 5 = some (0, 50) ∧
-      markerEpoch s = some 4 := by decide
-
-/-- **A stale repair pass rewinds the version counter.** `next_version`
-restarts the counter whenever the token differs, an older token included,
-and `reconcile` calls it before its first fence. A pass that captured token 1
-reaches `reconcile` after this store was overridden and re-acquired at token 3
-and mirrored node 5 under 3 at counter 1: the pass sets the recorded token
-back to 1 and its fence stops it. The next token-3 write starts again at
-counter 1, the version node 5's document already has, so its bulk and marker
-are refused as conflicts that count as success; the repair it triggers does
-the same. The session ends in sync with node 5's old vector served, and the
-next mirrored flush advances the marker, so a reload finds it in sync too:
-permanent, silent staleness. -/
+/-- A pass captures token 1, then the store re-acquires under token 3 and
+mirrors node 5. The old pass resumes at version allocation. -/
 def stalePass : St :=
   run Pt seeded ([.write [.upsert 4 (some (0, 40))], .loadBegin, .loadEnd, .repStep, .repStep,
     .repStep] ++ steps .mirStep 3 ++ [.takeover, .override, .acquire, .loadBegin, .loadEnd,
@@ -446,17 +420,16 @@ def stalePassLater : St :=
     [.loadBegin, .loadEnd] ++ steps .repStep 30 ++ [.read 1])
 
 set_option maxRecDepth 20000 in
-/-- `stalePass`'s run, pinned: the stale pass rewinds the recorded token, the
-next write's version repeats one already in the index, and the old vector is
-served while the session is in sync, through a later flush and a reload. -/
-theorem stale_pass_rewinds_version :
+/-- The stale pass leaves the recorded token and counter intact. Later
+writes serve the updated vector, including after a flush and a reload. -/
+theorem stale_pass_keeps_newer_version :
     stalePass.tier.tok = 3 ∧ stalePass.tier.cnt = 1 ∧ (stalePass.rt 1 5).ver = 3 * shift + 1 ∧
-      (run Pt stalePass [.repStep]).tier.tok = 1 ∧ (run Pt stalePass [.repStep]).tier.cnt = 1 ∧
+      (run Pt stalePass [.repStep]).tier.tok = 3 ∧ (run Pt stalePass [.repStep]).tier.cnt = 1 ∧
       stalePassAfter.tier.sync = .inSync ∧ lookup 5 stalePassAfter.d.vecs = some (0, 55) ∧
-      answerAt stalePassAfter [5] = some [some (0, 50)] ∧
+      answerAt stalePassAfter [5] = some [some (0, 55)] ∧
       stalePassLater.tier.sync = .inSync ∧ markerEpoch stalePassLater = some 5 ∧
       stalePassLater.d.epoch = 5 ∧ lookup 5 stalePassLater.d.vecs = some (0, 55) ∧
-      answerAt stalePassLater [5, 6] = some [some (0, 50), some (0, 60)] ∧
+      answerAt stalePassLater [5, 6] = some [some (0, 55), some (0, 60)] ∧
       stalePassLater.rep = .idle := by decide
 
 /-- **A batch that deletes only edges leaves the marker behind.** It names no
