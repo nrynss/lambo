@@ -1176,6 +1176,7 @@ impl SessionRegistry {
             let watcher = tokio::spawn(watch_lease(
                 Arc::downgrade(self),
                 Arc::clone(&session.mem),
+                Arc::downgrade(&session),
                 session.server.ledger().cloned(),
             ));
             *session.tasks.lease_watcher.lock() = Some(watcher);
@@ -1646,22 +1647,30 @@ impl SessionRegistry {
         }
     }
 
-    /// Detach session `id` in the background (design §3.4); the process
-    /// shutdown waits for it.
-    pub(super) fn spawn_detach(self: &Arc<Self>, id: String, reason: DetachReason) {
+    /// Queue the watched handle's detach. Holding it weakly lets another
+    /// detach drop its Memory, so it never blocks a re-attach.
+    fn spawn_lease_detach(self: &Arc<Self>, id: String, watched: Weak<AttachedSession>) {
         let registry = Arc::clone(self);
-        let task = tokio::spawn(async move { registry.detach(&id, reason).await });
+        let task = tokio::spawn(async move {
+            registry.detach(&id, DetachReason::LeaseLost, watched).await;
+        });
         self.track(task);
     }
 
-    /// Take session `id` down if it is live (see
-    /// [`SessionRegistry::run_detach`]); a session in any other state is
-    /// left as it is.
-    pub(super) async fn detach(self: &Arc<Self>, id: &str, reason: DetachReason) {
+    /// Claim the live slot only if it holds the expected handle. The check
+    /// and the transition to `Detaching` share the slots lock.
+    pub(super) async fn detach(
+        self: &Arc<Self>,
+        id: &str,
+        reason: DetachReason,
+        expected: Weak<AttachedSession>,
+    ) {
         let session = {
             let mut slots = self.slots.lock();
             match slots.get(id) {
-                Some(Slot::Live(session)) => {
+                Some(Slot::Live(session))
+                    if std::ptr::eq(expected.as_ptr(), Arc::as_ptr(session)) =>
+                {
                     let session = Arc::clone(session);
                     slots.insert(id.to_string(), Slot::Detaching);
                     session
@@ -2013,11 +2022,12 @@ async fn retry_loop(registry: Weak<SessionRegistry>) {
 
 /// A session's lease-loss watcher under `DetachSession` (design §4.2): when
 /// its fence latches, book the `lease:lost` line (as `wind_down` does for a
-/// one-session serve) and detach the session. The detach is spawned, not
-/// awaited: it aborts this watcher at its stage 5.
+/// one-session serve) and queue a detach for this handle. The detach runs
+/// in a separate task because it aborts this watcher at stage 5.
 async fn watch_lease(
     registry: Weak<SessionRegistry>,
     mem: Arc<Memory>,
+    watched: Weak<AttachedSession>,
     ledger: Option<Arc<Ledger>>,
 ) {
     let winner = mem.lease_lost_latched().await;
@@ -2033,7 +2043,7 @@ async fn watch_lease(
     let id = mem.session().to_string();
     drop(mem);
     if let Some(registry) = registry.upgrade() {
-        registry.spawn_detach(id, DetachReason::LeaseLost);
+        registry.spawn_lease_detach(id, watched);
     }
 }
 

@@ -8,14 +8,12 @@ one pinned session and two on-demand ids, example settings and the Rust's
 fixed constants `ELECTION_RETRY`, `PINNED_RETRY`, `PREVIOUS_HANDLE_WAIT`,
 `EVICT_MIN_IDLE` and `NEGATIVE_TTL`), each reachable (`reach_of_run`): the
 bounds, the stale-write fence, eviction, the erase and the pinned retry, the
-backoff, and two races in `src/mcp/serve/registry.rs` and
-`registry/on_demand.rs`.
+backoff, the #312 watcher fix, and a race in
+`src/mcp/serve/registry/on_demand.rs`.
 
-Results about the Rust: `watch_lease` spawns `spawn_detach(id, LeaseLost)` by
-session id and `detach` takes whatever is live under that id, so if the
-spawned task runs only after the fenced session was detached by another path
-and attached again, it detaches the new, healthy handle with its call in
-flight (`lost_detach_takes_healthy`). `Flight`'s `Drop` removes the slot and
+Since #312, a queued lease-loss detach identifies the watched handle, so
+it leaves a healthy replacement and its call in flight
+(`lost_detach_preserves_replacement`). `Flight`'s `Drop` removes the slot and
 only then spawns `release_abandoned`, holder-scoped, so if the session is
 attached again before that task runs, it releases the new handle's lease and
 the next beat fences the healthy session (`dropped_flight_fences_next`); it
@@ -28,9 +26,8 @@ session whose old handle is still alive, so two handles of one session are
 alive at once, as documented (`previous_wait_expires`).
 
 Boundary: each run is one interleaving; the general statements are
-`Step.lean`'s. The races need the scheduler to delay a spawned task past a
-whole detach and attach (or past `NEGATIVE_TTL`), which the step relation
-allows and the Rust does not prevent; how likely that is, is not modelled.
+`Step.lean`'s. The interleavings delay a spawned task until after a new
+attach. The model does not estimate how often the scheduler does this.
 -/
 
 namespace Lambo.Registry
@@ -123,7 +120,7 @@ example : (run cfgEx s0 (attach1 ++ [.enter 1, .tick 60000, .sweep, .leave 1, .t
 example : (run cfgEx s0 [.start 1 true, .fPermit 1, .fProbe 1 false none, .fTimeout 1]).any
     (fun s => s.slots 1 == none && s.free == 2) = true := by decide
 
-/-! ### `watch_lease` detaches by session id -/
+/-! ### `watch_lease` detaches the watched handle -/
 
 /-- The handle of session `1`'s second attach in `abaRun`: unfenced, a call
 in flight. -/
@@ -138,20 +135,15 @@ is dropped, the other writer lets go, and a request attaches the session
 again, healthy, and calls into it. Then the spawned detach runs. -/
 def abaRun : List Ev :=
   attach1 ++ [.watchPark 1, .rowLapse 1, .otherTake 1, .beat 1, .watchFire 1, .tick 60000, .sweep,
-    .detachRun 1, .strayDrop 0, .rowLapse 1] ++ attach1 ++ [.enter 1, .lostRun 1]
+    .detachRun 1, .strayDrop 0, .rowLapse 1] ++ attach1 ++ [.enter 1, .lostRun 1 0]
 
-/-- **A lost lease's detach can take down the next, healthy attach.**
-`watch_lease` spawns `spawn_detach(id, LeaseLost)` and `detach` takes
-whatever is live under that id (`lostRun_any_live`). If the detach task runs
-only after the session has been detached by another path and attached again,
-it detaches the new handle: unfenced, with a call in flight, for a lease it
-never lost. The safety of writes is not at stake (the handle's close flushes
-and releases), but the call is cut and the session is detached for nothing.
-It needs the spawned task to be delayed past a whole detach and attach. -/
-theorem lost_detach_takes_healthy :
-    ∃ s, Reach cfgEx s ∧ s.slots 1 = some (.detaching hSecond none) := by
+/-- A delayed lease-loss detach from the first handle leaves the replacement
+live, unfenced and with its call in flight. Before #312 the detach matched
+only the session id and cut the replacement's call. -/
+theorem lost_detach_preserves_replacement :
+    ∃ s, Reach cfgEx s ∧ s.slots 1 = some (.live hSecond) := by
   obtain ⟨s, hs, hp⟩ := reach_of_run (Reach.init s0_init) (es := abaRun)
-    (p := fun s => decide (s.slots 1 = some (.detaching hSecond none))) (by decide)
+    (p := fun s => decide (s.slots 1 = some (.live hSecond))) (by decide)
   exact ⟨s, hs, of_decide_eq_true hp⟩
 
 /-! ### A dropped flight's release -/
@@ -207,7 +199,7 @@ example : (run cfgEx s0 staleRun).any (fun s => answer false s.now (s.slots 1) =
   decide
 
 /-- ...and the next beat wakes it: the detach is spawned. -/
-example : (run cfgEx s0 (staleRun ++ [.beat 1, .watchFire 1])).any (fun s => s.lost == [1]) = true := by
+example : (run cfgEx s0 (staleRun ++ [.beat 1, .watchFire 1])).any (fun s => s.lost == [(1, 0)]) = true := by
   decide
 
 /-! ### Eviction -/
@@ -261,7 +253,7 @@ as the CLI's eraser identity, is refused as held, and answers 409, which
 `EraseAnswer::HeldElsewhere` documents as "a live writer in another
 process" (erase.rs:120); it is this one. -/
 def zombieRun : List Ev :=
-  [.rowLapse 0, .beat 0, .watchFire 0, .lostRun 0, .detachRun 0, .eClaim 0, .eEnd 0 false]
+  [.rowLapse 0, .beat 0, .watchFire 0, .lostRun 0 100, .detachRun 0, .eClaim 0, .eEnd 0 false]
 
 example : (run cfgEx s0 zombieRun).any
     (fun s => isHeld (s.slots 0) && s.rows 0 == ⟨.me, 2⟩ && s.rel == []) = true := by decide
@@ -269,7 +261,7 @@ example : (run cfgEx s0 zombieRun).any
 /-- And the pinned retry then takes the re-taken row by the refresh arm, at
 that same token: a new, healthy handle serves the session again. This is
 fine: leases.rs only says the fenced handle's heartbeat stops. -/
-example : (run cfgEx s0 [.rowLapse 0, .beat 0, .watchFire 0, .lostRun 0, .detachRun 0,
+example : (run cfgEx s0 [.rowLapse 0, .beat 0, .watchFire 0, .lostRun 0 100, .detachRun 0,
     .strayDrop 100, .tick 5000, .rRound, .rStart, .rPermit, .rResult .acquired]).any
     (fun s => s.rows 0 == ⟨.me, 2⟩ && match s.slots 0 with
       | some (.live h) => h.token == 2 && !h.fenced
@@ -280,7 +272,7 @@ example : (run cfgEx s0 [.rowLapse 0, .beat 0, .watchFire 0, .lostRun 0, .detach
 /-- The pinned session loses its lease and is detached: `HeldElsewhere`, due in
 `PINNED_RETRY`, its handle `previous`. -/
 def pinLost : List Ev :=
-  [.rowLapse 0, .otherTake 0, .beat 0, .watchFire 0, .lostRun 0, .detachRun 0]
+  [.rowLapse 0, .otherTake 0, .beat 0, .watchFire 0, .lostRun 0 100, .detachRun 0]
 
 /-- Not due before `PINNED_RETRY`... -/
 example : (run cfgEx s0 (pinLost ++ [.rRound])).any (fun s => s.round == []) = true := by decide

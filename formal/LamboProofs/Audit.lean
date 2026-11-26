@@ -756,7 +756,7 @@ open Lambo
 #print axioms Lambo.Registry.beat_latches
 #print axioms Lambo.Registry.stale_quiet
 #print axioms Lambo.Registry.watcher_fires_after_latch
-#print axioms Lambo.Registry.lost_detach_takes_healthy
+#print axioms Lambo.Registry.lost_detach_preserves_replacement
 #print axioms Lambo.Registry.dropped_flight_fences_next
 #print axioms Lambo.Registry.chooseVictim_max
 #print axioms Lambo.Registry.at_share_evicts_own
@@ -781,7 +781,8 @@ open Lambo
 #print axioms Lambo.Registry.stale_not_own_gen
 #print axioms Lambo.Registry.parked_needs_wake
 #print axioms Lambo.Registry.erase_fence_not_lost
-#print axioms Lambo.Registry.lostRun_any_live
+#print axioms Lambo.Registry.lostRun_matching_live
+#print axioms Lambo.Registry.lostRun_preserves_other_handle
 #print axioms Lambo.Registry.eClaim_fences
 #print axioms Lambo.Registry.eClaim_refuses_busy
 #print axioms Lambo.Registry.eEnd_commit

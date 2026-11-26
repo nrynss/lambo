@@ -15,7 +15,7 @@
 use super::pinned_serve::{Shared, StoreCalls};
 use super::*;
 use crate::config::ServeCredential;
-use crate::mcp::serve::registry::{Lookup, OnDemandBounds, Requester};
+use crate::mcp::serve::registry::{DetachReason, Lookup, OnDemandBounds, Requester};
 use crate::store::lease::{LeaseHolder, LEASE_TTL, RELEASED_HOLDER};
 use crate::surface::session::{
     parse_addressed, SessionCapabilities, SessionGrant, SessionPrefix, SessionScope,
@@ -1120,6 +1120,43 @@ async fn the_idle_sweep_skips_a_session_in_use() {
     od.close().await;
 }
 
+/// #312: run the first attachment's queued lease-loss detach only after
+/// another detach has removed it and the next request has attached again.
+#[tokio::test]
+async fn a_delayed_lease_loss_detach_leaves_a_replacement_in_service() {
+    let od = OnDemand::start(16, Duration::from_secs(900), 0).await;
+    let id = "od-u-delayed-lease-detach";
+    let routed = od.registry.get_or_attach(id, asking("maker", true)).await;
+    let Lookup::Live(first) = &routed.lookup else {
+        panic!("the initial request did not attach the session");
+    };
+    let old_memory = Arc::downgrade(&first.mem);
+    let watched = Arc::downgrade(first);
+    drop(routed);
+
+    // Hold the future unpolled until after the replacement has a call.
+    let delayed = od
+        .registry
+        .detach(id, DetachReason::LeaseLost, watched.clone());
+    od.registry.detach(id, DetachReason::Idle, watched).await;
+    until(Duration::from_secs(10), "the old Memory to drop", || {
+        old_memory.upgrade().is_none()
+    })
+    .await;
+
+    let routed = od.registry.get_or_attach(id, asking("maker", true)).await;
+    let Lookup::Live(replacement) = &routed.lookup else {
+        panic!("the second request did not attach the session");
+    };
+    delayed.await;
+    assert!(
+        matches!(od.registry.lookup(id), Lookup::Live(live) if Arc::ptr_eq(&live, replacement)),
+        "the old lease-loss detach must leave the replacement serving its call"
+    );
+    drop(routed);
+    od.close().await;
+}
+
 /// Sonnet review L-a: an attach that panics after it admitted its session
 /// leaves the session live, tells its waiters so, and caches no `Failed`
 /// outcome. Once the session detaches, the next request attaches it again
@@ -1143,9 +1180,8 @@ async fn a_panic_after_admission_does_not_block_the_session() {
         "the live session keeps its lease"
     );
 
-    od.registry
-        .detach(id, crate::mcp::serve::registry::DetachReason::Idle)
-        .await;
+    let expected = Arc::downgrade(&od.attached(id).expect("attached after the panic"));
+    od.registry.detach(id, DetachReason::Idle, expected).await;
     assert!(matches!(od.registry.lookup(id), Lookup::NotHosted));
     until(Duration::from_secs(10), "the detached handle to go", || {
         od.attached(id).is_none()

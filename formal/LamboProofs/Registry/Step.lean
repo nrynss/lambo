@@ -52,10 +52,10 @@ leaves its slot (`detach_release`, `detach_leaves`); a lost lease fences the
 handle, then detaches the entry (#293: `write_refused_fenced`,
 `write_through_live`, `beat_own_gen`, `beat_latches`, `stale_not_own_gen`,
 `stale_quiet`, `parked_needs_wake`, `watcher_fires_after_latch`,
-`erase_fence_not_lost`, `lostRun_any_live`); the erase's claim, 503s and
-commit (`eClaim_fences`, `eClaim_refuses_busy`, `eEnd_commit`). About the
-current code: `stale_release_fences` and `lostRun_any_live` are the steps of
-the two races `Runs.lean` replays.
+`erase_fence_not_lost`, `lostRun_matching_live`, `lostRun_preserves_other_handle`);
+the erase's claim, 503s and commit (`eClaim_fences`, `eClaim_refuses_busy`,
+`eEnd_commit`). `stale_release_fences` is part of the dropped-flight race
+`Runs.lean` replays.
 
 Boundary: not modelled are the MCP transport, the endpoints, rate limits, the
 layer stack, `LiveSessions` and `--max-sessions`; logging, the ledger and
@@ -291,8 +291,8 @@ structure Cfg where
 * `retry`: the pinned retry loop's current `retry(id)`, `false` while it waits
   for its permit, `true` once it holds it and acquires; `round` the rest of
   the round's `due()` list.
-* `lost`: detaches `watch_lease` spawned (`spawn_detach(id, LeaseLost)`), by
-  session id, not yet run. `aband`: `release_abandoned` tasks a dropped
+* `lost`: detaches `watch_lease` spawned, each carrying the session id and
+  the watched handle's id. `aband`: `release_abandoned` tasks a dropped
   `Flight` spawned, not yet run.
 * `strays`: detached handles something may still hold (`PreviousHandle`);
   `prevOD` the on-demand `previous` map; `neg` the `NegativeCache`, each
@@ -308,7 +308,7 @@ structure St where
   closing : Bool
   retry : Option (Nat × Bool)
   round : List Nat
-  lost : List Nat
+  lost : List (Nat × Nat)
   aband : List Nat
   strays : List Nat
   prevOD : Nat → Option (Nat × Nat)
@@ -434,7 +434,7 @@ inductive Ev where
   | sweep
   | watchPark (i : Nat)
   | watchFire (i : Nat)
-  | lostRun (i : Nat)
+  | lostRun (i : Nat) (watched : Nat)
   | detachRun (i : Nat)
   | strayDrop (k : Nat)
   | rowLapse (i : Nat)
@@ -763,24 +763,25 @@ def evWatchPark (s : St) (i : Nat) : Option St :=
   | none => none
 
 /-- `watch_lease` returns from `lease_lost_latched`: on its first poll with
-the flag set, or woken while parked. It books the loss and spawns
-`spawn_detach(id, LeaseLost)`, by session id. -/
+the flag set, or woken while parked. It books the loss and spawns a detach for the handle it watched. -/
 def evWatchFire (s : St) (i : Nat) : Option St :=
   match ldHandle (s.slots i) with
   | some h =>
     if (h.watch = .unpolled ∧ h.fenced = true) ∨ (h.watch = .parked ∧ h.woken = true) then
       some { s with slots := upd s.slots i (mapLD (s.slots i) (fun h => { h with watch := .fired })),
-                    lost := i :: s.lost }
+                    lost := (i, h.hid) :: s.lost }
     else none
   | none => none
 
-/-- The spawned `detach(id, LeaseLost)` runs: whatever session is live in the
-slot is set `Detaching`; any other state is left. -/
-def evLostRun (s : St) (i : Nat) : Option St :=
-  if i ∈ s.lost then
-    let s' := { s with lost := s.lost.erase i }
+/-- A queued lease-loss detach consumes its entry. The watched handle is
+the only one it can move from `Live` to `Detaching`. -/
+def evLostRun (s : St) (i watched : Nat) : Option St :=
+  if (i, watched) ∈ s.lost then
+    let s' := { s with lost := s.lost.erase (i, watched) }
     match s.slots i with
-    | some (.live h) => some { s' with slots := upd s.slots i (some (.detaching h none)) }
+    | some (.live h) =>
+      if h.hid = watched then some { s' with slots := upd s.slots i (some (.detaching h none)) }
+      else some s'
     | _ => some s'
   else none
 
@@ -982,7 +983,7 @@ def step (c : Cfg) (s : St) : Ev → Option St
   | .sweep => evSweep c s
   | .watchPark i => evWatchPark s i
   | .watchFire i => evWatchFire s i
-  | .lostRun i => evLostRun s i
+  | .lostRun i watched => evLostRun s i watched
   | .detachRun i => evDetachRun c s i
   | .strayDrop k => evStrayDrop s k
   | .rowLapse i => evRowLapse s i
@@ -1655,16 +1656,18 @@ theorem inv_stale (hc : WF c) (hI : Inv c s) {i : Nat} (h : evStale s i = some s
     · cases h
   · cases h
 
-theorem inv_lostRun (hc : WF c) (hI : Inv c s) {i : Nat} (h : evLostRun s i = some s') :
-    Inv c s' := by
+theorem inv_lostRun (hc : WF c) (hI : Inv c s) {i watched : Nat}
+    (h : evLostRun s i watched = some s') : Inv c s' := by
   unfold evLostRun at h
   split at h
   · dsimp only at h
     split at h
     · rename_i lh heq
-      cases h
-      exact inv_upd_le hc hI (mem_of_some hI heq) rfl rfl rfl (by simp [heq]) (by simp [heq])
-        (by simp [heq]) (by simp [odOnly]) (fun e => absurd e (no_retry_of_not_held hI (by simp [heq])))
+      split at h
+      · cases h
+        exact inv_upd_le hc hI (mem_of_some hI heq) rfl rfl rfl (by simp [heq]) (by simp [heq])
+          (by simp [heq]) (by simp [odOnly]) (fun e => absurd e (no_retry_of_not_held hI (by simp [heq])))
+      · cases h; exact inv_congr hI rfl rfl rfl rfl
     · cases h; exact inv_congr hI rfl rfl rfl rfl
   · cases h
 
@@ -1867,7 +1870,7 @@ theorem inv_step (hc : WF c) (hI : Inv c s) {e : Ev} (h : step c s e = some s') 
   | sweep => exact inv_sweep hI h
   | watchPark i => exact inv_watchPark hc hI h
   | watchFire i => exact inv_watchFire hc hI h
-  | lostRun i => exact inv_lostRun hc hI h
+  | lostRun i watched => exact inv_lostRun hc hI h
   | detachRun i => exact inv_detachRun hc hI h
   | strayDrop k => exact inv_strayDrop hI h
   | rowLapse i => exact inv_rowLapse hI h
@@ -2250,15 +2253,19 @@ theorem detach_leaves {i : Nat} {h : H} {w : Option Nat}
     show wake _ i w i = _
     rw [wake_other (by simp)]; simp
 
-/-- The detach `watch_lease` spawns is by session id
-(`spawn_detach(id, LeaseLost)`): when it runs it takes down whatever session
-is live in the slot, whether or not it is the handle whose lease was lost,
-and whatever is in flight on it. -/
-theorem lostRun_any_live {i : Nat} {h : H} (hi : i ∈ s.lost) (hl : s.slots i = some (.live h)) :
-    ∃ s', evLostRun s i = some s' ∧ s'.slots i = some (.detaching h none) := by
-  unfold evLostRun
-  simp only [hi, ↓reduceIte, hl]
+/-- A lease-loss detach takes a live slot with the watched handle's id. -/
+theorem lostRun_matching_live {i : Nat} {h : H} (hi : (i, h.hid) ∈ s.lost)
+    (hl : s.slots i = some (.live h)) :
+    ∃ s', evLostRun s i h.hid = some s' ∧ s'.slots i = some (.detaching h none) := by
+  simp only [evLostRun, hi, ↓reduceIte, hl]
   exact ⟨_, rfl, by simp⟩
+
+/-- A delayed lease-loss detach leaves a different live handle in place. -/
+theorem lostRun_preserves_other_handle {i watched : Nat} {h : H} (hi : (i, watched) ∈ s.lost)
+    (hl : s.slots i = some (.live h)) (hd : h.hid ≠ watched) :
+    ∃ s', evLostRun s i watched = some s' ∧ s'.slots i = some (.live h) := by
+  simp only [evLostRun, hi, ↓reduceIte, hl, hd]
+  exact ⟨_, rfl, hl⟩
 
 /-! ### The lease, the fence and `watch_lease` (#293) -/
 
@@ -2347,7 +2354,7 @@ and wake-up), a watcher that has not fired yet fires, and the detach is
 spawned. -/
 theorem watcher_fires_after_latch {i : Nat} {h : H} (hl : ldHandle (s.slots i) = some h)
     (hw : h.watch = .unpolled ∨ h.watch = .parked) (hf : h.fenced = true) (hk : h.woken = true) :
-    ∃ s', evWatchFire s i = some s' ∧ i ∈ s'.lost := by
+    ∃ s', evWatchFire s i = some s' ∧ (i, h.hid) ∈ s'.lost := by
   unfold evWatchFire
   have : (h.watch = .unpolled ∧ h.fenced = true) ∨ (h.watch = .parked ∧ h.woken = true) := by
     rcases hw with e | e
