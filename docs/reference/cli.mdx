@@ -534,7 +534,7 @@ The embedder, the store connection and the HTTP listener are shared. With more t
 
 If another writer already holds one of the sessions at startup, the server does not wait for it. It serves the others, answers requests for that session with `503` and a `Retry-After` header, and tries to take it again 5 to 6 seconds after each failed attempt.
 
-If a running session loses its lease to another writer, only that session is detached. Its unflushed tail is discarded, as a crash would discard it, and a `lease` `lost` line goes to the ledger. The other sessions keep serving, and the lost session is retried the same way.
+If a running session loses its lease to another writer, the serve detaches the attachment that lost the lease. Its unflushed tail is discarded, as it would be after a crash, and a `lease` `lost` line goes to the ledger. The other sessions keep serving, and the lost session is retried the same way. If it has already attached again when the old watcher's queued detach runs, the replacement keeps serving. {/* lean: Registry.lostRun_matching_live, Registry.lostRun_preserves_other_handle, Registry.lost_detach_preserves_replacement */} {/* test: src/mcp/serve/tests/registry/on_demand.rs a_delayed_lease_loss_detach_leaves_a_replacement_in_service */}
 
 Some retry errors will not clear on their own: the embedding contract no longer matches, or the store is not provisioned. Such an error is logged once and the session is not retried again. Requests for it get `503` with no `Retry-After` until the server is restarted.
 

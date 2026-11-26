@@ -293,7 +293,8 @@ async fn a_layer_handle_follows_a_re_attached_layer_and_holds_no_strong_referenc
         Arc::downgrade(&first)
     };
 
-    registry.detach(GENERAL, DetachReason::Idle).await;
+    let expected = Arc::downgrade(&session_of(&registry, GENERAL));
+    registry.detach(GENERAL, DetachReason::Idle, expected).await;
     assert!(
         handle.live(LayerRead::Merged).is_err(),
         "a detached layer is not served"
