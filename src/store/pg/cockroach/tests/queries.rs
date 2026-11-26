@@ -108,6 +108,7 @@ fn vector_ties_are_ordered_by_canonical_key_or_trigger_exact_fallback() {
     assert!(has_boundary_tie(&rows_b, 2));
     assert!(crdb_sql()
         .session_vector_candidates
+        .as_str()
         .contains("ORDER BY dist ASC, id ASC"));
     assert!(!has_boundary_tie(
         &[
@@ -170,9 +171,11 @@ fn cap_crowd_out_uses_exact_session_fallback() {
     let crdb = crdb_sql();
     assert!(crdb
         .session_vector_candidates
+        .as_str()
         .contains("WHERE session_id = $2"));
     assert!(crdb
         .session_vector_candidates
+        .as_str()
         .contains("ORDER BY dist ASC, id ASC"));
 
     assert!(!needs_session_fallback(1, true, VECTOR_FETCH_CAP, 1));

@@ -324,11 +324,13 @@ async fn two_connections_on_one_file_serialize_on_the_lease() {
 
 /// Rows of `table` with this id, read straight from the store.
 async fn rows_with_id(store: &SqliteStore, table: &str, id: NodeId) -> i64 {
-    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE id = ?1"))
-        .bind(id.0.to_string())
-        .fetch_one(store.pool())
-        .await
-        .unwrap()
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*) FROM {table} WHERE id = ?1"
+    )))
+    .bind(id.0.to_string())
+    .fetch_one(store.pool())
+    .await
+    .unwrap()
 }
 
 /// #1 fencing, delete-only batches. `DeleteNode`/`DeleteEdge` carry no
@@ -609,7 +611,7 @@ async fn a_release_keeps_the_fencing_token_on_sqlite() {
 async fn the_operator_override_keeps_the_token_and_spares_a_tombstone() {
     let store = test_store();
     store.init_schema().await.unwrap();
-    let override_for = |sid: &str| crate::store::lease::OPERATOR_OVERRIDE.replace("<session>", sid);
+    let override_sql = crate::store::lease::OPERATOR_OVERRIDE.replace("'<session>'", "?1");
     let ttl = Duration::from_secs(60);
 
     let sid = SessionId::from("wedged");
@@ -617,7 +619,8 @@ async fn the_operator_override_keeps_the_token_and_spares_a_tombstone() {
     let LeaseOutcome::Acquired(w) = store.acquire_lease(&sid, &wedged, ttl).await.unwrap() else {
         panic!("fresh acquire");
     };
-    sqlx::query(&override_for("wedged"))
+    sqlx::query(sqlx::AssertSqlSafe(override_sql.clone()))
+        .bind("wedged")
         .execute(store.pool())
         .await
         .unwrap();
@@ -646,7 +649,8 @@ async fn the_operator_override_keeps_the_token_and_spares_a_tombstone() {
     let eraser = lease_holder("eraser", 3);
     store.erase_session(&erased, &eraser).await.unwrap();
     let tomb = store.read_lease(&erased).await.unwrap().expect("tombstone");
-    sqlx::query(&override_for("erased"))
+    sqlx::query(sqlx::AssertSqlSafe(override_sql))
+        .bind("erased")
         .execute(store.pool())
         .await
         .unwrap();

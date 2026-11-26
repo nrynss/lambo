@@ -82,7 +82,10 @@ impl<D: Dialect> PgStore<D> {
         let pool = &self.pool().await?;
         let mut attempt = 0;
         loop {
-            match sqlx::raw_sql(self.ddl.as_ref()).execute(pool).await {
+            match sqlx::raw_sql(sqlx::AssertSqlSafe(self.ddl.clone()))
+                .execute(pool)
+                .await
+            {
                 Ok(_) => break,
                 Err(e) if attempt < DDL_RACE_RETRIES && is_concurrent_ddl_race(&e) => {
                     attempt += 1;
@@ -96,7 +99,7 @@ impl<D: Dialect> PgStore<D> {
         // a Cockroach behaviour change B0 forbade and B2 does not make. The
         // statements themselves are not byte-identical (STRING vs TEXT, INT
         // vs BIGINT), so they live on the dialect.
-        for stmt in D::post_init_statements() {
+        for &stmt in D::post_init_statements() {
             sqlx::query(stmt).execute(pool).await.map_err(backend)?;
         }
         self.assert_live_schema_width(pool).await?;

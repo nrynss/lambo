@@ -27,11 +27,13 @@ use crate::types::{
 /// Rows of `table` with this id.
 async fn rows_with_id<D: Dialect>(store: &PgStore<D>, table: &str, id: NodeId) -> i64 {
     let pool = store.pool().await.expect("pool");
-    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE id = $1"))
-        .bind(id.0)
-        .fetch_one(&pool)
-        .await
-        .expect("count rows")
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*) FROM {table} WHERE id = $1"
+    )))
+    .bind(id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("count rows")
 }
 
 fn holder(agent: &str, pid: u32) -> LeaseHolder {
@@ -175,10 +177,12 @@ async fn cleanup_session<D: Dialect>(store: &PgStore<D>, sid: &SessionId) {
         "lease_refusals",
         "sessions",
     ] {
-        let _ = sqlx::query(&format!("DELETE FROM {table} WHERE session_id = $1"))
-            .bind(sid.as_str())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE session_id = $1"
+        )))
+        .bind(sid.as_str())
+        .execute(&pool)
+        .await;
     }
 }
 

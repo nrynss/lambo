@@ -186,9 +186,16 @@ mod imp {
         let mut feed = |p: &Path| {
             let mut f = std::fs::File::open(p)
                 .map_err(|e| CliError::Runtime(format!("{}: {e}", p.display())))?;
-            std::io::copy(&mut f, &mut h)
-                .map(|_| ())
-                .map_err(|e| CliError::Runtime(format!("{}: {e}", p.display())))
+            use std::io::Read;
+            let mut buf = [0u8; 8192];
+            loop {
+                match f.read(&mut buf) {
+                    Ok(0) => break Ok(()),
+                    Ok(n) => h.update(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => break Err(CliError::Runtime(format!("{}: {e}", p.display()))),
+                }
+            }
         };
         feed(path)?;
         let wal_path = sidecar(path, "-wal");

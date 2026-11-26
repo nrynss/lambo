@@ -985,9 +985,11 @@ impl Drop for H3Db {
                 Ok(p) => p,
                 Err(e) => return eprintln!("cleanup: connect admin for {db}: {e}"),
             };
-            if let Err(e) = sqlx::query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
-                .execute(&admin)
-                .await
+            if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS {db} WITH (FORCE)"
+            )))
+            .execute(&admin)
+            .await
             {
                 eprintln!("cleanup: drop {db}: {e}");
             }
@@ -1019,7 +1021,7 @@ async fn h3_postgres_recall_parity() {
         .await
         .unwrap_or_else(|e| panic!("H3: connect admin DSN: {e}"));
     let db = format!("lambo_h3_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE {db}"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {db}")))
         .execute(&admin)
         .await
         .unwrap_or_else(|e| panic!("H3: create {db}: {e}"));
@@ -1307,7 +1309,7 @@ async fn h3_postgres_hnsw_envelope_at_scale() {
         .await
         .unwrap_or_else(|e| panic!("H3 scale: connect admin DSN: {e}"));
     let db = format!("lambo_h3s_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE {db}"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {db}")))
         .execute(&admin)
         .await
         .unwrap_or_else(|e| panic!("H3 scale: create {db}: {e}"));

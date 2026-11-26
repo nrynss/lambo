@@ -60,7 +60,7 @@ kind = "memory"
 # vector_dim = 1024
 
 [embedder]
-# bge_m3 | gemini | candle | bedrock | fixture | embeddinggemma2 | elastic
+# bge_m3 | gemini | candle | fixture | embeddinggemma2 | elastic
 # (`openai` is an alias of bge_m3: the same OpenAI-compatible adapter, still
 # reported and stamped as bge_m3)
 kind = "bge_m3"
@@ -484,7 +484,7 @@ url = "http://127.0.0.1:8080"
 # Memory (#247): the embedder is the window's only heavy part, and only
 # recall's vector leg uses it. An in-process model (candle BGE-M3) costs
 # about 1.3 GB per process once loaded, on top of the lambo serve beside it;
-# an HTTP embedder (bge_m3 over llama.cpp, Bedrock, Gemini, Elastic) costs
+# an HTTP embedder (bge_m3 over llama.cpp, Gemini, Elastic) costs
 # nothing extra. The window never loads it at startup or for browsing: the
 # first recall that embeds a query loads it once and keeps it. A failed load
 # degrades that recall to keyword + recent results and is retried by the next

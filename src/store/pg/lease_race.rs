@@ -97,10 +97,12 @@ async fn takeover_during_open_tx<D: Dialect>(
 async fn cleanup<D: Dialect>(store: &PgStore<D>, sid: &SessionId) {
     let pool = store.pool().await.expect("pool");
     for table in ["session_leases", "lease_refusals"] {
-        let _ = sqlx::query(&format!("DELETE FROM {table} WHERE session_id = $1"))
-            .bind(sid.as_str())
-            .execute(&pool)
-            .await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE session_id = $1"
+        )))
+        .bind(sid.as_str())
+        .execute(&pool)
+        .await;
     }
 }
 

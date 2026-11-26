@@ -26,9 +26,7 @@ fn embedder(server: &MockServer) -> ElasticEmbedder {
 }
 
 fn has_authorization(r: &HttpMockRequest) -> bool {
-    r.headers
-        .as_deref()
-        .unwrap_or_default()
+    r.headers_vec()
         .iter()
         .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
 }
@@ -88,7 +86,7 @@ async fn input_type_can_be_omitted_for_both_roles() {
     let e = embedder(&server).with_send_input_type(false);
     e.embed("user schema").await.unwrap();
     e.embed_query("user schema").await.unwrap();
-    bare.assert_hits(2);
+    bare.assert_calls(2);
     assert_eq!(e.model_identity(), ".jina-embeddings-v3;input_type=off");
     assert_eq!(embedder(&server).model_identity(), ID);
 }
@@ -106,7 +104,7 @@ async fn a_base_path_prefix_is_kept_and_the_id_is_encoded() {
         let e = ElasticEmbedder::new(&base, ID, 4).unwrap();
         e.embed("anything").await.unwrap();
     }
-    prefixed.assert_hits(2);
+    prefixed.assert_calls(2);
     let e = ElasticEmbedder::new("https://my-cluster.es.example.com", "my e5%model?x#y", 4);
     // Whitespace is refused, so check the encoding on an id without it.
     assert!(e.is_err());
@@ -139,7 +137,7 @@ async fn sends_api_key_only_when_configured() {
 
     let server = MockServer::start();
     let with_auth = server.mock(|when, then| {
-        when.method(POST).path(PATH).matches(has_authorization);
+        when.method(POST).path(PATH).is_true(has_authorization);
         then.status(500).body("an Authorization header was sent");
     });
     let without = server.mock(|when, then| {
@@ -147,7 +145,7 @@ async fn sends_api_key_only_when_configured() {
         then.status(200).json_body(ok_response(1024));
     });
     embedder(&server).embed("user schema").await.unwrap();
-    with_auth.assert_hits(0);
+    with_auth.assert_calls(0);
     without.assert();
 }
 
@@ -470,7 +468,7 @@ async fn a_redirect_is_not_followed() {
             .embed("anything")
             .await
             .unwrap_err();
-        target.assert_hits(0);
+        target.assert_calls(0);
         assert!(matches!(err, EmbedError::Backend(_)), "{code}: {err:?}");
         let msg = err.to_string();
         assert!(msg.contains(&code.to_string()), "{msg}");
@@ -771,7 +769,7 @@ async fn empty_text_is_refused_before_the_network() {
             );
         }
     }
-    any.assert_hits(0);
+    any.assert_calls(0);
 }
 
 /// Live check against a real Elasticsearch inference endpoint (#233, the

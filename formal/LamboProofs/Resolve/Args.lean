@@ -139,8 +139,7 @@ theorem canon_rules_test :
 
 /-- Hard errors on examples: an uncompiled store kind (`cockroach` in the
 default build), an unknown key, an unknown kind in `LAMBO_STORE`, an
-uncompiled embedder (`candle`) and an unimplemented one (`bedrock` in a
-build that compiles it), each refuses `derive`; `[recall]` without
+uncompiled embedder (`candle`) each refuses `derive`; `[recall]` without
 `recall-elastic` refuses it too. -/
 theorem hard_error_examples :
     (resolveForCommand Features.dflt (fun _ => { storeFile := .known .cockroach }) {} .derive
@@ -151,9 +150,6 @@ theorem hard_error_examples :
         none).result = .error (.load .unknownKind) ∧
       (resolveForCommand Features.dflt (fun _ => { embedFile := .known .candle }) {} .derive
         none).result = .error (.embedUncompiled .candle) ∧
-      (resolveForCommand { Features.dflt with embed := fun _ => true }
-        (fun _ => { embedEnv := .known .bedrock }) {} .derive none).result =
-        .error (.embedUnimplemented .bedrock) ∧
       (resolveForCommand Features.dflt (fun _ => { tiered := true }) {} .derive
         none).result = .error .tierUncompiled := by
   decide

@@ -24,7 +24,7 @@ use crate::types::SessionId;
 /// session's whole lifetime ends here, so no token needs to outlive it).
 async fn cleanup<D: Dialect>(store: &PgStore<D>, sid: &SessionId) {
     let pool = store.pool().await.expect("pool");
-    for (_, sql) in ERASE_STATEMENTS {
+    for &(_, sql) in ERASE_STATEMENTS {
         let _ = sqlx::query(sql).bind(sid.as_str()).execute(&pool).await;
     }
     let _ = sqlx::query("DELETE FROM session_leases WHERE session_id = $1")

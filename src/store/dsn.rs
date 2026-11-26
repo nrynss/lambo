@@ -174,7 +174,7 @@ fn canonicalize(raw: &str) -> Canonical<'_> {
 /// exists. Nothing in this crate renders this value to a terminal, a log, or a
 /// filesystem path except as the input to a further hash.
 fn unaccounted_identity(trimmed: &str) -> String {
-    let digest = format!("{:x}", Sha256::digest(trimmed.as_bytes()));
+    let digest = hex::encode(Sha256::digest(trimmed.as_bytes()));
     format!("{UNACCOUNTED_IDENTITY_PREFIX}{}>", &digest[..32])
 }
 

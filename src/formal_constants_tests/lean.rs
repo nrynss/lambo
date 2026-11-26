@@ -559,8 +559,7 @@ impl Lean {
         what: &str,
     ) -> (Range<usize>, Range<usize>) {
         let mut depth = 0i32;
-        for j in from..end {
-            let t = &self.toks[j];
+        for (j, t) in self.toks.iter().enumerate().take(end).skip(from) {
             match t.text.as_str() {
                 "(" | "[" | "{" | "⟨" => depth += 1,
                 ")" | "]" | "}" | "⟩" => depth -= 1,

@@ -316,7 +316,7 @@ pub(super) async fn apply_single(
                         map_write_err(e, |m| format!("quarantine legacy embeddings: {m}"))
                     })?;
             }
-            let res = sqlx::query(&sql.set_embedding)
+            let res = sqlx::query(sql.set_embedding.clone())
                 .bind(session_id.as_str())
                 .bind(embedding.as_ref().map(|e| e.kind.as_str()))
                 .bind(embedding.as_ref().and_then(|e| e.model.as_deref()))
@@ -558,7 +558,7 @@ pub(super) async fn count_session_vectors(
 pub(super) async fn delete_session_rows(
     tx: &mut sqlx::PgConnection,
     table: &str,
-    sql: &str,
+    sql: &'static str,
     session: &SessionId,
 ) -> Result<u64, StoreError> {
     let done = sqlx::query(sql)

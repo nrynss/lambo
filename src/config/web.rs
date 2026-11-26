@@ -31,7 +31,7 @@
 //! query loads it once (concurrent recalls share that one load) and keeps it.
 //! A failed load degrades that recall to the keyword and recent legs, as a
 //! failed embed does, and is not remembered: the next recall tries again.
-//! An HTTP embedder (`bge_m3`, Bedrock, Gemini, Elastic, EmbeddingGemma 2)
+//! An HTTP embedder (`bge_m3`, Gemini, Elastic, EmbeddingGemma 2)
 //! has nothing to load and costs no more either way.
 //!
 //! `embedder = false` (or `lambo serve-web --no-embedder`) turns the vector

@@ -44,9 +44,12 @@
 //! (permanent, the operator fixes it). `embed/gemini.rs` maps these one-for-one onto
 //! `EmbedError` so A3's degradation contract is unchanged.
 //!
-//! Gate: `embed-gemini` or `store-postgres`. Both enable the `reqwest` and `jsonwebtoken`
+//! Gate: `embed-gemini` or `store-postgres`. Both enable the `reqwest` and `ring`
 //! dependencies this module needs; neither is in the default feature set.
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+#[cfg(test)]
+use ring::signature::KeyPair;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -321,6 +324,19 @@ pub fn load_credentials(path: &Path) -> Result<GoogleCredentials, GoogleAuthErro
     }
 }
 
+fn rsa_signing_key(private_key: &str) -> Result<ring::rsa::KeyPair, GoogleAuthError> {
+    let invalid =
+        || GoogleAuthError::Backend("failed to parse service-account private key PEM".into());
+    let key = pem::parse(private_key).map_err(|_| invalid())?;
+    match key.tag() {
+        "PRIVATE KEY" => ring::rsa::KeyPair::from_pkcs8(key.contents()),
+        // Retain support for PKCS#1 keys accepted by the previous signer.
+        "RSA PRIVATE KEY" => ring::rsa::KeyPair::from_der(key.contents()),
+        _ => return Err(invalid()),
+    }
+    .map_err(|_| invalid())
+}
+
 /// JWT claims carried by the service-account assertion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Claims {
@@ -333,7 +349,7 @@ pub(crate) struct Claims {
 
 /// Build a `reqwest::Client` with the timeouts every Google call here uses.
 pub fn build_client() -> Result<reqwest::Client, GoogleAuthError> {
-    reqwest::Client::builder()
+    crate::http_client::builder()
         .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
         .timeout(DEFAULT_REQUEST_TIMEOUT)
         .build()
@@ -425,15 +441,23 @@ impl GoogleOAuthTokenSource {
             iat: now,
             exp: now + JWT_LIFETIME_SECS,
         };
-        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-        let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(|e| {
-            GoogleAuthError::Backend(format!(
-                "failed to parse service-account private key PEM: {e}"
-            ))
+        // Keep the assertion's JOSE header and claim order on the wire.
+        let header = URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"RS256"}"#);
+        let claims = serde_json::to_vec(&claims).map_err(|_| {
+            GoogleAuthError::Backend("failed to serialize service-account JWT claims".into())
         })?;
-        jsonwebtoken::encode(&header, &claims, &key).map_err(|e| {
-            GoogleAuthError::Backend(format!("failed to sign service-account JWT: {e}"))
-        })
+        let payload = URL_SAFE_NO_PAD.encode(claims);
+        let message = format!("{header}.{payload}");
+        let key = rsa_signing_key(private_key)?;
+        let mut signature = vec![0; key.public().modulus_len()];
+        key.sign(
+            &ring::signature::RSA_PKCS1_SHA256,
+            &ring::rand::SystemRandom::new(),
+            message.as_bytes(),
+            &mut signature,
+        )
+        .map_err(|_| GoogleAuthError::Backend("failed to sign service-account JWT".into()))?;
+        Ok(format!("{message}.{}", URL_SAFE_NO_PAD.encode(signature)))
     }
 
     /// A valid Bearer token, minted or from cache.
@@ -560,15 +584,22 @@ mDN1kibH7c0cAYkeC2hN6nAG
 -----END PRIVATE KEY-----";
 
 #[cfg(test)]
-pub(crate) const TEST_RSA_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4E4qi1/kXtOdR2AX1k8B
-6I1wDb+5BS5l2WbWOnPqeajvk3yDlmqHAh9PM6s5DLhBX+MCfh1Nmc+67RMja7Fr
-qiFRovKw6kPYf/9MNaXGwa8R+amcwOFRijLcFKMFbCOyt9cbGKvuFdG7agVJ+NYr
-gvQ8k7oLgvVf+mthsH5qkRk/NGznfuhyCDRhV6YJuZ+w9o2h6sdjIS55Xlp2RiHq
-wytnZkUJDCWPx8YZ8zPp9kPRVxIT5NKiR29h83dDgoDDmQROcds8NPh1iFmwI9wS
-vjeiCCUEN9bjWRfD8cqCxsPL+fnXs/vRNfutzFb94xKrw8ly3LbYOiR+T7BE34Z3
-WwIDAQAB
------END PUBLIC KEY-----";
+pub(crate) fn verify_test_assertion(jwt: &str) -> Option<Claims> {
+    let (message, signature) = jwt.rsplit_once('.')?;
+    let (header, claims) = message.split_once('.')?;
+    if header != "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9" {
+        return None;
+    }
+    let key = rsa_signing_key(TEST_RSA_PRIVATE_KEY_PEM).expect("fixture RSA key");
+    let public = ring::signature::UnparsedPublicKey::new(
+        &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+        key.public_key().as_ref(),
+    );
+    public
+        .verify(message.as_bytes(), &URL_SAFE_NO_PAD.decode(signature).ok()?)
+        .ok()?;
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(claims).ok()?).ok()
+}
 
 #[cfg(test)]
 mod tests {
@@ -598,22 +629,18 @@ mod tests {
     fn mints_and_verifies_service_account_jwt() {
         let src = GoogleOAuthTokenSource::new(
             sample_credentials(DEFAULT_TOKEN_URI),
-            reqwest::Client::new(),
+            crate::http_client::test_client(),
             SCOPE_CLOUD_PLATFORM,
         )
         .unwrap();
         let jwt = src.mint_jwt().unwrap();
-        let header = jsonwebtoken::decode_header(&jwt).unwrap();
-        assert_eq!(header.alg, jsonwebtoken::Algorithm::RS256);
-        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-        validation.validate_aud = false; // aud is a URI; strict aud matching is not needed
-        validation.set_required_spec_claims(&["iss", "exp"]);
-        let key =
-            jsonwebtoken::DecodingKey::from_rsa_pem(TEST_RSA_PUBLIC_KEY_PEM.as_bytes()).unwrap();
-        let data = jsonwebtoken::decode::<Claims>(&jwt, &key, &validation).unwrap();
-        assert_eq!(data.claims.iss, "sa@example.com");
-        assert_eq!(data.claims.aud, DEFAULT_TOKEN_URI);
-        assert_eq!(data.claims.exp - data.claims.iat, JWT_LIFETIME_SECS);
+        let (header, _) = jwt.split_once('.').unwrap();
+        assert_eq!(header, "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9");
+        let claims = verify_test_assertion(&jwt).expect("valid signed assertion");
+        assert_eq!(claims.iss, "sa@example.com");
+        assert_eq!(claims.scope, SCOPE_CLOUD_PLATFORM);
+        assert_eq!(claims.aud, DEFAULT_TOKEN_URI);
+        assert_eq!(claims.exp - claims.iat, JWT_LIFETIME_SECS);
     }
 
     /// The scope is the caller's, and it reaches the wire: a Cloud SQL login must not be
@@ -622,23 +649,13 @@ mod tests {
     fn the_callers_scope_is_the_one_signed() {
         let src = GoogleOAuthTokenSource::new(
             sample_credentials(DEFAULT_TOKEN_URI),
-            reqwest::Client::new(),
+            crate::http_client::test_client(),
             SCOPES_CLOUD_SQL_LOGIN,
         )
         .unwrap();
         let jwt = src.mint_jwt().unwrap();
-        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-        validation.validate_aud = false;
-        validation.set_required_spec_claims(&["iss", "exp"]);
-        let key =
-            jsonwebtoken::DecodingKey::from_rsa_pem(TEST_RSA_PUBLIC_KEY_PEM.as_bytes()).unwrap();
-        let data = jsonwebtoken::decode::<Claims>(&jwt, &key, &validation).unwrap();
-        assert!(
-            data.claims.scope.contains(SCOPE_SQL_LOGIN),
-            "sqlservice.login missing from {:?}",
-            data.claims.scope
-        );
-        assert!(data.claims.scope.contains(SCOPE_CLOUD_PLATFORM));
+        let claims = verify_test_assertion(&jwt).expect("valid signed assertion");
+        assert_eq!(claims.scope, SCOPES_CLOUD_SQL_LOGIN);
     }
 
     /// L1-R2-1. The scope each consumer asks for is a property of the named constructor,
@@ -648,7 +665,7 @@ mod tests {
     fn vertex_asks_for_cloud_platform_only() {
         let src = GoogleOAuthTokenSource::for_vertex(
             sample_credentials(DEFAULT_TOKEN_URI),
-            reqwest::Client::new(),
+            crate::http_client::test_client(),
         )
         .unwrap();
         assert_eq!(src.scope(), SCOPE_CLOUD_PLATFORM);
@@ -663,7 +680,7 @@ mod tests {
     fn a_cloud_sql_login_asks_for_the_database_login_scope() {
         let src = GoogleOAuthTokenSource::for_cloud_sql(
             sample_credentials(DEFAULT_TOKEN_URI),
-            reqwest::Client::new(),
+            crate::http_client::test_client(),
         )
         .unwrap();
         assert!(
@@ -869,21 +886,24 @@ mod tests {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/token")
-                .body_contains("grant_type=")
-                .body_contains("assertion=");
+                .body_includes("grant_type=")
+                .body_includes("assertion=");
             then.status(200)
                 .json_body(serde_json::json!({ "access_token": "tok-1", "expires_in": 3600 }));
         });
         let creds = sample_credentials(&format!("{}/token", server.base_url()));
-        let mut src =
-            GoogleOAuthTokenSource::new(creds, reqwest::Client::new(), SCOPE_CLOUD_PLATFORM)
-                .unwrap();
+        let mut src = GoogleOAuthTokenSource::new(
+            creds,
+            crate::http_client::test_client(),
+            SCOPE_CLOUD_PLATFORM,
+        )
+        .unwrap();
         let t1 = src.access_token().await.unwrap();
         assert_eq!(t1, "tok-1");
         // Second call hits the cache: the endpoint mock must have seen exactly one request.
         let t2 = src.access_token().await.unwrap();
         assert_eq!(t2, "tok-1");
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     /// The expiry handed back is the one the cache honours, and it respects the margin:
@@ -898,9 +918,12 @@ mod tests {
                 .json_body(serde_json::json!({ "access_token": "tok-1", "expires_in": 3600 }));
         });
         let creds = sample_credentials(&format!("{}/token", server.base_url()));
-        let mut src =
-            GoogleOAuthTokenSource::new(creds, reqwest::Client::new(), SCOPE_CLOUD_PLATFORM)
-                .unwrap();
+        let mut src = GoogleOAuthTokenSource::new(
+            creds,
+            crate::http_client::test_client(),
+            SCOPE_CLOUD_PLATFORM,
+        )
+        .unwrap();
         let before = Instant::now();
         let (_, expires_at) = src.access_token_with_expiry().await.unwrap();
         // The deadline is measured from when the token was minted, so from `before` it is
@@ -923,9 +946,12 @@ mod tests {
     #[tokio::test]
     async fn token_endpoint_transport_failure_is_unavailable() {
         let creds = sample_credentials("http://127.0.0.1:9/token");
-        let mut src =
-            GoogleOAuthTokenSource::new(creds, reqwest::Client::new(), SCOPE_CLOUD_PLATFORM)
-                .unwrap();
+        let mut src = GoogleOAuthTokenSource::new(
+            creds,
+            crate::http_client::test_client(),
+            SCOPE_CLOUD_PLATFORM,
+        )
+        .unwrap();
         let err = src.access_token().await.unwrap_err();
         assert!(matches!(err, GoogleAuthError::Unavailable(_)), "{err:?}");
     }
@@ -939,9 +965,12 @@ mod tests {
                 .json_body(serde_json::json!({ "error": "invalid_grant" }));
         });
         let creds = sample_credentials(&format!("{}/token", server.base_url()));
-        let mut src =
-            GoogleOAuthTokenSource::new(creds, reqwest::Client::new(), SCOPE_CLOUD_PLATFORM)
-                .unwrap();
+        let mut src = GoogleOAuthTokenSource::new(
+            creds,
+            crate::http_client::test_client(),
+            SCOPE_CLOUD_PLATFORM,
+        )
+        .unwrap();
         let err = src.access_token().await.unwrap_err();
         assert!(matches!(err, GoogleAuthError::Backend(_)), "{err:?}");
     }
@@ -952,20 +981,23 @@ mod tests {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/token")
-                .body_contains("grant_type=refresh_token")
-                .body_contains("client_id=client-1")
-                .body_contains("client_secret=secret-1")
-                .body_contains("refresh_token=refresh-1");
+                .body_includes("grant_type=refresh_token")
+                .body_includes("client_id=client-1")
+                .body_includes("client_secret=secret-1")
+                .body_includes("refresh_token=refresh-1");
             then.status(200)
                 .json_body(serde_json::json!({ "access_token": "tok-au", "expires_in": 3600 }));
         });
         let creds = sample_authorized_user(&format!("{}/token", server.base_url()));
-        let mut src =
-            GoogleOAuthTokenSource::new(creds, reqwest::Client::new(), SCOPES_CLOUD_SQL_LOGIN)
-                .unwrap();
+        let mut src = GoogleOAuthTokenSource::new(
+            creds,
+            crate::http_client::test_client(),
+            SCOPES_CLOUD_SQL_LOGIN,
+        )
+        .unwrap();
         assert_eq!(src.access_token().await.unwrap(), "tok-au");
         assert_eq!(src.access_token().await.unwrap(), "tok-au");
-        mock.assert_hits(1); // second call hits the cache
+        mock.assert_calls(1); // second call hits the cache
     }
 
     /// Form-encoded scope values, as `reqwest`'s `.form()` writes them: `:` and `/` are
@@ -1010,21 +1042,21 @@ mod tests {
 
         let mut store_side = GoogleOAuthTokenSource::new(
             sample_authorized_user(&format!("{}/sql", server.base_url())),
-            reqwest::Client::new(),
+            crate::http_client::test_client(),
             SCOPES_CLOUD_SQL_LOGIN,
         )
         .unwrap();
         assert_eq!(store_side.access_token().await.unwrap(), "tok-sql");
-        sql.assert_hits(1);
+        sql.assert_calls(1);
 
         let mut embedder_side = GoogleOAuthTokenSource::new(
             sample_authorized_user(&format!("{}/vertex", server.base_url())),
-            reqwest::Client::new(),
+            crate::http_client::test_client(),
             SCOPE_CLOUD_PLATFORM,
         )
         .unwrap();
         assert_eq!(embedder_side.access_token().await.unwrap(), "tok-vertex");
-        vertex.assert_hits(1);
+        vertex.assert_calls(1);
     }
 
     /// The regression this consolidation exists for: an authorized-user ADC file is a
@@ -1049,9 +1081,12 @@ mod tests {
         let creds = load_credentials(&path).expect("ADC must load for the Cloud SQL path");
         assert!(matches!(creds, GoogleCredentials::AuthorizedUser { .. }));
         assert_eq!(creds.project_id().as_deref(), Some("mooshik"));
-        let src =
-            GoogleOAuthTokenSource::new(creds, reqwest::Client::new(), SCOPES_CLOUD_SQL_LOGIN)
-                .unwrap();
+        let src = GoogleOAuthTokenSource::new(
+            creds,
+            crate::http_client::test_client(),
+            SCOPES_CLOUD_SQL_LOGIN,
+        )
+        .unwrap();
         // Minting a JWT is a service-account act; an ADC file says so rather than panicking.
         assert!(matches!(
             src.mint_jwt(),

@@ -158,9 +158,7 @@ pub(super) async fn update_accesses(
 }
 
 /// The statement [`update_accesses`] runs, built but not executed.
-pub(super) fn update_accesses_query<'a>(
-    rows: &'a [AccessUpdate<'a>],
-) -> sqlx::QueryBuilder<'a, sqlx::Sqlite> {
+pub(super) fn update_accesses_query(rows: &[AccessUpdate<'_>]) -> sqlx::QueryBuilder<sqlx::Sqlite> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(UPDATE_ACCESSES_PREFIX_SQL);
     qb.push_values(rows.iter(), |mut b, r| {
         b.push_bind(r.id.0.to_string())
@@ -961,7 +959,7 @@ pub(super) async fn count_session_vectors(
 pub(super) async fn delete_session_rows(
     tx: &mut sqlx::SqliteConnection,
     table: &str,
-    sql: &str,
+    sql: &'static str,
     session: &SessionId,
 ) -> Result<u64, StoreError> {
     let done = sqlx::query(sql)

@@ -35,7 +35,7 @@ use crate::types::{AgentId, ConceptType};
 // Deserialization / byte-echo note (#250): `WireConceptType` and
 // `WireImageConceptType` implement `Deserialize` by hand so both wrong strings
 // (`E::unknown_variant`) and wrong JSON types (`Visitor::expecting`) list every
-// accepted value. On rmcp 3.1.2, `Parameters<T>` returns deserialization errors
+// accepted value. On rmcp 3.11.0, `Parameters<T>` returns deserialization errors
 // as a `CallToolResult` (`isError: true`) before any `LamboServer` handler
 // runs. For those two enum slots, `E::unknown_variant` still repeats the
 // caller's decoded string (potentially an escaped control character) back to

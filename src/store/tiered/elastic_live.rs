@@ -55,7 +55,7 @@ impl LiveRig {
                 timeout_ms: Some(5_000),
             },
             dir,
-            client: reqwest::Client::builder()
+            client: crate::http_client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
                 .unwrap(),

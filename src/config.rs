@@ -183,17 +183,6 @@ pub struct Config {
     pub gc_idle_floor: u64,
     pub max_canonical_nodes: usize,
 
-    /// **Inert since #36 PR 3.** Swarm's Stage 1 used to open only once the
-    /// session held this many non-Canonical concepts, then cut at the P90 of
-    /// their scores; Stage 1 now admits on evidence (`gc_survived >= 3` and
-    /// dependents from two other interactions) with no peer minimum, and no
-    /// policy reads this. Kept so existing configs deserialize;
-    /// [`Config::warnings`] names a non-default value.
-    #[deprecated(
-        since = "0.6.0",
-        note = "inert since #36 PR 3: Stage 1 admits on evidence with no peer minimum"
-    )]
-    pub canonization_min_peer_count: usize,
     /// Age floor for the dependence evidence Stages 1, 2 and 3 count.
     pub canonization_edge_min_age: Duration,
     /// Stage 2 divides eligible evidence spread by min(session extent, this
@@ -280,7 +269,6 @@ pub struct Config {
 }
 
 impl Default for Config {
-    #[allow(deprecated)] // the inert canonization_min_peer_count keeps its default
     fn default() -> Self {
         Self {
             backend_flush_interval: Duration::from_secs(1),
@@ -305,7 +293,6 @@ impl Default for Config {
             gc_idle_floor: crate::daemon::gc::GC_IDLE_FLOOR,
             max_canonical_nodes: 1000,
 
-            canonization_min_peer_count: 20,
             canonization_edge_min_age: Duration::from_secs(60),
             canonization_coverage_window: crate::store::DEFAULT_COVERAGE_WINDOW,
             canonization_eval_interval: Duration::from_secs(60),
@@ -432,7 +419,6 @@ impl Config {
     ///   included: at exactly `gc_interval` mutations the mutation trigger is
     ///   checked first. Not an error, because sweeping on mutations alone is a
     ///   legitimate (pre-#29) configuration — only the time bound is dead.
-    #[allow(deprecated)] // names the inert canonization_min_peer_count
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         if self.gc_idle_floor >= self.gc_interval {
@@ -441,14 +427,6 @@ impl Config {
                  never fire (the mutation trigger always reaches its count first); lower \
                  [daemon] gc_idle_floor below gc_interval to enable timed sweeps",
                 self.gc_idle_floor, self.gc_interval
-            ));
-        }
-        if self.canonization_min_peer_count != Config::default().canonization_min_peer_count {
-            out.push(format!(
-                "canonization_min_peer_count ({}) is inert: since #36 PR 3 Stage 1 admits on \
-                 evidence (gc_survived >= 3 and dependents from two other interactions) with \
-                 no peer minimum, so no promotion policy reads it",
-                self.canonization_min_peer_count
             ));
         }
         out
@@ -835,7 +813,6 @@ mod tests {
     use crate::store::StoreKind;
 
     #[test]
-    #[allow(deprecated)] // pins the inert canonization_min_peer_count default too
     fn defaults_match_spec() {
         let c = Config::default();
         assert_eq!(c.backend_flush_interval, Duration::from_secs(1));
@@ -862,7 +839,6 @@ mod tests {
         assert_eq!(c.gc_idle_floor, 100);
         assert_eq!(c.max_canonical_nodes, 1000);
 
-        assert_eq!(c.canonization_min_peer_count, 20);
         assert_eq!(c.canonization_edge_min_age, Duration::from_secs(60));
         assert_eq!(c.canonization_eval_interval, Duration::from_secs(60));
         assert_eq!(c.canonization_eval_batch_size, 50);
@@ -1315,24 +1291,14 @@ mod tests {
         assert_eq!(cfg.warnings().len(), 1);
     }
 
-    /// #36 PR 3: `canonization_min_peer_count` is inert, so a non-default
-    /// value is named as such rather than silently ignored; the default is
-    /// silent and every value still validates.
     #[test]
-    #[allow(deprecated)]
-    fn a_non_default_peer_minimum_warns_that_it_is_inert() {
-        for (peers, warns) in [(20, false), (0, true), (5, true), (200, true)] {
-            let c = Config {
-                canonization_min_peer_count: peers,
-                ..Config::default()
-            };
-            c.validate().expect("still a valid config");
-            let w = c.warnings();
-            assert_eq!(!w.is_empty(), warns, "{peers}: {w:?}");
-            if warns {
-                assert!(w[0].contains("canonization_min_peer_count") && w[0].contains("inert"));
-            }
-        }
+    fn the_retired_peer_minimum_is_an_unknown_daemon_key() {
+        let err = LamboFile::from_toml_str("[daemon]\ncanonization_min_peer_count = 20")
+            .expect_err("unknown daemon key");
+        assert!(
+            err.to_string().contains("canonization_min_peer_count"),
+            "{err}"
+        );
     }
 
     /// Wire-visible `[daemon]` field names, parsed from real TOML text, must

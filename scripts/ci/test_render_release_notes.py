@@ -19,7 +19,6 @@ TEMPLATE = """# Lambo v__LAMBO_VERSION__
 
 ## Known limits
 
-- Bedrock embeddings are not shipped (blocked on account authorization).
 {limits}
 """.format(
     whats_new=WHATS_NEW_PLACEHOLDER, limits=LIMITS_PLACEHOLDER
@@ -73,7 +72,15 @@ class Rendering(unittest.TestCase):
         self.assertIn("First thing", out)
         self.assertNotIn(WHATS_NEW_PLACEHOLDER, out)
         self.assertNotIn(LIMITS_PLACEHOLDER, out)
-        self.assertIn("Bedrock embeddings are not shipped", out)
+        self.assertNotIn("## Known limits", out)
+
+    def test_static_known_limit_is_preserved(self):
+        section = changelog_section(CHANGELOG, "0.10.1")
+        template = TEMPLATE.replace(LIMITS_PLACEHOLDER, "- A known limit.\n" + LIMITS_PLACEHOLDER)
+        out = render(template, "0.10.1", section)
+        self.assertIn("## Known limits", out)
+        self.assertIn("- A known limit.", out)
+        self.assertNotIn(LIMITS_PLACEHOLDER, out)
 
     def test_maintainer_comment_is_stripped(self):
         section = changelog_section(CHANGELOG, "0.10.1")

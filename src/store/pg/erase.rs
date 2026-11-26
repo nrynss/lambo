@@ -68,9 +68,9 @@ async fn census<D: Dialect>(store: &PgStore<D>, sid: &SessionId) -> Vec<(String,
         if table == "store_meta" {
             continue;
         }
-        let n: i64 = sqlx::query_scalar(&format!(
+        let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) FROM {table} WHERE session_id = $1"
-        ))
+        )))
         .bind(sid.as_str())
         .fetch_one(&pool)
         .await
@@ -155,7 +155,7 @@ async fn assert_only_the_tombstone<D: Dialect>(store: &PgStore<D>, sid: &Session
 /// Remove a test session's tombstone and anything else it left.
 async fn cleanup<D: Dialect>(store: &PgStore<D>, sid: &SessionId) {
     let pool = store.pool().await.expect("pool");
-    for (_, sql) in ERASE_STATEMENTS {
+    for &(_, sql) in ERASE_STATEMENTS {
         let _ = sqlx::query(sql).bind(sid.as_str()).execute(&pool).await;
     }
     let _ = sqlx::query("DELETE FROM session_leases WHERE session_id = $1")

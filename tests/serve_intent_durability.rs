@@ -346,9 +346,9 @@ impl Rig {
                 .connect(&format!("sqlite://{db}"))
                 .await
                 .expect("open for lease override");
-            let sql = lambo::store::lease::OPERATOR_OVERRIDE
-                .replace("<session>", &session.replace('\'', "''"));
-            sqlx::query(&sql)
+            let sql = lambo::store::lease::OPERATOR_OVERRIDE.replace("'<session>'", "?1");
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(session)
                 .execute(&pool)
                 .await
                 .expect("operator lease override");

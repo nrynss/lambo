@@ -226,7 +226,7 @@ mod tests {
                     .body("{}");
             })
             .await;
-        let err = reqwest::Client::builder()
+        let err = crate::http_client::builder()
             .timeout(std::time::Duration::from_millis(50))
             .build()
             .unwrap()
@@ -245,7 +245,7 @@ mod tests {
     /// different fixes.
     #[tokio::test]
     async fn transport_error_keeps_a_refused_connection_distinct_from_a_timeout() {
-        let err = reqwest::Client::builder()
+        let err = crate::http_client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap()
@@ -269,7 +269,7 @@ mod tests {
             .to_string();
         let partial = br#"{"text_embedding":[{"embedding":[0.123456,"#.to_vec();
         let base = crate::test_util::serve_raw_http_once(head, vec![partial]).await;
-        let mut resp = reqwest::Client::new()
+        let mut resp = crate::http_client::test_client()
             .get(base)
             .send()
             .await
@@ -295,7 +295,7 @@ mod tests {
     /// URL is stripped before anything is rendered.
     #[tokio::test]
     async fn transport_error_never_quotes_url_userinfo_or_query() {
-        let err = reqwest::Client::new()
+        let err = crate::http_client::test_client()
             .get("http://fake-user:fake-xyzzy-secret@127.0.0.1:1/?api_key=fake-xyzzy-secret")
             .send()
             .await
@@ -319,7 +319,7 @@ mod tests {
                     .body("{}");
             })
             .await;
-        let err = reqwest::Client::builder()
+        let err = crate::http_client::builder()
             .timeout(std::time::Duration::from_millis(50))
             .build()
             .unwrap()

@@ -2,7 +2,7 @@
 name = "lambo"
 version = "0.15.0"
 edition = "2024"
-rust-version = "1.99"
+rust-version = "1.100"
 license = "Apache-2.0"
 description = "Agentic graph memory for multi-agent AI operations: bipartite graph, canonization, MCP serve"
 readme = "README.md"
@@ -37,17 +37,15 @@ async-trait = "0.1"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-parking_lot = "0.12"
-# MCP server (T8.2). `default-features = false` is REQUIRED, not style: rmcp's optional
-# `reqwest` is `^0.13.2` and this repo pins reqwest 0.12 for BGE-M3 — default features
-# would compile reqwest twice. None of the four features below reach reqwest.
+parking_lot = "0.13"
+# MCP server (T8.2). None of the selected SDK features reach reqwest.
 #
 # Pinned exactly (`=`), not caret: the HTTP session cap and its per-credential
 # attribution (#32 PR 5) read `LocalSessionManager::sessions` directly
 # (`src/mcp/serve/http_guards.rs`) and wrap rmcp's session manager. Those are
 # public but implementation-shaped, so a semver-compatible rmcp release could
 # change them under us. Bump deliberately, rerunning the serve tests.
-rmcp = { version = "=3.1.2", default-features = false, features = [
+rmcp = { version = "=3.11.0", default-features = false, features = [
     "server",
     "macros",
     "transport-io",
@@ -58,7 +56,7 @@ rust-stemmers = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-toml = "0.8"
+toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-normalization = "0.1"
@@ -70,7 +68,7 @@ bitflags = "2.13.1"
 # #22 PR 4: decode `lambo_derive_image`'s inline base64 image on every build
 # (the MCP surface is not feature-gated). Already in Cargo.lock transitively,
 # so no new crate is downloaded.
-base64 = "0.22"
+base64 = "0.23"
 # J2-R1-3: `geteuid` for the per-uid endpoint directory and its ownership check.
 # std has no equivalent, and the alternative (stat'ing a file we assume we own)
 # is a guess where this needs a fact. Already in Cargo.lock transitively via
@@ -78,24 +76,28 @@ base64 = "0.22"
 # downloads nothing new. The crate is unix-only regardless (tokio's
 # `UnixListener`, `std::os::unix::fs`), so the dependency is not conditional.
 libc = "0.2"
-candle-core = { version = "0.11", optional = true }
-candle-nn = { version = "0.11", optional = true }
-candle-transformers = { version = "0.11", optional = true }
-hf-hub = { version = "0.4", optional = true }
-tokenizers = { version = "0.21", optional = true, default-features = false, features = ["onig"] }
-sha2 = "0.10"
+candle-core = { version = "0.11.1", optional = true }
+candle-nn = { version = "0.11.1", optional = true }
+candle-transformers = { version = "0.11.1", optional = true }
+# The synchronous Hub client preserves the cache layout without enabling
+# reqwest defaults (AWS-LC and platform roots) as hf-hub 1.0 does.
+hf-hub = { version = "0.5", optional = true, default-features = false, features = ["ureq"] }
+tokenizers = { version = "0.23", optional = true, default-features = false, features = ["fancy-regex"] }
+sha2 = "0.11"
+hex = "0.4"
 
 # --- optional: Level B adapters (see docs/reference/config.mdx, "Features") ---
-reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
-sqlx = { version = "0.8", optional = true, default-features = false, features = [
+reqwest = { version = "0.13", optional = true, default-features = false, features = ["json", "form", "rustls-no-provider"] }
+rustls = { version = "0.23.46", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = { version = "1.0.10", optional = true }
+sqlx = { version = "0.9.1", optional = true, default-features = false, features = [
     "runtime-tokio",
     "tls-rustls",
     "uuid",
     "chrono",
 ] }
-aws-config = { version = "1", optional = true, features = ["credentials-login"] }
-aws-sdk-bedrockruntime = { version = "1", optional = true }
-jsonwebtoken = { version = "9", optional = true }
+pem = { version = "3", optional = true }
+ring = { version = "0.17", optional = true }
 # #22 follow-up (22g): EG2 decodes every image and resizes it to a 768 px
 # longer side (Lanczos3 down, Catmull-Rom up), sent as lossless PNG, so its
 # vector depends on the picture rather than the submitted size. Only the three
@@ -130,17 +132,15 @@ store-memory = []
 store-cockroach = ["dep:sqlx", "sqlx/postgres"]
 # B2: PostgreSQL + pgvector dialect. Same sqlx postgres driver as
 # store-cockroach; do not add a second driver.
-store-postgres = ["dep:sqlx", "sqlx/postgres", "dep:reqwest", "dep:jsonwebtoken"]
+store-postgres = ["dep:sqlx", "sqlx/postgres", "dep:reqwest", "dep:rustls", "dep:webpki-roots", "dep:pem", "dep:ring"]
 # P3: enable when SqliteStore lands (pulls sqlx + sqlite).
 store-sqlite = ["dep:sqlx", "sqlx/sqlite"]
 
 # Embedders
 embed-fixture = []
-embed-bge = ["dep:reqwest"]
-# T7.1: Bedrock Titan when account is AUTHORIZED.
-embed-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
+embed-bge = ["dep:reqwest", "dep:rustls", "dep:webpki-roots"]
 # A3: Vertex Gemini embedder (gemini-embedding-001) via service-account OAuth.
-embed-gemini = ["dep:reqwest", "dep:jsonwebtoken"]
+embed-gemini = ["dep:reqwest", "dep:rustls", "dep:webpki-roots", "dep:pem", "dep:ring"]
 # #22 PR 5: EmbeddingGemma 2 (text and image) over llama.cpp's llama-server.
 # A thin layer on the bge_m3 OpenAI-compatible HTTP client (#21: bearer,
 # transport rule, error-body scrub), so it builds on `embed-bge`. `image`
@@ -157,7 +157,7 @@ embed-elastic = ["embed-bge"]
 # vector leg. Not a store kind; selected by `[recall]` in lambo.toml.
 # Elasticsearch over plain HTTP on the reqwest this crate already carries:
 # no new crate, Cargo.lock unchanged.
-recall-elastic = ["dep:reqwest"]
+recall-elastic = ["dep:reqwest", "dep:rustls", "dep:webpki-roots"]
 
 # Committed fixture graphs for tests / fixture-ok parallel tracks (T1.4).
 # Test-only: deliberately NOT in `default` (v020-R1-P3-3) — `cargo install
@@ -166,8 +166,7 @@ recall-elastic = ["dep:reqwest"]
 fixtures = ["store-memory"]
 # Ship profile (T8.9): the FULL adapter set carried by released prebuilt
 # binaries. One `lambo` binary holds every adapter; `[store] kind` /
-# `[embedder] kind` pick one at runtime. `embed-bedrock` is deliberately
-# omitted until the AWS account is authorized for Bedrock.
+# `[embedder] kind` pick one at runtime.
 #
 # `store-postgres` and `embed-gemini` joined 2026-08-24, when workstreams A and
 # B landed and were live-verified. Before that a released binary could not run
@@ -176,8 +175,8 @@ fixtures = ["store-memory"]
 # naming `postgres` or `gemini` would have failed on a shipped binary with a
 # rebuild-the-binary error. Neither adds a native toolchain dependency:
 # `store-postgres` is the same sqlx postgres driver `store-cockroach` already
-# pulls, and `embed-gemini` adds jsonwebtoken (pure Rust + ring, already in the
-# tree via rustls) on top of the reqwest `embed-bge` already carries.
+# pulls. Both sign Google service-account assertions with ring, which rustls
+# already carries.
 # `embed-elastic` joined with #233; it adds no crate on top of `embed-bge`.
 ship = [
     "store-memory",
@@ -210,7 +209,7 @@ codegen-units = 1
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
-httpmock = "0.7"
+httpmock = "0.9"
 # #291 step 4: the Lean theorems in formal/ restated as property tests against
 # the real code. Pinned exactly so a new release cannot change generation or
 # shrinking under the suite; 1.12.0 was released 2026-10-10. Only `std`: no

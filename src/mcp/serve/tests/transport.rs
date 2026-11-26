@@ -299,8 +299,8 @@ struct CancelProbe {
 }
 
 impl rmcp::ServerHandler for CancelProbe {
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        rmcp::model::ServerInfo::new(
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        rmcp::model::ServerConfig::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
                 .build(),
@@ -464,8 +464,8 @@ async fn a_disconnected_sessionless_request_is_cancelled_behind_the_guard() {
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"rmcp-pin","version":"1"}}}"#;
 
 /// #32 PR 5 third review N2: the guarantees of `openers` and the guard
-/// rest on facts about rmcp 3.1.2 that its caret requirement in
-/// `Cargo.toml` does not pin, so this test fails loudly on an upgrade that
+/// rest on facts about the pinned rmcp release, so this test fails loudly on
+/// an upgrade that
 /// breaks them rather than letting MCP sessions go unattributed or the
 /// body ceilings drift apart:
 ///

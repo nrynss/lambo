@@ -652,7 +652,7 @@ async fn deleted_row_sessions(
              UNION SELECT session_id FROM edges \
                  WHERE source IN ({ids}) OR target IN ({ids}) OR id IN ({ids})"
         );
-        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        let mut query = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql));
         for id in chunk {
             query = query.bind(id);
         }
@@ -667,7 +667,7 @@ async fn deleted_row_sessions(
             "SELECT session_id FROM edges WHERE id IN ({})",
             numbered_placeholders(chunk.len())
         );
-        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        let mut query = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql));
         for id in chunk {
             query = query.bind(id);
         }

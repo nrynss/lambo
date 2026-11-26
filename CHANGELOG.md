@@ -96,8 +96,18 @@
   for `candle`, `dimensions` for `bge_m3`, the four `gemini_*` keys, and
   their environment variables.
 
+### Removed
+
+- Removed the unused Bedrock feature and SDK. Configurations that specify
+  `bedrock` or `titan` now fail with an unknown embedder kind error (#352).
+- Removed the inert `canonization_min_peer_count` option. Delete it from
+  configurations that still set it (#352).
+
 ### Fixed
 
+- Updated the shipped MCP, SQLite, TLS, and Candle dependencies to address
+  RustSec advisories. A scheduled scan now checks every release profile
+  and runs on dependency changes (#352).
 - Elasticsearch recall repairs keep the newest writer's mirror version and
   rebuild from the snapshot used to check the sync marker. Large flushes send
   vector changes in bounded bulk requests (#321).

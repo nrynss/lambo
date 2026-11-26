@@ -239,7 +239,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Contract/Store.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:2dd745cab9a41cb84578390630cefbbfdb97375c0a27cf0c5d8efd5b30f38391"
+read_digest = "v2:sha256:37b27e55ff8cf13b05394bb5a85b75eaec0eaf8edd2d1efaa5c12b5d557f9ec8"
 rust = [
   "src/store/memory.rs#MemoryStore::flush",
   "src/store/batch.rs#plan_flush",
@@ -293,7 +293,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Canonical.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:f6fe744c10edde9ea193c2359868c4b80e303c544717fef6e13569514252a524"
+read_digest = "v2:sha256:b52b8cff95293ed5d2980a88e838116d3ab1a19e5339ff7848b338f8e4c53919"
 rust = [
   "src/graph/canonical.rs",
   "src/graph/graph/names.rs#name_key",
@@ -482,7 +482,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Base.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:bb0d1f83ebbd4f1287f5ab656527d0984d0394d3d8475875f6e885e5b2da0e43"
+read_digest = "v2:sha256:5c763e25c6c8533b33e6d28cce1c7397e291375e9926bfc1559db408576c5e10"
 rust = [
   "src/writeq/execution.rs#WriteCtx::run",
   "src/writeq/execution.rs#ConsumeStamp",
@@ -516,7 +516,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Drain/Replay.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:9b01b7b7eb5f064ba94894a3f87fe12843d555031ba7287b0323d5852a5e7c69"
+read_digest = "v2:sha256:0282dfdcbe187b7abde5c1ee5e33199353fab810f149006ac65d262e557b3a02"
 rust = [
   "src/writeq/replay.rs",
   "src/store/replay_flush.rs",
@@ -625,7 +625,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/BatchQueue/Worker.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:c218f50a35ab430e950c694da788fcd4e723b4509aa56b24518fb7f047f7b8e6"
+read_digest = "v2:sha256:66f4a92159999ac3a2b3bb3882a44dc83afc2866b26552a931b9a674d3184101"
 rust = [
   "src/embed/candle.rs",
 ]
@@ -634,7 +634,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/BatchQueue/Runs.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:c218f50a35ab430e950c694da788fcd4e723b4509aa56b24518fb7f047f7b8e6"
+read_digest = "v2:sha256:66f4a92159999ac3a2b3bb3882a44dc83afc2866b26552a931b9a674d3184101"
 rust = [
   "src/embed/candle.rs",
 ]
@@ -686,7 +686,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Resolve/Construction.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:d0003793fb6d653aa3f41af96eb0729826488b375904abeff0f20090275d276e"
+read_digest = "v2:sha256:d55534d695f03e0e8a94efa82d2bb95da3c86421be42908cc7a7ddc105090b45"
 rust = [
   "src/main.rs#Commands::needs_embedder",
   "src/main.rs#Commands::allow_embedding_mismatch",
@@ -701,7 +701,6 @@ rust = [
   "src/store/sqlite/mod.rs#vector_dimensions",
   "src/store/recall_tier.rs#wrap_with_recall_tier",
   "src/embed/mod.rs#build_embedder",
-  "src/embed/mod.rs#EmbedderKind::has_adapter",
   "src/embed/mod.rs#EmbedderKind::is_compiled",
   "src/embed/mod.rs#EmbedderKind::is_ready",
   "src/config.rs#load_resolved",

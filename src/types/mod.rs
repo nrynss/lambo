@@ -1642,7 +1642,7 @@ pub struct GraphSnapshot {
 /// before any hybrid/vector write when a contract already exists.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbeddingContract {
-    /// Embedder kind string (`bge_m3`, `bedrock`, `fixture`, …).
+    /// Embedder kind string (`bge_m3`, `gemini`, `fixture`, …).
     pub kind: String,
     /// Optional model id / GGUF name (empty = server default).
     #[serde(default, skip_serializing_if = "Option::is_none")]

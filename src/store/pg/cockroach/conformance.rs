@@ -1911,14 +1911,16 @@ async fn vector_explain_camera_proof() {
     // `DialectSql` (`store.sql`), the exact string `vector_candidates`
     // issues, so neither an edit to the SQL nor a change of dialect can
     // silently desynchronize the camera proof from it.
-    let vector_candidates_sql = &store.sql.vector_candidates;
-    let rows = sqlx::query(&format!("EXPLAIN {vector_candidates_sql}"))
-        .bind(&probe)
-        .bind(5i64)
-        .fetch_all(pool)
-        .await
-        .map_err(backend)
-        .unwrap();
+    let vector_candidates_sql = store.sql.vector_candidates.as_str();
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN {vector_candidates_sql}"
+    )))
+    .bind(&probe)
+    .bind(5i64)
+    .fetch_all(pool)
+    .await
+    .map_err(backend)
+    .unwrap();
     let plan: Vec<String> = rows
         .iter()
         .map(|r| r.try_get::<String, usize>(0).map_err(backend))
@@ -1975,10 +1977,12 @@ impl Drop for SessionRows {
                 Err(e) => return eprintln!("cleanup: pool for {session}: {e}"),
             };
             for table in TABLES {
-                if let Err(e) = sqlx::query(&format!("DELETE FROM {table} WHERE session_id = $1"))
-                    .bind(&session)
-                    .execute(&pool)
-                    .await
+                if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DELETE FROM {table} WHERE session_id = $1"
+                )))
+                .bind(&session)
+                .execute(&pool)
+                .await
                 {
                     eprintln!("cleanup: {table} for {session}: {e}");
                 }

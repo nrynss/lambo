@@ -651,7 +651,7 @@ async fn read_body(body: axum::body::Body) -> Result<axum::body::Bytes, BodyRead
 /// The MCP-session id header of streamable HTTP.
 pub(super) const MCP_SESSION_ID: &str = "mcp-session-id";
 
-/// The MCP-session id `headers` name, read **exactly** as rmcp 3.1.2 reads
+/// The MCP-session id `headers` name, read **exactly** as rmcp 3.11.0 reads
 /// it (`StreamableHttpService::handle_post`, `handle_get`, `handle_delete`:
 /// `headers.get(HEADER_SESSION_ID).and_then(|v| v.to_str().ok())`): the
 /// first such header, and only when it is visible ASCII. A header that is
@@ -699,7 +699,7 @@ pub(super) const ADMIN_PATH_PREFIX: &str = "/admin/";
 /// ([`opens_a_new_session`]) whose whole body is `body`? (#32 PR 5 third
 /// review.)
 ///
-/// rmcp 3.1.2 (`StreamableHttpService::handle_post`) mints a session for a
+/// rmcp 3.11.0 (`StreamableHttpService::handle_post`) mints a session for a
 /// POST with no usable session id only when the body is a JSON-RPC
 /// *request* whose method is `initialize`: a sessionless `server/discover`
 /// or per-request-protocol call (`tools/call` carrying its protocol

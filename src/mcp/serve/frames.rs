@@ -3,9 +3,9 @@
 //!
 //! # Why the cap is here and not on the fields
 //!
-//! rmcp 3.1.2 reads a line-framed transport with `read_until(b'\n')` into a
-//! buffer with no limit, then parses the whole line into a JSON-RPC message
-//! whose `tools/call` arguments are a `serde_json::Map<String, Value>`. Only
+//! rmcp 3.11 reads a line-framed transport into a buffer up to its default
+//! 16 MiB limit, then parses the whole line into a JSON-RPC message whose
+//! `tools/call` arguments are a `serde_json::Map<String, Value>`. Only
 //! after that does a tool's `Parameters<T>` deserialize Lambo's own types,
 //! from that `Value`. So by the time any Lambo code (or any Lambo
 //! `deserialize_with`) sees `image.data` or a `values` array, the whole of it
