@@ -1,6 +1,7 @@
 # The audit workflow passes an explicit target and shipped feature set.
 [advisories]
 unmaintained = "all"
+unsound = "all"
 yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2026-0543", reason = "Chrono migration is tracked in https://github.com/nrynss/lambo/issues/362 and awaits the rmcp release for https://github.com/modelcontextprotocol/rust-sdk/pull/1474." },
