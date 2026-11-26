@@ -74,7 +74,7 @@ pub(crate) mod formal_pins {
 /// Classify a query into a recall arm (lexical/vector vs structural).
 ///
 /// A query is `Structural` when one of `STRUCTURAL_MARKERS` occurs in its
-/// lowercase text on word boundaries, by the rule anchor names follow
+/// normalized lowercase text on word boundaries, by the rule anchor names follow
 /// (`word_bounded_spans`): a marker glued to the end of a longer word or
 /// running into the next one does not count (#299). So "the answer depends
 /// only on the score", "who are the independents of the senate" and "the
@@ -82,10 +82,7 @@ pub(crate) mod formal_pins {
 /// no marker at all ("is the system independent of a single region", "the
 /// report references the changelog").
 pub fn classify(query: &str) -> RecallKind {
-    let lower = query.to_lowercase();
-    let structural = STRUCTURAL_MARKERS
-        .iter()
-        .any(|m| word_bounded_occurrences(&lower, m).next().is_some());
+    let structural = marker_occurrences(&anchor_text(query)).next().is_some();
     tracing::trace!(
         target: "lambo::recall",
         query = %query,
@@ -113,6 +110,9 @@ const MAX_ANCHOR_SPANS: usize = 256;
 /// NFC followed by per-character lowercase avoids contextual final-sigma
 /// folding and makes composed and decomposed names equivalent.
 pub(crate) fn anchor_text(text: &str) -> String {
+    if text.is_ascii() {
+        return text.to_ascii_lowercase();
+    }
     #[cfg(test)]
     SLOW_NORMALIZATIONS.with(|n| n.set(n.get() + 1));
     text.nfc().flat_map(char::to_lowercase).nfc().collect()
@@ -204,6 +204,12 @@ fn word_bounded_spans(hay: &str, needle: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
+fn marker_occurrences(normalized: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    STRUCTURAL_MARKERS
+        .into_iter()
+        .flat_map(|marker| word_bounded_occurrences(normalized, marker))
+}
+
 /// Byte spans of every structural-marker occurrence in the lowercased query,
 /// on word boundaries: exactly the occurrences [`classify`] counts (#299), so
 /// a marker glued into a longer word places no subject. A concept match that
@@ -211,10 +217,7 @@ fn word_bounded_spans(hay: &str, needle: &str) -> Vec<(usize, usize)> {
 /// literally named `"blast radius"`), not the thing it names, so it does not
 /// anchor.
 fn marker_spans(lower_q: &str) -> Vec<(usize, usize)> {
-    STRUCTURAL_MARKERS
-        .iter()
-        .flat_map(|m| word_bounded_occurrences(lower_q, m))
-        .collect()
+    marker_occurrences(lower_q).collect()
 }
 
 /// Whether every word of `lower_content` is an [`ANCHOR_STOP_WORDS`] entry.
@@ -1100,6 +1103,25 @@ mod tests {
             "x depends-on y",
         ] {
             assert_eq!(classify(q), RecallKind::Structural, "{q}");
+        }
+    }
+
+    #[test]
+    fn issue306_classification_and_marker_spans_use_the_same_unicode_boundaries() {
+        // NFC decomposes FORKING into a symbol followed by a combining
+        // overlay. The overlay joins the first word when there is no space.
+        for symbol in ["\u{2adc}", "\u{2add}\u{338}"] {
+            let glued = format!("{symbol}DEPENDS ON Cafe\u{301}");
+            assert_eq!(classify(&glued), RecallKind::General, "{glued:?}");
+            assert!(marker_spans(&anchor_text(&glued)).is_empty());
+
+            let spaced = format!("{symbol} DEPENDS ON Cafe\u{301}");
+            assert_eq!(classify(&spaced), RecallKind::Structural, "{spaced:?}");
+            let lower = anchor_text(&spaced);
+            let spans = marker_spans(&lower);
+            assert_eq!(spans.len(), 1);
+            let (start, end) = spans[0];
+            assert_eq!(&lower[start..end], "depends on");
         }
     }
 

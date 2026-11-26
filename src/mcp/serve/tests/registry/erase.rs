@@ -27,7 +27,7 @@ use crate::surface::session::{
     parse_addressed, SessionCapabilities, SessionGrant, SessionPrefix, SessionScope,
 };
 use crate::test_util::{on_the_wire_as, on_the_wire_with};
-use crate::types::SessionId;
+use crate::types::{AgentId, SessionId};
 
 const A: &str = "er-a";
 const B: &str = "er-b";
@@ -473,6 +473,39 @@ async fn erasing_a_session_this_process_does_not_hold_leaves_only_the_tombstone(
         "{}",
         again.body
     );
+}
+
+#[tokio::test]
+async fn issue314_erase_409_explains_a_lease_left_by_this_serve() {
+    let w = wire().await;
+    let id = SessionId::new("er-u-detached");
+    let holder = LeaseHolder::for_this_process(&AgentId::new("agent-a"));
+    let attached = w
+        .store
+        .read_lease(&SessionId::new(A))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(attached.holder, holder.token());
+    let LeaseOutcome::Acquired(before) = w
+        .store
+        .acquire_lease(&id, &holder, crate::store::lease::LEASE_TTL)
+        .await
+        .unwrap()
+    else {
+        panic!("the serve's holder takes the lease with no attached handle");
+    };
+
+    let reply = erase_as(w.addr, "app", id.as_str(), &confirm(id.as_str())).await;
+    assert_eq!(reply.status, 409, "{}", reply.body);
+    assert!(reply.body.contains(&holder.token()), "{}", reply.body);
+    assert!(reply.body.contains("may be this serve"), "{}", reply.body);
+    assert!(
+        reply.body.contains("retry after the lease expires"),
+        "{}",
+        reply.body
+    );
+    assert_eq!(w.store.read_lease(&id).await.unwrap(), Some(before));
 }
 
 /// The acceptance row's third and fourth items: a session another process

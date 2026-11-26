@@ -19,9 +19,8 @@ attached again before that task runs, it releases the new handle's lease and
 the next beat fences the healthy session (`dropped_flight_fences_next`); it
 needs a panic or abort of an attach task and the cached `Failed` gone before
 the release runs. After a #293 re-take the fenced handle is detached without a
-release, so an in-serve erase answers 409 `HeldElsewhere`, which erase.rs
-documents as a live writer in another process: a doc mismatch
-(`zombieRun`). Past `PREVIOUS_HANDLE_WAIT` an on-demand request attaches a
+release, so an in-serve erase returns 409 with this serve as the holder
+(`zombieRun`, #314). Past `PREVIOUS_HANDLE_WAIT` an on-demand request attaches a
 session whose old handle is still alive, so two handles of one session are
 alive at once, as documented (`previous_wait_expires`).
 
@@ -185,22 +184,17 @@ theorem dropped_flight_fences_next :
     (p := fun s => decide (s.slots 1 = some (.live hFenced) ∧ s.rows 1 = ⟨.me, 2⟩)) (by decide)
   exact ⟨s, hs, of_decide_eq_true hp⟩
 
-/-! ### The stale-write fence waits for a beat -/
+/-! ### The stale-write fence wakes the watcher -/
 
 /-- Session `1` attached, its watcher parked, a call in flight; another writer
 takes the lease; the flush loop's next flush is refused as stale. -/
 def staleRun : List Ev := attach1 ++ [.watchPark 1, .enter 1, .rowLapse 1, .otherTake 1, .stale 1]
 
-/-- After the stale latch alone the watcher does not fire and every write is
-refused, while the session stays live and routed... -/
-example : (run cfgEx s0 (staleRun ++ [.watchFire 1])).isNone = true := by decide
+/-- The stale flush refuses further writes, and the watcher can queue the
+detach before another heartbeat (#303). -/
 example : (run cfgEx s0 (staleRun ++ [.write 1])).isNone = true := by decide
-example : (run cfgEx s0 staleRun).any (fun s => answer false s.now (s.slots 1) == .live) = true := by
-  decide
-
-/-- ...and the next beat wakes it: the detach is spawned. -/
-example : (run cfgEx s0 (staleRun ++ [.beat 1, .watchFire 1])).any (fun s => s.lost == [(1, 0)]) = true := by
-  decide
+example : (run cfgEx s0 (staleRun ++ [.watchFire 1])).any
+    (fun s => s.lost == [(1, 0)]) = true := by decide
 
 /-! ### Eviction -/
 
@@ -249,9 +243,8 @@ example : (run cfgEx sHeld [.rRound, .rStart, .rPermit, .rResult .acquired, .eCl
 /-- A pinned session whose own heartbeat re-took its lease after an operator
 override (#293): the handle is fenced and detached without a release, so the
 row stays this process's, at the new token. An in-serve erase of it then runs
-as the CLI's eraser identity, is refused as held, and answers 409, which
-`EraseAnswer::HeldElsewhere` documents as "a live writer in another
-process" (erase.rs:120); it is this one. -/
+as the CLI's eraser identity and returns 409, because a live lease still
+belongs to this process. -/
 def zombieRun : List Ev :=
   [.rowLapse 0, .beat 0, .watchFire 0, .lostRun 0 100, .detachRun 0, .eClaim 0, .eEnd 0 false]
 

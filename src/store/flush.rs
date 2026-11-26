@@ -319,6 +319,8 @@ impl Shared {
     }
 }
 
+type StaleWake = Arc<dyn Fn() + Send + Sync>;
+
 /// Write-behind flush task (spec §2.4–§2.5).
 ///
 /// Spawn with [`FlushTask::spawn`]; the returned handle is the only way to stop
@@ -345,6 +347,7 @@ pub struct FlushTask {
     /// Called when the store refuses a flush because the session was erased
     /// (#23); see [`FlushTask::with_erased_latch`].
     erased_latch: Option<crate::store::erase::ErasedLatch>,
+    stale_wake: Option<StaleWake>,
 }
 
 impl FlushTask {
@@ -358,6 +361,7 @@ impl FlushTask {
             fence: None,
             token: None,
             erased_latch: None,
+            stale_wake: None,
         }
     }
 
@@ -378,6 +382,12 @@ impl FlushTask {
     /// it acquired with the lease.
     pub fn with_token(mut self, token: u64) -> Self {
         self.token = Some(token);
+        self
+    }
+
+    /// Wake the serve watcher after a stale flush first latches the shared fence.
+    pub(crate) fn with_stale_wake(mut self, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        self.stale_wake = Some(Arc::new(wake));
         self
     }
 
@@ -421,6 +431,7 @@ impl FlushTask {
         let fence = self.fence.clone();
         let token = self.token;
         let erased_latch = self.erased_latch.clone();
+        let stale_wake = self.stale_wake.clone();
         tokio::spawn(async move {
             FlushLoop {
                 graph,
@@ -430,6 +441,7 @@ impl FlushTask {
                 fence,
                 token,
                 erased_latch,
+                stale_wake,
                 stale: false,
                 pending: MutationBatch::default(),
                 retry_after: None,
@@ -588,6 +600,7 @@ struct FlushLoop {
     token: Option<u64>,
     /// See [`FlushTask::with_erased_latch`].
     erased_latch: Option<crate::store::erase::ErasedLatch>,
+    stale_wake: Option<StaleWake>,
     /// Latched by a [`StoreError::StaleWrite`] (#293), beside the shared
     /// `fence` when one is armed, so a task with no fence armed stops too.
     stale: bool,
@@ -984,10 +997,9 @@ impl FlushLoop {
             Err(StoreError::StaleWrite(why)) => {
                 // #293: terminal. The lease moved to a newer token than this
                 // writer's, which it can never catch up with, so a resend can
-                // never land. Latch the lease-lost fence, as the heartbeat
-                // will on its next beat: the handle refuses further writes
-                // now, and the top of the next iteration drops `pending` and
-                // stops. Not dead-lettered: the batch is not at fault.
+                // never land. Fence the handle and wake serve now. The
+                // next iteration drops `pending` and stops. The batch's
+                // content did not cause the refusal.
                 self.latch_stale();
                 tracing::error!(
                     session = %session,
@@ -1203,12 +1215,17 @@ impl FlushLoop {
                 .is_some_and(|f| f.load(Ordering::Acquire))
     }
 
-    /// A flush was refused as stale (#293): latch this loop's own flag and,
-    /// when armed, the shared lease-lost fence the write gate reads.
+    /// Latch the flush loop and its shared write fence after a stale refusal.
     fn latch_stale(&mut self) {
         self.stale = true;
-        if let Some(fence) = &self.fence {
-            fence.store(true, Ordering::Release);
+        // Only the transition that sets the flag may wake the watcher here.
+        // An in-serve erase can have latched it quietly while the store call
+        // was in flight. Its own announcement follows the erase response.
+        if let Some(fence) = &self.fence
+            && !fence.swap(true, Ordering::AcqRel)
+            && let Some(wake) = &self.stale_wake
+        {
+            wake();
         }
     }
 

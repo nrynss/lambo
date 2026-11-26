@@ -222,7 +222,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Contract/Reembed.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:f48cfb337dd02a10fd9ff8fd35c28766f1fe03ae740bac16cd06fbceb8f9f49c"
+read_digest = "v2:sha256:71c780e200ad4c8d916e07fe301c237c0ea34b3ef59f3cfa566b18c87602ca32"
 rust = [
   "src/graph/graph/embeddings.rs",
   "src/memory/builder.rs#build_attach",
@@ -304,7 +304,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Dispatch.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:a3a0476933daa64e0d12840f3e91ebb97720ff6e159947a44b2e22759c4b513e"
+read_digest = "v2:sha256:018c1cab6d6ced1ce3c770ada6d61f365dab5de840d437f65a72a29e3235fcda"
 rust = [
   "src/recall/dispatch.rs",
   "src/daemon/mod.rs#recall_routed",
@@ -590,7 +590,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Flush/Loop.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:3d9008769ac50b2d8ea9c1a658c32cfd320dd793284340957371ce3d78100768"
+read_digest = "v2:sha256:a79ae7cca95046a247d5638cf4a1b37a73769717418af69bdb71be988a5dffc1"
 rust = [
   "src/memory/shutdown.rs#Memory::close",
   "src/memory/shutdown.rs#Memory::finish_close",
@@ -639,17 +639,19 @@ rust = [
   "src/embed/candle.rs",
 ]
 
-# Left out: src/store/flush.rs's stale-write latch, a match arm inside the
-# flush loop that Flush/Loop.lean already covers; the files issue #273 proposes.
+# The registry observes the stale flush's first fence transition and its
+# wake-up. Flush/Loop.lean handles the write-behind consequences.
 [[model]]
 lean = "formal/LamboProofs/Registry/Step.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:47acc50048835b3ee909f54ac3aedffe7a13be478a9c5475bdbd9c40874a269b"
+read_digest = "v2:sha256:14702a493f00a1d3c6951e3b60ab9346ad4b8d0c364c70e08520ce41e661f0e9"
 rust = [
   "src/mcp/serve/registry.rs",
   "src/mcp/serve/registry/on_demand.rs",
   "src/mcp/serve/registry/erase.rs",
   "src/memory/leases.rs",
+  "src/store/flush.rs#FlushLoop::latch_stale",
+  "src/memory/builder.rs#MemoryBuilder::build",
 ]
 
 # The registry's stateless functions.
@@ -673,12 +675,14 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Registry/Runs.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:69613f1a0f4ad4be45e9709bbe466f7de8754b3af7f8464b15a6d1455c48ec09"
+read_digest = "v2:sha256:424e93422ef0b97bd8905b3fbc97849d9382687b8480da5b0e57446455b8077d"
 rust = [
   "src/mcp/serve/registry.rs",
   "src/mcp/serve/registry/on_demand.rs",
   "src/mcp/serve/registry/erase.rs",
   "src/mcp/serve/tests/registry/on_demand.rs#a_delayed_lease_loss_detach_leaves_a_replacement_in_service",
+  "src/mcp/serve/tests/registry/erase.rs#issue314_erase_409_explains_a_lease_left_by_this_serve",
+  "src/memory/tests/leases.rs#issue303_a_stale_flush_wakes_a_parked_lease_waiter_before_the_heartbeat",
 ]
 
 # What each command builds, and from which lambo.toml. Left out: the

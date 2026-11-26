@@ -33,7 +33,7 @@
 //! | 400 | the body is not `{"confirm": ...}`, or the confirm does not repeat the session id; nothing was erased |
 //! | 405 | not a `POST` (inside scope only) |
 //! | 408 | the body did not arrive within `REQUEST_BODY_TIMEOUT`; nothing was erased |
-//! | 409 | a live writer in another process holds the session; nothing was erased (the CLI's exit 1) |
+//! | 409 | a live lease prevents erasure. Its holder can be this serve after detaching the session. |
 //! | 500 | the store failed; the body says whether the session is durably erased (repeat the request), untouched (an attached session's unflushed writes are discarded all the same), or unknown (repeat the request) |
 //! | 503 | the session is being erased, attached or detached, an attach in flight kept the attach permits past `ERASE_PERMIT_WAIT` (10 s), or the serve is shutting down; `Retry-After` |
 //!
@@ -284,9 +284,9 @@ async fn erase_session(
         EraseAnswer::HeldElsewhere { holder, age } => text(
             StatusCode::CONFLICT,
             format!(
-                "another writer holds this session ({holder}, holding the single-writer lease \
-                 for {}s); nothing was erased. Stop that writer (a clean stop flushes and \
-                 releases the lease), or if it has died let its lease expire, then retry",
+                "{holder} holds a live lease for this session (held for {}s), so nothing was erased. \
+                 The holder may be this serve. Stop an active writer cleanly to release its \
+                 lease. If the session is no longer served, retry after the lease expires.",
                 age.as_secs()
             ),
         ),

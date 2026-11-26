@@ -896,7 +896,11 @@ impl MemoryBuilder {
             },
         )
         .with_fence(lease_lost.clone())
-        .with_token(lease_token);
+        .with_token(lease_token)
+        .with_stale_wake({
+            let signal = Arc::clone(&lease_lost_signal);
+            move || signal.wake()
+        });
         // #23: a background write refused because the session was
         // erased latches the fence and the wake-up at once, with the
         // tombstone as the winner, exactly as the heartbeat would on its next

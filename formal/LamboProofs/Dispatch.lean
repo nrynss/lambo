@@ -7,7 +7,7 @@ Model of the structural arm of recall, `src/recall/dispatch.rs`, and of the
 daemon's routing around it in `Daemon::recall_routed` (`src/daemon/mod.rs`):
 
 * `classify` and `STRUCTURAL_MARKERS`: a query is `Structural` when its
-  lowercased text contains one of seven marker phrasings. `classify` is the
+  normalized text contains one of seven marker phrasings. `classify` is the
   code before #299, a plain substring test; `classifyWB` is the fixed code,
   which counts a marker only on word boundaries;
 * `dependents` over `format::dependents_of` (`src/recall/format.rs`) and
@@ -28,22 +28,13 @@ daemon's routing around it in `Daemon::recall_routed` (`src/daemon/mod.rs`):
 
 ## Model
 
-* **Strings.** A query is a `List Char`. `lower` is `Char.toLower` on every
-  character, which is ASCII-only; Rust's `str::to_lowercase` is full Unicode.
-  The two can only disagree on whether a marker occurs where a non-ASCII
-  character lowercases to ASCII. The markers use only the letters
-  `a b d e f h i l n o p r s t u w`, space and `-`; the only non-ASCII
-  characters whose Unicode lowercase contains an ASCII letter are U+212A
-  KELVIN SIGN (to `k`, not a marker letter) and U+0130 (to `i` followed by
-  U+0307, so the `i` of `radius` would be followed by a combining mark, not
-  `u`). So on every query the two agree on where a marker occurs. The
-  word-bounded classifier (`classifyWB`) also reads the characters next to an
-  occurrence, which may be non-ASCII and which `lower` leaves alone; that
-  reading still holds, because lowercasing keeps a character a word or a
-  non-word character (a letter lowercases to letters, U+0130 to `i` and
-  U+0307, both word characters; a non-letter, the hyphen included, is
-  unchanged), and the boundary test asks only that. The model does not prove
-  any of this; it is the reading above.
+* **Strings.** A query is a `List Char`. The Rust classifier and marker
+  span collector use the same normalization (#306): NFC, per-character
+  lowercase, then NFC again. The model takes normalized text as input
+  for the comparison with Rust and uses `Char.toLower` for the ASCII
+  uppercase examples. It does not model Unicode normalization or byte
+  offsets. Normalization can change the character at a word boundary,
+  so the word-boundary results apply to the normalized text.
 * **Matching** before #299 was `str::contains`: a plain substring test
   (`containsSub`, proved equal to `List.IsInfix`), with no word boundaries
   (`classify`). The fix (#299) matches each marker with the word-bounded rule
