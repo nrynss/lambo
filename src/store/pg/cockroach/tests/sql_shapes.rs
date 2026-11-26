@@ -95,6 +95,7 @@ fn concept_sql_for(n: usize) -> String {
     let embeddings: Vec<Option<String>> = vec![Some("[0.5,0.5,0.5,0.5]".into()); n];
     concept_upsert_query(&rows, &embeddings, CockroachDialect::VECTOR_CAST)
         .sql()
+        .as_str()
         .to_string()
 }
 
@@ -290,13 +291,13 @@ fn upsert_placeholder_shapes_match_structs() {
     // updating them must fail here rather than silently widen a chunk past
     // the limit.
     assert_eq!(
-        placeholder_max(interaction_upsert_query(&[&i]).sql()),
+        placeholder_max(interaction_upsert_query(&[&i]).sql().as_str()),
         INTERACTION_COLUMNS
     );
     assert_eq!(placeholder_max(&concept_sql_for(1)), CONCEPT_COLUMNS);
     let e = test_edge(iid, iid, EdgeType::Derives);
     assert_eq!(
-        placeholder_max(edge_upsert_query(&[&e]).sql()),
+        placeholder_max(edge_upsert_query(&[&e]).sql().as_str()),
         EDGE_COLUMNS
     );
     // STORE-1: the full-snapshot upsert now carries the embedding contract
@@ -304,8 +305,9 @@ fn upsert_placeholder_shapes_match_structs() {
     // Issue #17 added mutation_epoch ($8) without updating this count, so
     // the assertion was red on this (CI-disabled) row from 5709a72 on;
     // issue #29 adds last_gc_epoch ($9) and last_gc_at ($10).
-    let upsert_session = crdb_sql().upsert_session;
-    assert_eq!(placeholder_max(&upsert_session), 10);
+    let sql = crdb_sql();
+    let upsert_session = sql.upsert_session.as_str();
+    assert_eq!(placeholder_max(upsert_session), 10);
     assert!(upsert_session.contains("mutation_epoch = EXCLUDED.mutation_epoch"));
     assert!(upsert_session.contains("last_gc_epoch = EXCLUDED.last_gc_epoch"));
     assert!(upsert_session.contains("last_gc_at = EXCLUDED.last_gc_at"));
@@ -348,6 +350,7 @@ fn upsert_placeholder_shapes_match_structs() {
     // Edge conflict targets the natural key; id is replaceable on conflict.
     assert!(edge_upsert_query(&[&e])
         .sql()
+        .as_str()
         .contains("ON CONFLICT (source, target, edge_type)"));
 }
 
@@ -363,7 +366,7 @@ fn the_access_update_is_shared_and_cast_free() {
         access_count: 1,
         last_accessed: chrono::Utc::now(),
     }];
-    let access_sql = access_update_query(&rows).sql().to_string();
+    let access_sql = access_update_query(&rows).sql().as_str().to_string();
     assert_eq!(placeholder_max(&access_sql), ACCESS_COLUMNS);
     assert!(!access_sql.contains("::"), "{access_sql}");
     assert!(access_sql.contains("GREATEST(concepts.access_count, v.access_count)"));
@@ -409,7 +412,7 @@ fn sql_shape_is_a_multi_row_upsert() {
         test_edge(a, NodeId::new(), EdgeType::Dependency),
     ];
     let refs: Vec<&Edge> = edges.iter().collect();
-    let edge_sql = edge_upsert_query(&refs).sql().to_string();
+    let edge_sql = edge_upsert_query(&refs).sql().as_str().to_string();
     assert_eq!(placeholder_max(&edge_sql), 20, "2 rows x 10 columns");
     assert_eq!(edge_sql.matches("ON CONFLICT").count(), 1);
 }
@@ -427,7 +430,7 @@ fn event_time_rides_the_upsert_and_select_shape() {
 
     let mut i = test_interaction(NodeId::new());
     i.event_time = Some(stamped_at);
-    let i_sql = interaction_upsert_query(&[&i]).sql().to_string();
+    let i_sql = interaction_upsert_query(&[&i]).sql().as_str().to_string();
     assert_eq!(placeholder_max(&i_sql), 7, "1 row x 7 columns: {i_sql}");
     assert!(
         i_sql.contains("previous_id, created_at, event_time"),
@@ -436,7 +439,7 @@ fn event_time_rides_the_upsert_and_select_shape() {
 
     let mut e = test_edge(NodeId::new(), NodeId::new(), EdgeType::Causal);
     e.event_time = Some(stamped_at);
-    let e_sql = edge_upsert_query(&[&e]).sql().to_string();
+    let e_sql = edge_upsert_query(&[&e]).sql().as_str().to_string();
     assert_eq!(placeholder_max(&e_sql), 10, "1 row x 10 columns: {e_sql}");
     assert!(
         e_sql.contains("last_reinforced, event_time"),
@@ -456,7 +459,10 @@ fn event_time_rides_the_upsert_and_select_shape() {
     }
 
     let crdb = crdb_sql();
-    for sql in [&crdb.select_interactions, &crdb.select_edges] {
+    for sql in [
+        crdb.select_interactions.as_str(),
+        crdb.select_edges.as_str(),
+    ] {
         assert!(
             sql.contains("event_time"),
             "load must read event_time back by name: {sql}"
@@ -482,6 +488,7 @@ fn human_confirmed_rides_the_concept_upsert_and_select_shape() {
         CockroachDialect::VECTOR_CAST,
     )
     .sql()
+    .as_str()
     .to_string();
     assert_eq!(placeholder_max(&sql), 18, "1 row x 18 columns: {sql}");
     assert!(
@@ -496,7 +503,10 @@ fn human_confirmed_rides_the_concept_upsert_and_select_shape() {
         "conflict update must carry the count from the incoming row: {sql}"
     );
     assert!(
-        crdb_sql().select_concepts.contains("human_confirmed"),
+        crdb_sql()
+            .select_concepts
+            .as_str()
+            .contains("human_confirmed"),
         "load must read human_confirmed back by name"
     );
 }
@@ -523,6 +533,7 @@ fn embedding_source_rides_the_concept_upsert_and_select_shape() {
         CockroachDialect::VECTOR_CAST,
     )
     .sql()
+    .as_str()
     .to_string();
     assert_eq!(placeholder_max(&sql), CONCEPT_COLUMNS, "{sql}");
     assert!(
@@ -541,7 +552,10 @@ fn embedding_source_rides_the_concept_upsert_and_select_shape() {
         "conflict update must carry the provenance with the vector: {sql}"
     );
     assert!(
-        crdb_sql().select_concepts.contains("embedding_source"),
+        crdb_sql()
+            .select_concepts
+            .as_str()
+            .contains("embedding_source"),
         "load must read embedding_source back by name"
     );
 }

@@ -1,18 +1,17 @@
 name: ci
 
 # Third-party actions are pinned to full 40-char commit SHAs, with the human
-# version in a trailing comment. A tag (`@v4`) and a branch (`@1.99.0`) are both
+# version in a trailing comment. A tag (`@v7`) and a branch (`@1.100.0`) are both
 # mutable — whoever controls the action repo can repoint them at new code that
-# then runs with this workflow's token. A SHA cannot be repointed. Note `dtolnay/rust-toolchain@1.99.0` is a *branch*, not a tag, so it
-# was the most mutable of the three.
+# then runs with this workflow's token. A SHA cannot be repointed. Note `dtolnay/rust-toolchain@1.100.0` is a *branch*, not a tag, so it
+# can move just like a tag.
 # To upgrade: bump the SHA and the comment together, never the comment alone.
 #   gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha
 # (annotated tags need a second deref through /git/tags/<sha>; use
 #  .../git/ref/heads/<branch> for a branch-versioned action)
 
 # Cargo cache. rust-cache hashes every installed toolchain into its key, and the
-# ubuntu runner images differ in their preinstalled stable (1.99.1 on some,
-# 1.100.0 on others during a rollout), so one job alternated between two keys
+# runner images differ in their preinstalled Rust versions during a rollout, so one job alternated between two keys
 # and about a third of the jobs in each run started cold. Every job therefore
 # uninstalls all toolchains except the one rust-toolchain.toml selects before
 # rust-cache computes its key. Only main saves: PR and other branch caches are
@@ -48,7 +47,7 @@ jobs:
       rust: ${{ steps.classify.outputs.rust }}
       mirror: ${{ steps.classify.outputs.mirror }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # PRs diff their event base against the checked-out merge commit;
           # pushes diff github.event.before against the checked-out commit.
@@ -64,10 +63,10 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+        uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
         with:
           components: rustfmt, clippy
 
@@ -80,7 +79,7 @@ jobs:
           rustup toolchain list
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -114,7 +113,7 @@ jobs:
     if: needs.changes.outputs.mirror == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Mirror drift check (mirrored page pairs)
         run: bash scripts/docs/check-mirror-drift.sh
       # Pages backed by the Lean models cite their backing in MDX comments
@@ -177,10 +176,10 @@ jobs:
           - name: candle
             command: cargo test --locked --features embed-candle
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+        uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
         with:
           components: rustfmt, clippy
 
@@ -193,7 +192,7 @@ jobs:
           rustup toolchain list
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: ${{ matrix.name }}
@@ -224,8 +223,8 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
       - name: Keep only the pinned toolchain
         run: |
           keep="$(rustup show active-toolchain | cut -d' ' -f1)"
@@ -234,7 +233,7 @@ jobs:
           done
           rustup toolchain list
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: candle metal (compile only, no weights, no network)

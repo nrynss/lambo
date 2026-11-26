@@ -628,29 +628,29 @@ pub(super) struct DialectSql {
     /// i.e. similarity (score) descending. The adapter requests `k + 1`:
     /// a lookahead tied with the kth distance triggers the exact, UUID-ordered
     /// session fallback, while an untied boundary remains on this index-friendly path.
-    pub(super) vector_candidates: String,
+    pub(super) vector_candidates: sqlx::SqlStr,
 
     /// Correctness fallback when foreign-session rows crowd the caller out of the
     /// capped global index query. This deliberately prioritizes exact session-local
     /// top-k over index use; it runs only after the bounded fast path is exhausted.
-    pub(super) session_vector_candidates: String,
+    pub(super) session_vector_candidates: sqlx::SqlStr,
 
     /// Full-snapshot sessions upsert (fixtures `seed` path): root_goal JSONB, created_at,
     /// closed_at, and the `EmbeddingContract` columns (STORE-1). `COALESCE($3, now())`
     /// keeps the NOT NULL default when a snapshot omits it.
     #[cfg(any(feature = "fixtures", all(test, feature = "store-cockroach")))]
-    pub(super) upsert_session: String,
+    pub(super) upsert_session: sqlx::SqlStr,
 
     /// `Mutation::SetEmbedding`'s session-column write.
-    pub(super) set_embedding: String,
+    pub(super) set_embedding: sqlx::SqlStr,
 
     /// The session row `load_session` and the checked vector read both start from.
-    pub(super) select_session: String,
-    pub(super) select_interactions: String,
-    pub(super) select_concepts: String,
-    pub(super) select_edges: String,
-    pub(super) select_canonization_events: String,
-    pub(super) select_reservations: String,
+    pub(super) select_session: sqlx::SqlStr,
+    pub(super) select_interactions: sqlx::SqlStr,
+    pub(super) select_concepts: sqlx::SqlStr,
+    pub(super) select_edges: sqlx::SqlStr,
+    pub(super) select_canonization_events: sqlx::SqlStr,
+    pub(super) select_reservations: sqlx::SqlStr,
     /// #20 supersession evidence rows (`crate::store::evidence`): one row
     /// per dependence edge into `$2` (a `Dependency` source or a
     /// `Hierarchical` child, concepts of session `$1` other than `$2`), with
@@ -658,9 +658,9 @@ pub(super) struct DialectSql {
     /// are present only when it is an interaction of the session. No age
     /// filter: the shared rules apply it. Twin of SQLite's
     /// `EVIDENCE_ROWS_SQL`.
-    pub(super) select_evidence_rows: String,
+    pub(super) select_evidence_rows: sqlx::SqlStr,
     /// #20: the node's own origin interaction. `$1` session, `$2` node.
-    pub(super) select_evidence_own_origin: String,
+    pub(super) select_evidence_own_origin: sqlx::SqlStr,
 }
 
 /// #20: the session's about-time extent, Stage 2's denominator. `$1` session.
@@ -675,9 +675,14 @@ impl DialectSql {
         let s = D::STRING_CAST;
         let v = D::VECTOR_CAST;
         let op = D::DISTANCE_OP;
+        // Interpolate only the dialect's fixed SQL tokens. Runtime values
+        // remain bound separately. Share each prepared string across queries.
+        let statement = |sql: String| {
+            sqlx::SqlSafeStr::into_sql_str(sqlx::AssertSqlSafe(std::sync::Arc::<str>::from(sql)))
+        };
         Self {
             vector_cast: v,
-            vector_candidates: format!(
+            vector_candidates: statement(format!(
                 r#"
 SELECT id{s} AS id, session_id{s} AS session_id,
        canonical_key{s} AS canonical_key,
@@ -687,8 +692,8 @@ WHERE embedding IS NOT NULL
 ORDER BY dist ASC
 LIMIT $2
 "#
-            ),
-            session_vector_candidates: format!(
+            )),
+            session_vector_candidates: statement(format!(
                 r#"
 SELECT id{s} AS id, canonical_key{s} AS canonical_key,
        embedding {op} $1{v} AS dist
@@ -697,9 +702,9 @@ WHERE session_id = $2 AND embedding IS NOT NULL
 ORDER BY dist ASC, id ASC
 LIMIT $3
 "#
-            ),
+            )),
             #[cfg(any(feature = "fixtures", all(test, feature = "store-cockroach")))]
-            upsert_session: format!(
+            upsert_session: statement(format!(
                 r#"
 INSERT INTO sessions (
     session_id, root_goal, created_at, closed_at,
@@ -717,8 +722,8 @@ ON CONFLICT (session_id) DO UPDATE SET
     last_gc_epoch = EXCLUDED.last_gc_epoch,
     last_gc_at = EXCLUDED.last_gc_at
 "#
-            ),
-            set_embedding: format!(
+            )),
+            set_embedding: statement(format!(
                 r#"
 UPDATE sessions
 SET embedding_kind = $2{s},
@@ -726,8 +731,8 @@ SET embedding_kind = $2{s},
     embedding_dim = $4::INT
 WHERE session_id = $1
 "#
-            ),
-            select_session: format!(
+            )),
+            select_session: statement(format!(
                 r#"
 SELECT root_goal{s} AS root_goal, created_at, closed_at,
        embedding_kind, embedding_model, embedding_dim, mutation_epoch,
@@ -735,8 +740,8 @@ SELECT root_goal{s} AS root_goal, created_at, closed_at,
 FROM sessions
 WHERE session_id = $1
 "#
-            ),
-            select_interactions: format!(
+            )),
+            select_interactions: statement(format!(
                 r#"
 SELECT id{s} AS id, session_id, agent_id, prompt_text,
        previous_id{s} AS previous_id, created_at, event_time
@@ -744,8 +749,8 @@ FROM interactions
 WHERE session_id = $1
 ORDER BY created_at, id
 "#
-            ),
-            select_concepts: format!(
+            )),
+            select_concepts: statement(format!(
                 r#"
 SELECT id{s} AS id, session_id, content, canonical_key, concept_type,
        origin_interaction{s} AS origin_interaction, origin_agent, created_at,
@@ -756,8 +761,8 @@ FROM concepts
 WHERE session_id = $1
 ORDER BY id
 "#
-            ),
-            select_edges: format!(
+            )),
+            select_edges: statement(format!(
                 r#"
 SELECT id{s} AS id, session_id, source{s} AS source,
        target{s} AS target, edge_type, weight, reinforcements,
@@ -766,8 +771,8 @@ FROM edges
 WHERE session_id = $1
 ORDER BY id
 "#
-            ),
-            select_canonization_events: format!(
+            )),
+            select_canonization_events: statement(format!(
                 r#"
 SELECT id{s} AS id, session_id, node_id{s} AS node_id,
        from_status, to_status, blast_radius, last_demotion_time, occurred_at,
@@ -776,15 +781,15 @@ FROM canonization_events
 WHERE session_id = $1
 ORDER BY occurred_at, id
 "#
-            ),
-            select_reservations: format!(
+            )),
+            select_reservations: statement(format!(
                 r#"
 SELECT session_id, node_id{s} AS node_id, agent_id, expires_at
 FROM reservations
 WHERE session_id = $1
 "#
-            ),
-            select_evidence_rows: format!(
+            )),
+            select_evidence_rows: statement(format!(
                 r#"
 SELECT e.id{s} AS edge_id, e.created_at AS edge_created, e.event_time AS edge_event,
        c.id{s} AS dependent, c.origin_interaction{s} AS origin,
@@ -799,13 +804,13 @@ WHERE e.session_id = $1
   AND c.id <> $2
 ORDER BY e.id
 "#
-            ),
-            select_evidence_own_origin: format!(
+            )),
+            select_evidence_own_origin: statement(format!(
                 r#"
 SELECT origin_interaction{s} AS origin
 FROM concepts WHERE session_id = $1 AND id = $2
 "#
-            ),
+            )),
         }
     }
 }
@@ -841,9 +846,9 @@ pub(super) fn keyword_candidates_sql<D: Dialect>(n_tokens: usize) -> String {
 /// Separate from the execution so the generated SQL — the one part of this
 /// change no local test can reach through a cluster — is inspectable by
 /// `sql_shape_is_a_multi_row_upsert`.
-pub(super) fn interaction_upsert_query<'a>(
-    rows: &'a [&'a Interaction],
-) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+pub(super) fn interaction_upsert_query(
+    rows: &[&Interaction],
+) -> sqlx::QueryBuilder<sqlx::Postgres> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_INTERACTION_PREFIX_SQL);
     qb.push_values(rows.iter(), |mut b, i| {
         b.push_bind(i.id.0)
@@ -859,11 +864,11 @@ pub(super) fn interaction_upsert_query<'a>(
 }
 
 /// The statement [`bulk_upsert_concepts`](super::write_rows::bulk_upsert_concepts) runs, built but not executed.
-pub(super) fn concept_upsert_query<'a>(
-    rows: &'a [ConceptRow<'a>],
-    embeddings: &'a [Option<String>],
+pub(super) fn concept_upsert_query(
+    rows: &[ConceptRow<'_>],
+    embeddings: &[Option<String>],
     vector_cast: &'static str,
-) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+) -> sqlx::QueryBuilder<sqlx::Postgres> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_CONCEPT_PREFIX_SQL);
     qb.push_values(
         rows.iter().zip(embeddings.iter()),
@@ -902,9 +907,7 @@ pub(super) fn concept_upsert_query<'a>(
 }
 
 /// The statement [`bulk_upsert_edges`](super::write_rows::bulk_upsert_edges) runs, built but not executed.
-pub(super) fn edge_upsert_query<'a>(
-    rows: &'a [&'a Edge],
-) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+pub(super) fn edge_upsert_query(rows: &[&Edge]) -> sqlx::QueryBuilder<sqlx::Postgres> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_EDGE_PREFIX_SQL);
     qb.push_values(rows.iter(), |mut b, e| {
         b.push_bind(e.id.0)
@@ -942,10 +945,10 @@ ON CONFLICT (session_id, receipt) DO UPDATE SET
 "#;
 
 /// The statement [`bulk_put_write_intents`](super::write_rows::bulk_put_write_intents) runs, built but not executed.
-pub(super) fn put_write_intents_upsert<'a>(
-    intents: &'a [&'a crate::types::WriteIntent],
-    payloads: &'a [String],
-) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+pub(super) fn put_write_intents_upsert(
+    intents: &[&crate::types::WriteIntent],
+    payloads: &[String],
+) -> sqlx::QueryBuilder<sqlx::Postgres> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_WRITE_INTENT_PREFIX_SQL);
     qb.push_values(intents.iter().zip(payloads), |mut b, (i, payload)| {
         b.push_bind(i.session_id.0.as_str())
@@ -992,13 +995,13 @@ pub(super) const CONSUME_WRITE_INTENT_UPDATE_SUFFIX_SQL: &str = r#") AS v(
 ) WHERE write_intents.session_id = v.session_id AND write_intents.receipt = v.receipt"#;
 
 /// The statement [`bulk_consume_write_intents`](super::write_rows::bulk_consume_write_intents) runs, built but not executed.
-pub(super) fn consume_write_intents_update<'a>(
-    consumes: &'a [(
-        &'a crate::types::SessionId,
-        &'a str,
-        &'a crate::types::WriteIntentOutcome,
+pub(super) fn consume_write_intents_update(
+    consumes: &[(
+        &crate::types::SessionId,
+        &str,
+        &crate::types::WriteIntentOutcome,
     )],
-) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+) -> sqlx::QueryBuilder<sqlx::Postgres> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(CONSUME_WRITE_INTENT_UPDATE_PREFIX_SQL);
     qb.push_bind(crate::types::DERIVE_IMAGE_PAYLOAD_LIKE)
         .push(CONSUME_WRITE_INTENT_UPDATE_OR_SQL)
@@ -1046,9 +1049,7 @@ pub(super) const UPDATE_ACCESSES_SUFFIX_SQL: &str = r#") AS v(
 ) WHERE concepts.id = v.id AND concepts.session_id = v.session_id"#;
 
 /// The statement [`bulk_update_accesses`](super::write_rows::bulk_update_accesses) runs, built but not executed.
-pub(super) fn access_update_query<'a>(
-    rows: &'a [AccessUpdate<'a>],
-) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+pub(super) fn access_update_query(rows: &[AccessUpdate<'_>]) -> sqlx::QueryBuilder<sqlx::Postgres> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(UPDATE_ACCESSES_PREFIX_SQL);
     qb.push_values(rows.iter(), |mut b, r| {
         b.push_bind(r.id.0)

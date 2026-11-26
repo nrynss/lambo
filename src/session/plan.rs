@@ -315,7 +315,7 @@ pub(super) fn digest<T: Serialize>(value: &T) -> Result<String, ClassifyError> {
         &serde_json::to_value(value).map_err(|e| ClassifyError::Source(e.to_string()))?,
         &mut bytes,
     )?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 pub(super) fn source_binding(snapshot: &GraphSnapshot) -> Result<SourceBinding, ClassifyError> {

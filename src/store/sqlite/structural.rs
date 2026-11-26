@@ -191,7 +191,7 @@ impl SqliteStore {
             crate::graph::resource::TIE_FORM_SQL
         ));
 
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
         for tok in &tokens_l {
             q = q.bind(tok).bind(tok);
         }
@@ -236,7 +236,7 @@ impl SqliteStore {
         let cutoff = cutoff_text(now, min_edge_age)?;
         let node_text = node.0.to_string();
 
-        let row = sqlx::query(&with_dependents(BLAST_RADIUS_SQL))
+        let row = sqlx::query(sqlx::AssertSqlSafe(with_dependents(BLAST_RADIUS_SQL)))
             .bind(&node_text)
             .bind(&session.0)
             .bind(&cutoff)
@@ -271,7 +271,7 @@ impl SqliteStore {
         let cutoff = cutoff_text(now, min_age)?;
         let node_text = node.0.to_string();
 
-        let row = sqlx::query(&with_dependents(INTERACTION_SPAN_SQL))
+        let row = sqlx::query(sqlx::AssertSqlSafe(with_dependents(INTERACTION_SPAN_SQL)))
             .bind(&node_text)
             .bind(&session.0)
             .bind(&cutoff)

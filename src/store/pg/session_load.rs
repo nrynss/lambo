@@ -110,7 +110,7 @@ impl<D: Dialect> PgStore<D> {
         let sid = &session_id;
         tx_retry(|| async move {
             let mut tx = pool.begin().await.map_err(backend)?;
-            let session_row = sqlx::query(&self.sql.select_session)
+            let session_row = sqlx::query(self.sql.select_session.clone())
                 .bind(sid.0.as_str())
                 .fetch_optional(&mut *tx)
                 .await
@@ -155,7 +155,7 @@ impl<D: Dialect> PgStore<D> {
                 last_gc_at_reset: false,
             };
 
-            let interactions = sqlx::query(&self.sql.select_interactions)
+            let interactions = sqlx::query(self.sql.select_interactions.clone())
                 .bind(sid.0.as_str())
                 .fetch_all(&mut *tx)
                 .await
@@ -164,7 +164,7 @@ impl<D: Dialect> PgStore<D> {
                 .map(row_to_interaction)
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let concepts = sqlx::query(&self.sql.select_concepts)
+            let concepts = sqlx::query(self.sql.select_concepts.clone())
                 .bind(sid.0.as_str())
                 .fetch_all(&mut *tx)
                 .await
@@ -173,7 +173,7 @@ impl<D: Dialect> PgStore<D> {
                 .map(row_to_concept)
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let edges = sqlx::query(&self.sql.select_edges)
+            let edges = sqlx::query(self.sql.select_edges.clone())
                 .bind(sid.0.as_str())
                 .fetch_all(&mut *tx)
                 .await
@@ -194,7 +194,7 @@ impl<D: Dialect> PgStore<D> {
                 .map(row_to_synonym)
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let reservations = sqlx::query(&self.sql.select_reservations)
+            let reservations = sqlx::query(self.sql.select_reservations.clone())
                 .bind(sid.0.as_str())
                 .fetch_all(&mut *tx)
                 .await
@@ -203,7 +203,7 @@ impl<D: Dialect> PgStore<D> {
                 .map(row_to_reservation)
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let canonization_events = sqlx::query(&self.sql.select_canonization_events)
+            let canonization_events = sqlx::query(self.sql.select_canonization_events.clone())
                 .bind(sid.0.as_str())
                 .fetch_all(&mut *tx)
                 .await

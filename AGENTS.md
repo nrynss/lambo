@@ -42,7 +42,7 @@
     `build_embedder` or resolve twice.
   - Selecting an uncompiled kind or an unknown TOML key is a **hard error**.
   - New backend: follow "Adding a backend" in that section (adapter module, feature,
-    registry arm, the formal `EmbedderKind.implemented` table for embedders, docs).
+    registry arm, the formal `EmbedderKind` constructors for embedders, docs).
     Not a core fork.
   - Example config: `lambo.example.toml`.
 - **Vector width belongs to the store** (`GraphStore::vector_dimensions()`), not the
@@ -64,8 +64,7 @@
 - **Embeddings are portable** (see `docs/reference/config.mdx`, "Embedder" and "Features"):
   - Default: `bge_m3` (`embed-bge`), reference setup a BGE-M3 GGUF from Hugging Face
     in llama.cpp's `llama-server` (`scripts/fetch-bge-m3.sh`, `scripts/run-llama-embed.sh`).
-  - Other kinds: `candle`, `gemini`, `embeddinggemma2`, `elastic`. `embed-bedrock` is
-    reserved and not implemented.
+  - Other kinds: `candle`, `gemini`, `embeddinggemma2`, `elastic`.
   - Tests: `FixtureEmbedder` (`embed-fixture`). Never mix model vectors in one session
     without `lambo re-embed`; the `EmbeddingContract` on `GraphSnapshot` is enforced at
     writer attach and on vector reads.

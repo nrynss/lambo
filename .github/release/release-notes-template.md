@@ -29,8 +29,6 @@ below never needs a different download.
 - Recall tier: `elastic` (feature `recall-elastic`), an optional Elasticsearch
   index selected by a top-level `[recall]` section that serves recall's vector
   leg beside the store
-- Not included: `bedrock` (Amazon Bedrock is gated on account authorization and
-  lands in a later release)
 
 Apple silicon also gets a Metal build, `lambo-__LAMBO_VERSION__-macos-arm64-metal`:
 the same adapter set plus the in-process `candle` embedder on the GPU
@@ -99,7 +97,6 @@ curl -fsSL https://github.com/nrynss/lambo/releases/download/v__LAMBO_VERSION__/
 
 ## Known limits
 
-- Bedrock embeddings are not shipped (blocked on account authorization).
 - _Add any limits specific to this release._
 
 ## Build from source

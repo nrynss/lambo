@@ -98,19 +98,10 @@ inductive EmbedderKind where
   | bgeM3
   | candle
   | gemini
-  | bedrock
   | fixture
   | eg2
   | elastic
   deriving DecidableEq, Repr
-
-/-- `EmbedderKind::is_ready` with the feature taken out: every kind has an
-adapter except Bedrock, whose registry arm refuses even when `embed-bedrock`
-is compiled (the Bedrock adapter is not implemented).
-Pinned by `formal_constants_tests::resolve`. -/
-def EmbedderKind.implemented : EmbedderKind → Bool
-  | .bedrock => false
-  | _ => true
 
 /-- The Cargo features of one build (Level B: features compile adapters in): which store and
 embedder adapters are compiled in (`StoreKind::is_compiled`,
@@ -378,7 +369,6 @@ inductive Err where
   | embedDimZero
   | embedMisapplied
   | embedUncompiled (k : EmbedderKind)
-  | embedUnimplemented (k : EmbedderKind)
   | pinMismatch (pin dim : Nat)
   | widthMismatch (store dim : Nat)
   | sourceNeedsSqlite
@@ -459,7 +449,6 @@ def resolveEmbedder (f : Features) (c : Config) : Except Err Nat :=
   if c.dim = 0 then .error .embedDimZero
   else if c.misappliedKey then .error .embedMisapplied
   else if !f.embed c.embed then .error (.embedUncompiled c.embed)
-  else if !c.embed.implemented then .error (.embedUnimplemented c.embed)
   else .ok c.dim
 
 /-- `check_vector_compatibility`. -/
@@ -765,8 +754,7 @@ theorem wrapTier_uncompiled {f : Features} {c : Config} (p : Option Nat)
 
 theorem resolveEmbedder_ok {f : Features} {c : Config} {d : Nat}
     (h : resolveEmbedder f c = .ok d) :
-    d = c.dim ∧ 0 < c.dim ∧ c.misappliedKey = false ∧ f.embed c.embed = true ∧
-      c.embed.implemented = true := by
+    d = c.dim ∧ 0 < c.dim ∧ c.misappliedKey = false ∧ f.embed c.embed = true := by
   unfold resolveEmbedder at h
   split at h
   · cases h
@@ -774,9 +762,7 @@ theorem resolveEmbedder_ok {f : Features} {c : Config} {d : Nat}
     · cases h
     · split at h
       · cases h
-      · split at h
-        · cases h
-        · cases h; refine ⟨rfl, by omega, by simp_all, by simp_all, by simp_all⟩
+      · cases h; refine ⟨rfl, by omega, by simp_all, by simp_all⟩
 
 theorem compatCheck_none {w : Option Nat} {d : Nat} (h : compatCheck w d = none) :
     0 < d ∧ (w = none ∨ w = some d) := by
@@ -826,14 +812,14 @@ theorem resolveBackends_trace (f : Features) (c : Config) :
 
 /-- A successful `resolve_backends` built exactly the configured store (of a
 compiled kind), the tier if configured (compiled), and the configured
-embedder (compiled and implemented), with a positive width that the pin and
+embedder (compiled), with a positive width that the pin and
 the store's width agree with. -/
 theorem resolveBackends_ok {f : Features} {c : Config} {t r}
     (h : resolveBackends f c = (t, .ok r)) :
     t = backendsTrace c ∧
       ∃ w, r = .full c.store w c.embed c.dim ∧ f.store c.store = true ∧
         (c.tiered = true → f.recallTier = true) ∧ f.embed c.embed = true ∧
-        c.embed.implemented = true ∧ 0 < c.dim ∧ c.daemonValid = true ∧
+        0 < c.dim ∧ c.daemonValid = true ∧
         (c.pin = none ∨ c.pin = some c.dim) ∧ (w = none ∨ w = some c.dim) := by
   cases hd : c.daemonValid
   · simp [resolveBackends, hd] at h
@@ -849,13 +835,13 @@ theorem resolveBackends_ok {f : Features} {c : Config} {t r}
   cases hc : widthCheck c.pin w d with
   | some e => simp [resolveBackends, hd, hb, hw, he, hc] at h
   | none =>
-  obtain ⟨rfl, -, -, hfe, himp⟩ := resolveEmbedder_ok he
+  obtain ⟨rfl, -, -, hfe⟩ := resolveEmbedder_ok he
   obtain ⟨hpos, hpin, hw'⟩ := widthCheck_none hc
   simp only [resolveBackends, hd, hb, hw, he, hc, Bool.not_true, Bool.false_eq_true,
     ↓reduceIte, Prod.mk.injEq, Except.ok.injEq] at h
   obtain ⟨h1, h2⟩ := h
   subst h2
-  refine ⟨?_, w, rfl, buildStore_compiled hb, ?_, hfe, himp, hpos, rfl, hpin, hw'⟩
+  refine ⟨?_, w, rfl, buildStore_compiled hb, ?_, hfe, hpos, rfl, hpin, hw'⟩
   · rw [← h1]; unfold backendsTrace; cases c.tiered <;> rfl
   · intro ht
     rcases wrapTier_ok hw with ⟨h1, -⟩ | ⟨-, h2, -⟩
@@ -1163,7 +1149,7 @@ theorem resolveBackends_ok' {f : Features} {c : Config} {r : Resolved}
     (h : (resolveBackends f c).2 = .ok r) :
     ∃ w, r = .full c.store w c.embed c.dim ∧ f.store c.store = true ∧
       (c.tiered = true → f.recallTier = true) ∧ f.embed c.embed = true ∧
-      c.embed.implemented = true ∧ 0 < c.dim ∧ c.daemonValid = true ∧
+      0 < c.dim ∧ c.daemonValid = true ∧
       (c.pin = none ∨ c.pin = some c.dim) ∧ (w = none ∨ w = some c.dim) :=
   (resolveBackends_ok (t := (resolveBackends f c).1) (Prod.ext rfl h)).2
 
@@ -1205,7 +1191,7 @@ theorem resolveStoreRun_ok {f : Features} {file : Nat → Raw} {ro : Bool} {r : 
 theorem resolveEmbed_ok {f : Features} {file : Nat → Raw} {r : Resolved}
     (h : (resolveEmbed f file).result = .ok r) :
     ∃ c, load (file 0) = .ok c ∧ r = .embedderOnly c.embed c.dim ∧ f.embed c.embed = true ∧
-      c.embed.implemented = true ∧ 0 < c.dim := by
+      0 < c.dim := by
   unfold resolveEmbed at h
   split at h
   · cases h
@@ -1213,12 +1199,12 @@ theorem resolveEmbed_ok {f : Features} {file : Nat → Raw} {r : Resolved}
     split at h
     · cases h
     · rename_i d hd
-      obtain ⟨rfl, hpos, -, he, hi⟩ := resolveEmbedder_ok hd
+      obtain ⟨rfl, hpos, -, he⟩ := resolveEmbedder_ok hd
       cases h
-      exact ⟨c, hc, rfl, he, hi, hpos⟩
+      exact ⟨c, hc, rfl, he, hpos⟩
 
 /-- A full-backends command that resolves gets exactly the store and the
-embedder its configuration selects, both compiled, the embedder implemented,
+embedder its configuration selects, both compiled,
 the width positive, and pin and store width agreeing with it. So selecting
 an uncompiled kind, an unbuilt tier, a zero width or a mismatched width is
 never a silent fallback: the resolve does not succeed (`main` exits 1). -/
@@ -1227,7 +1213,7 @@ theorem full_ok {f : Features} {file : Nat → Raw} {inv : Inv} {cmd : Cmd}
     (h : (resolveForCommand f file inv cmd loaded).result = .ok r) :
     ∃ c w, fullConfig file loaded c ∧ r = .full c.store w c.embed c.dim ∧
       f.store c.store = true ∧ (c.tiered = true → f.recallTier = true) ∧
-      f.embed c.embed = true ∧ c.embed.implemented = true ∧ 0 < c.dim ∧
+      f.embed c.embed = true ∧ 0 < c.dim ∧
       (c.pin = none ∨ c.pin = some c.dim) ∧ (w = none ∨ w = some c.dim) := by
   have hs : cmd.isSession = false := by
     cases cmd <;> simp_all [Cmd.isFull, Cmd.isSession]
@@ -1236,8 +1222,8 @@ theorem full_ok {f : Features} {file : Nat → Raw} {inv : Inv} {cmd : Cmd}
   rw [resolveForCommand_generic f file inv cmd loaded hs he] at h
   simp only [hn, ↓reduceIte] at h
   obtain ⟨c, hcfg, hb⟩ := resolveFull_ok h
-  obtain ⟨w, rfl, h1, h2, h3, h4, h5, -, h6, h7⟩ := resolveBackends_ok' hb
-  exact ⟨c, w, hcfg, rfl, h1, h2, h3, h4, h5, h6, h7⟩
+  obtain ⟨w, rfl, h1, h2, h3, h4, -, h6, h7⟩ := resolveBackends_ok' hb
+  exact ⟨c, w, hcfg, rfl, h1, h2, h3, h4, h6, h7⟩
 
 /-- A store-only command that resolves gets a store of a compiled kind. The
 `kind` it reports (`provision` hands it to `scripts/provision.sh`) is the
@@ -1258,10 +1244,10 @@ theorem storeOnly_ok {f : Features} {file : Nat → Raw} {inv : Inv} {cmd : Cmd}
 
 /-- The store-only path reads `lambo.toml` twice and resolves nothing
 else; a store-only command builds no embedder, so it starts whatever
-`[embedder]` selects, an uncompiled or unimplemented kind included, and
+`[embedder]` selects, an uncompiled kind included, and
 whatever the pin and the `[daemon]` cadence say. -/
 theorem storeOnly_ignores_embedder :
-    let raw : Raw := { embedFile := .known .bedrock, pin := some 7, daemonValid := false }
+    let raw : Raw := { embedFile := .known .candle, pin := some 7, daemonValid := false }
     (resolveForCommand Features.dflt (fun _ => raw) {} .saints none).reads = 2 ∧
       (resolveForCommand Features.dflt (fun _ => raw) {} .saints none).result =
         .ok (.storeOnly .memory .memory false) := by decide
@@ -1382,24 +1368,24 @@ configured embedder of any other width is refused. -/
 theorem cockroach_width_refused (f : Features) (c : Config) (hk : c.store = .cockroach)
     (hf : f.store .cockroach = true) (hl : c.located = true) (hd : c.daemonValid = true)
     (ht : c.tiered = false) (hp : c.pin = none) (hm : c.misappliedKey = false)
-    (he : f.embed c.embed = true) (hi : c.embed.implemented = true) (hpos : 0 < c.dim)
+    (he : f.embed c.embed = true) (hpos : 0 < c.dim)
     (hne : c.dim ≠ f.crdbWidth) :
     (resolveBackends f c).2 = .error (.widthMismatch f.crdbWidth c.dim) := by
   have hne' : f.crdbWidth ≠ c.dim := Ne.symm hne
   have hz : c.dim ≠ 0 := Nat.pos_iff_ne_zero.mp hpos
   simp [resolveBackends, buildStore, wrapTier, resolveEmbedder, widthCheck, compatCheck,
-    hk, hf, hl, hd, ht, hp, hm, he, hi, hz, hne']
+    hk, hf, hl, hd, ht, hp, hm, he, hz, hne']
 
 /-- The test `vector_compat_none_store_accepts_any_positive_dim`: a
 `MemoryStore` reports no width and takes any positive embedder width. -/
 theorem memory_any_dim (f : Features) (c : Config) (hk : c.store = .memory)
     (hf : f.store .memory = true) (hd : c.daemonValid = true) (ht : c.tiered = false)
     (hp : c.pin = none) (hm : c.misappliedKey = false) (he : f.embed c.embed = true)
-    (hi : c.embed.implemented = true) (hpos : 0 < c.dim) :
+    (hpos : 0 < c.dim) :
     (resolveBackends f c).2 = .ok (.full .memory none c.embed c.dim) := by
   have hz : c.dim ≠ 0 := Nat.pos_iff_ne_zero.mp hpos
   simp [resolveBackends, buildStore, wrapTier, resolveEmbedder, widthCheck, compatCheck,
-    hk, hf, hd, ht, hp, hm, he, hi, hz]
+    hk, hf, hd, ht, hp, hm, he, hz]
 
 /-- The pin check is kind-agnostic, so a stale pin refuses a
 `memory` or `cockroach` resolve too, though neither reports the pin as its
@@ -1408,13 +1394,13 @@ theorem pin_mismatch_refused (f : Features) (c : Config)
     (hk : c.store = .memory ∨ c.store = .cockroach) (hf : f.store c.store = true)
     (hl : c.located = true) (hd : c.daemonValid = true) (ht : c.tiered = false)
     (hm : c.misappliedKey = false) (he : f.embed c.embed = true)
-    (hi : c.embed.implemented = true) (hpos : 0 < c.dim) (p : Nat) (hp : c.pin = some p)
+    (hpos : 0 < c.dim) (p : Nat) (hp : c.pin = some p)
     (hne : p ≠ c.dim) :
     (resolveBackends f c).2 = .error (.pinMismatch p c.dim) := by
   have hz : c.dim ≠ 0 := Nat.pos_iff_ne_zero.mp hpos
   rcases hk with hk | hk <;>
     simp [resolveBackends, buildStore, wrapTier, resolveEmbedder, widthCheck, hk, hl,
-      hd, ht, hm, he, hi, hz, hp, hne] <;> simp_all
+      hd, ht, hm, he, hz, hp, hne] <;> simp_all
 
 /-- `check_vector_search_contract` never fires on the modelled adapters:
 once the embedder width is positive (which `resolve_backends` has checked by

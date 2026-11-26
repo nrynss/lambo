@@ -58,7 +58,7 @@ async fn frozen_graph_experiment() {
     assert!(matches!(mode.as_str(), "pool" | "eval"));
     let dataset = read(&input);
     use sha2::{Digest, Sha256};
-    let fingerprint = |path: &Path| format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()));
+    let fingerprint = |path: &Path| hex::encode(Sha256::digest(std::fs::read(path).unwrap()));
     let snapshot_sha256 = fingerprint(&database);
     let config_sha256 = fingerprint(&config);
     assert_eq!(

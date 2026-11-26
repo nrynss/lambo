@@ -287,9 +287,9 @@ fn census(db: &std::path::Path, session: &str) -> (Vec<(String, i64)>, Option<St
             if table == "store_meta" {
                 continue;
             }
-            let n: i64 = sqlx::query_scalar(&format!(
+            let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                 "SELECT COUNT(*) FROM {table} WHERE session_id = ?1"
-            ))
+            )))
             .bind(session)
             .fetch_one(&pool)
             .await

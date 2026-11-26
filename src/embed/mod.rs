@@ -1,7 +1,7 @@
 //! Embedder trait, Level B factory, and optional adapter modules (P1 / P7).
 //!
 //! Packaging: Cargo features gate adapters (`embed-bge`, `embed-candle`, `embed-fixture`,
-//! `embed-bedrock`, `embed-gemini`, `embed-eg2`, `embed-elastic`);
+//! `embed-gemini`, `embed-eg2`, `embed-elastic`);
 //! `lambo.toml` / env select among compiled kinds. See
 //! `docs/reference/config.mdx` ("Features").
 
@@ -317,7 +317,7 @@ impl std::fmt::Debug for ImageInput<'_> {
     }
 }
 
-/// Pluggable embedding backend (default: BGE-M3 via llama.cpp; Bedrock Titan V2 swap-in).
+/// Pluggable embedding backend (default: BGE-M3 via llama.cpp).
 ///
 /// **Input contract (CON-7):** `embed` MUST reject empty / whitespace-only text with
 /// [`EmbedError::Unavailable`] — no implementation may embed the empty string. The
@@ -516,8 +516,6 @@ pub enum EmbedderKind {
     Candle,
     /// Vertex Gemini embeddings. Feature: `embed-gemini`.
     Gemini,
-    /// Amazon Titan Text Embeddings V2 on Bedrock. Feature: `embed-bedrock` (T7.1).
-    Bedrock,
     /// Deterministic offline embedder. Feature: `embed-fixture`.
     Fixture,
     /// EmbeddingGemma 2, text and images in one space, served by llama.cpp's
@@ -544,7 +542,6 @@ impl EmbedderKind {
             Self::BgeM3 => "embed-bge",
             Self::Candle => "embed-candle",
             Self::Gemini => "embed-gemini",
-            Self::Bedrock => "embed-bedrock",
             Self::Fixture => "embed-fixture",
             Self::EmbeddingGemma2 => "embed-eg2",
             Self::Elastic => "embed-elastic",
@@ -552,38 +549,20 @@ impl EmbedderKind {
     }
 
     /// Whether this kind's Cargo feature is compiled into the current binary.
-    ///
-    /// Note: `true` does not mean the adapter is fully implemented (see [`Self::is_ready`]).
     pub const fn is_compiled(self) -> bool {
         match self {
             Self::BgeM3 => cfg!(feature = "embed-bge"),
             Self::Candle => cfg!(feature = "embed-candle"),
             Self::Gemini => cfg!(feature = "embed-gemini"),
-            Self::Bedrock => cfg!(feature = "embed-bedrock"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
             Self::EmbeddingGemma2 => cfg!(feature = "embed-eg2"),
             Self::Elastic => cfg!(feature = "embed-elastic"),
         }
     }
 
-    /// Whether this kind has an adapter at all, whatever the build's
-    /// features: every kind but Bedrock.
-    pub const fn has_adapter(self) -> bool {
-        match self {
-            Self::BgeM3
-            | Self::Candle
-            | Self::Fixture
-            | Self::Gemini
-            | Self::EmbeddingGemma2
-            | Self::Elastic => true,
-            // T7.1 not implemented yet.
-            Self::Bedrock => false,
-        }
-    }
-
-    /// Whether [`build_embedder`] can return a working adapter (feature on **and** impl exists).
+    /// Whether this build includes the adapter for this kind.
     pub const fn is_ready(self) -> bool {
-        self.is_compiled() && self.has_adapter()
+        self.is_compiled()
     }
 }
 
@@ -594,7 +573,7 @@ impl FromStr for EmbedderKind {
         let t = s.trim();
         if t.is_empty() {
             return Err(EmbedError::Unavailable(
-                "empty embedder kind (expected bge_m3 | candle | gemini | bedrock | fixture | \
+                "empty embedder kind (expected bge_m3 | candle | gemini | fixture | \
                  embeddinggemma2 | elastic)"
                     .into(),
             ));
@@ -606,7 +585,6 @@ impl FromStr for EmbedderKind {
             "bge_m3" | "bge-m3" | "bge" | "openai" => Ok(Self::BgeM3),
             "candle" => Ok(Self::Candle),
             "gemini" | "vertex" => Ok(Self::Gemini),
-            "bedrock" | "titan" => Ok(Self::Bedrock),
             "fixture" | "fake" => Ok(Self::Fixture),
             "embeddinggemma2" | "embeddinggemma-2" | "eg2" => Ok(Self::EmbeddingGemma2),
             "elastic" | "elasticsearch" => Ok(Self::Elastic),
@@ -614,7 +592,7 @@ impl FromStr for EmbedderKind {
             // reach the startup log.
             _ => Err(EmbedError::Unavailable(
                 "unknown embedder kind (value not shown; expected bge_m3 | candle | gemini | \
-                 bedrock | fixture | embeddinggemma2 | elastic)"
+                 fixture | embeddinggemma2 | elastic)"
                     .into(),
             )),
         }
@@ -627,7 +605,6 @@ impl std::fmt::Display for EmbedderKind {
             Self::BgeM3 => write!(f, "bge_m3"),
             Self::Candle => write!(f, "candle"),
             Self::Gemini => write!(f, "gemini"),
-            Self::Bedrock => write!(f, "bedrock"),
             Self::Fixture => write!(f, "fixture"),
             Self::EmbeddingGemma2 => write!(f, "embeddinggemma2"),
             Self::Elastic => write!(f, "elastic"),
@@ -1423,20 +1400,6 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
                 Err(missing_feature(EmbedderKind::Elastic))
             }
         }
-        EmbedderKind::Bedrock => {
-            #[cfg(feature = "embed-bedrock")]
-            {
-                Err(EmbedError::Unavailable(
-                    "embed-bedrock is enabled but the Bedrock embedder is not implemented yet; \
-                     account must also be authorizationStatus=AUTHORIZED"
-                        .into(),
-                ))
-            }
-            #[cfg(not(feature = "embed-bedrock"))]
-            {
-                Err(missing_feature(EmbedderKind::Bedrock))
-            }
-        }
     }
 }
 
@@ -1461,10 +1424,6 @@ mod tests {
         assert_eq!(
             "candle".parse::<EmbedderKind>().unwrap(),
             EmbedderKind::Candle
-        );
-        assert_eq!(
-            "bedrock".parse::<EmbedderKind>().unwrap(),
-            EmbedderKind::Bedrock
         );
         assert_eq!(
             "gemini".parse::<EmbedderKind>().unwrap(),
@@ -2127,8 +2086,6 @@ mod tests {
         }
         let w: Wrap = toml::from_str(r#"kind = "bge-m3""#).unwrap();
         assert_eq!(w.kind, EmbedderKind::BgeM3);
-        let w: Wrap = toml::from_str(r#"kind = "  titan  ""#).unwrap();
-        assert_eq!(w.kind, EmbedderKind::Bedrock);
         let w: Wrap = toml::from_str(r#"kind = "fake""#).unwrap();
         assert_eq!(w.kind, EmbedderKind::Fixture);
         let w: Wrap = toml::from_str(r#"kind = "vertex""#).unwrap();
@@ -2231,24 +2188,12 @@ mod tests {
     }
 
     #[test]
-    fn bedrock_fail_closed_no_silent_fallback() {
-        let r = build_embedder(EmbedderConfig {
-            kind: EmbedderKind::Bedrock,
-            dim: 1024,
-            llama_url: None,
-            llama_model: None,
-            ..Default::default()
-        });
-        let Err(err) = r else {
-            panic!("expected Unavailable, got Ok — silent fallback forbidden");
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("embed-bedrock") || msg.contains("not compiled"),
-            "msg={msg}"
-        );
-        assert!(!msg.to_ascii_lowercase().contains("fixture"));
-        assert!(!EmbedderKind::Bedrock.is_ready());
+    fn retired_bedrock_spellings_are_unknown() {
+        for kind in ["bedrock", "titan"] {
+            let input = format!("[embedder]\nkind = {kind:?}");
+            let err = crate::config::LamboFile::from_toml_str(&input).expect_err("retired kind");
+            assert!(err.to_string().contains("unknown embedder kind"), "{err}");
+        }
     }
 
     #[test]
@@ -2484,7 +2429,6 @@ mod tests {
         assert_eq!(EmbedderKind::Candle.feature_name(), "embed-candle");
         assert_eq!(EmbedderKind::Fixture.feature_name(), "embed-fixture");
         assert_eq!(EmbedderKind::Gemini.feature_name(), "embed-gemini");
-        assert_eq!(EmbedderKind::Bedrock.feature_name(), "embed-bedrock");
         assert_eq!(EmbedderKind::EmbeddingGemma2.feature_name(), "embed-eg2");
         assert_eq!(EmbedderKind::Elastic.feature_name(), "embed-elastic");
     }

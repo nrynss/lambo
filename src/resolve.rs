@@ -1373,7 +1373,7 @@ mod tests {
         assert_eq!(resolved.embedding.kind, "bge_m3");
         assert_eq!(resolved.embedding.model.as_deref(), Some("@cf/baai/bge-m3"));
         resolved.embedder.embed("user schema").await.unwrap();
-        authed.assert_hits(1);
+        authed.assert_calls(1);
 
         let plain = dir.join("plain.toml");
         std::fs::write(
@@ -1387,8 +1387,8 @@ mod tests {
         let resolved = resolve_from_config_path(Some(&plain)).expect("resolve without token");
         let err = resolved.embedder.embed("user schema").await.unwrap_err();
         assert!(err.to_string().contains("401"), "{err}");
-        authed.assert_hits(1);
-        unauthed.assert_hits(1);
+        authed.assert_calls(1);
+        unauthed.assert_calls(1);
     }
     #[test]
     fn vector_compat_none_store_accepts_any_positive_dim() {
@@ -1859,8 +1859,8 @@ mod tests {
             dim: 1024,
         };
         let b = EmbeddingContract {
-            kind: "bedrock".into(),
-            model: Some("titan-v2".into()),
+            kind: "gemini".into(),
+            model: Some("gemini-embedding-001".into()),
             dim: 1024,
         };
         assert!(a.ensure_compatible(&b).is_err());

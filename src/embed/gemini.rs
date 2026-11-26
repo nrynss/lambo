@@ -1,7 +1,7 @@
 //! Vertex Gemini embeddings (`gemini-embedding-001`) over Google's REST `embedContent`.
 //!
 //! This adapter authenticates as a Google principal. With a service-account key it mints an
-//! RS256 JSON Web Token (`jsonwebtoken::EncodingKey::from_rsa_pem` on the private key PEM)
+//! RS256 JSON Web Token (ring signs with the service-account RSA key)
 //! whose claims are `{ iss: client_email, scope, aud, iat, exp }` and exchanges it for an
 //! OAuth `access_token` (a `jwt-bearer` grant); with an authorized-user ADC file it uses the
 //! `refresh_token` grant. It caches the token until roughly a minute before `expires_in`, then
@@ -284,7 +284,7 @@ mod tests {
                 token: "tok".to_string(),
             }),
             format!("{}/embedContent", server.base_url()),
-            reqwest::Client::new(),
+            crate::http_client::test_client(),
         )
         .unwrap()
     }
@@ -312,9 +312,9 @@ mod tests {
                 // A3-R1-3 + live probe: pin the real schema (parts.text) and the width so
                 // neither the outputDimensionality omission nor the request-body regression
                 // can silently return.
-                .body_contains("\"outputDimensionality\":768")
-                .body_contains("\"parts\"")
-                .body_contains("\"text\"");
+                .body_includes("\"outputDimensionality\":768")
+                .body_includes("\"parts\"")
+                .body_includes("\"text\"");
             then.status(200).json_body(serde_json::json!({
                 "embedding": { "values": sample_embedding() }
             }));
@@ -354,7 +354,7 @@ mod tests {
                 token: "tok".to_string(),
             }),
             "http://127.0.0.1:9/embedContent",
-            reqwest::Client::new(),
+            crate::http_client::test_client(),
         )
         .unwrap();
         let err = e.embed("hello").await.unwrap_err();
@@ -450,7 +450,7 @@ mod tests {
                 token: "tok".to_string(),
             }),
             "http://127.0.0.1:9/embedContent",
-            reqwest::Client::new(),
+            crate::http_client::test_client(),
         )
         .unwrap();
         assert_eq!(e.model_identity(), "gemini-embedding-001");

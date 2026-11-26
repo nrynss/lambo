@@ -155,8 +155,6 @@
 //! the scoring and recall weights, and every stage constant in `src/canon`
 //! (`gc_survived >= 3`, at least two other dependent interactions,
 //! `distinct >= 3`, `coverage >= 0.3`, `blast_radius > 5`).
-//! `canonization_min_peer_count` (20) is also left at its default, but no
-//! stage reads it since #36 PR 3.
 //!
 //! # Fresh sessions (P6 review R3-1)
 //!

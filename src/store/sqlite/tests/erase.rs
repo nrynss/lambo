@@ -23,9 +23,9 @@ fn holder(agent: &str, pid: u32) -> LeaseHolder {
 }
 
 async fn rows(store: &SqliteStore, table: &str, sid: &SessionId) -> i64 {
-    sqlx::query_scalar(&format!(
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM {table} WHERE session_id = ?1"
-    ))
+    )))
     .bind(&sid.0)
     .fetch_one(store.pool())
     .await

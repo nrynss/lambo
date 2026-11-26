@@ -219,7 +219,7 @@ fn only_a_sessionless_post_opens_a_new_session() {
 }
 
 /// #32 PR 5 review S1: "opens a new MCP session" is read the way rmcp
-/// 3.1.2 reads the request. rmcp mints a session for a POST whose
+/// 3.11.0 reads the request. rmcp mints a session for a POST whose
 /// `Mcp-Session-Id` is absent *or* not visible ASCII (`to_str` fails), and
 /// it never reads `Last-Event-ID` on a POST. Mutation: restore the
 /// `Last-Event-ID` exemption, or test the header for presence, and this

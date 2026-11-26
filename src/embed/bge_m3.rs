@@ -283,7 +283,7 @@ pub(crate) fn build_client(
     connect: Duration,
     request: Duration,
 ) -> Result<reqwest::Client, EmbedError> {
-    let mut builder = reqwest::Client::builder()
+    let mut builder = crate::http_client::builder()
         .connect_timeout(connect)
         .timeout(request)
         .redirect(reqwest::redirect::Policy::none());
@@ -819,8 +819,8 @@ mod tests {
         // Absent by default: no `dimensions` key in the body.
         let server = MockServer::start();
         let no_dims = server.mock(|when, then| {
-            when.method(POST).path("/v1/embeddings").matches(|r| {
-                let body = r.body.as_deref().unwrap_or(&[]);
+            when.method(POST).path("/v1/embeddings").is_true(|r| {
+                let body = r.body_ref();
                 !String::from_utf8_lossy(body).contains("dimensions")
             });
             then.status(200).json_body(ok_response());
@@ -836,8 +836,8 @@ mod tests {
         // still embeds (the truncated width is what `dim` expects).
         let server = MockServer::start();
         let with_dims = server.mock(|when, then| {
-            when.method(POST).path("/v1/embeddings").matches(|r| {
-                let body = String::from_utf8_lossy(r.body.as_deref().unwrap_or(&[]));
+            when.method(POST).path("/v1/embeddings").is_true(|r| {
+                let body = String::from_utf8_lossy(r.body_ref());
                 body.contains("\"dimensions\":1024")
             });
             then.status(200).json_body(ok_response());
@@ -1058,8 +1058,8 @@ mod tests {
         // A request WITHOUT the configured model must NEVER be sent (CON-2: the
         // old fallback silently embedded in the server-default space).
         let default_model_mock = server.mock(|when, then| {
-            when.method(POST).path("/v1/embeddings").matches(|r| {
-                let body = r.body.as_deref().unwrap_or(&[]);
+            when.method(POST).path("/v1/embeddings").is_true(|r| {
+                let body = r.body_ref();
                 !String::from_utf8_lossy(body).contains("\"model\"")
             });
             then.status(200).json_body(ok_response());
@@ -1076,7 +1076,7 @@ mod tests {
             err.to_string().contains("my-model"),
             "the error must name the configured model: {err}"
         );
-        default_model_mock.assert_hits(0);
+        default_model_mock.assert_calls(0);
     }
 
     #[tokio::test]
@@ -1154,9 +1154,7 @@ mod tests {
     const FAKE_TOKEN: &str = "fake-xyzzy-embed-token";
 
     fn has_authorization(r: &httpmock::prelude::HttpMockRequest) -> bool {
-        r.headers
-            .as_deref()
-            .unwrap_or_default()
+        r.headers_vec()
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
     }
@@ -1188,7 +1186,7 @@ mod tests {
         let with_auth = server.mock(|when, then| {
             when.method(POST)
                 .path("/v1/embeddings")
-                .matches(has_authorization);
+                .is_true(has_authorization);
             then.status(500).body("an Authorization header was sent");
         });
         let without = server.mock(|when, then| {
@@ -1197,7 +1195,7 @@ mod tests {
         });
         let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
         e.embed("user schema").await.unwrap();
-        with_auth.assert_hits(0);
+        with_auth.assert_calls(0);
         without.assert();
     }
 
@@ -1409,7 +1407,7 @@ mod tests {
                 .with_bearer_token(FAKE_TOKEN)
                 .unwrap();
             let err = e.embed("anything").await.unwrap_err();
-            target.assert_hits(0);
+            target.assert_calls(0);
             assert!(matches!(err, EmbedError::Backend(_)), "{code}: {err:?}");
             let msg = err.to_string();
             assert!(msg.contains(&code.to_string()), "{code}: {msg}");

@@ -374,11 +374,12 @@ async fn init_schema_converges_pre_d_event_time_and_human_confirmed() {
         ("concepts", "human_confirmed"),
         ("sessions", "closed_at"),
     ] {
-        let cols: Vec<String> =
-            sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
-                .fetch_all(store.pool())
-                .await
-                .unwrap();
+        let cols: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT name FROM pragma_table_info('{table}')"
+        )))
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
         assert!(
             cols.iter().any(|c| c == want),
             "{want} must be added to a pre-existing {table} table"

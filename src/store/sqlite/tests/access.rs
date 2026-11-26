@@ -222,7 +222,7 @@ fn the_access_update_sql_is_narrow_and_monotonic() {
             last_accessed: at,
         },
     ];
-    let sql = update_accesses_query(&rows).sql().to_string();
+    let sql = update_accesses_query(&rows).sql().as_str().to_string();
     let set = &sql[sql.find(" SET ").unwrap()..sql.find(" FROM ").unwrap()];
     assert_eq!(set.matches(" = ").count(), 2, "{sql}");
     assert!(

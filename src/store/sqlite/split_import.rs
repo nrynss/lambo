@@ -200,11 +200,12 @@ async fn check_ownership(
         receipted.insert(session);
     }
     for table in SESSION_TABLES {
-        let sessions: Vec<String> =
-            sqlx::query_scalar(&format!("SELECT DISTINCT session_id FROM {table}"))
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(|e| db_err("split: list destination sessions", e))?;
+        let sessions: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT DISTINCT session_id FROM {table}"
+        )))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| db_err("split: list destination sessions", e))?;
         if sessions.iter().any(|s| !receipted.contains(s)) {
             return Err(refused(format!(
                 "its {table} table holds rows of a session without a receipt of this split"
@@ -260,7 +261,7 @@ async fn check_ids_free(
         for chunk in ids.chunks(400) {
             let marks = vec!["?"; chunk.len()].join(", ");
             let sql = format!("SELECT count(*) FROM {table} WHERE id IN ({marks})");
-            let mut q = sqlx::query_scalar::<_, i64>(&sql);
+            let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql));
             for id in chunk {
                 q = q.bind(id);
             }

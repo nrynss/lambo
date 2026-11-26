@@ -1611,11 +1611,10 @@ mod tests {
                 (output, queries)
             }
 
-            fn tampered(output: &Path, name: &str, sql: &str) -> PathBuf {
+            fn tampered(output: &Path, name: &str, sql: &'static str) -> PathBuf {
                 let copy = output.with_file_name(name);
                 std::fs::copy(output, &copy).unwrap();
                 let rt = tokio::runtime::Handle::current();
-                let sql = sql.to_owned();
                 let path = copy.clone();
                 std::thread::spawn(move || {
                     rt.block_on(async move {
@@ -1626,7 +1625,7 @@ mod tests {
                             .connect()
                             .await
                             .unwrap();
-                        sqlx::query(&sql).execute(&mut conn).await.unwrap();
+                        sqlx::query(sql).execute(&mut conn).await.unwrap();
                         conn.close().await.unwrap();
                     })
                 })

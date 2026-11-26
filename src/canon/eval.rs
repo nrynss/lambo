@@ -153,15 +153,6 @@ pub struct Evaluator {
 /// Knobs for one [`eval_cycle`]. Defaults match [`crate::Config`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalParams {
-    /// **Inert since #36 PR 3.** Swarm's Stage 1 used to need this many
-    /// non-Canonical peers before its P90 cut opened; evidence-led admission
-    /// has no peer minimum and no policy reads the field. Kept so existing
-    /// callers compile; [`crate::Config::warnings`] names a non-default value.
-    #[deprecated(
-        since = "0.6.0",
-        note = "inert since #36 PR 3: Stage 1 admits on evidence with no peer minimum"
-    )]
-    pub min_peer_count: usize,
     /// Age floor for Stage 1's dependent interactions and Stage 2's
     /// `interaction_span_with_window`.
     pub min_age: Duration,
@@ -263,10 +254,8 @@ impl From<EvalError> for LamboError {
 impl EvalParams {
     // Copies the deprecated inert field so library callers that still read
     // it see the configured value.
-    #[allow(deprecated)]
     pub fn from_config(config: &crate::Config) -> Self {
         Self {
-            min_peer_count: config.canonization_min_peer_count,
             min_age: config.canonization_edge_min_age,
             coverage_window: config.canonization_coverage_window,
             min_edge_age: config.canonization_edge_min_age,

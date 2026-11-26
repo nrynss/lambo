@@ -323,22 +323,23 @@ By model. Each is a claim the page makes that today rests on a test or the code.
   exclusion is the process's (T-02); dependency-question anchor resolution
   (Q-06 to Q-20), which `Dispatch.lean` takes as an input.
 
-## Re-verify on the rmcp bump (#332)
+## Re-verify on an rmcp bump (#352)
 
-These sentences describe rmcp 3.1.2, the MCP library, rather than Lambo's own
-code. Check each again when rmcp is upgraded.
+The reference relies on these rmcp behaviors. Rechecked against the 3.11.0
+source for #352. Check each again when rmcp is upgraded.
 
 - Errors table, first row: "a value of the wrong type is described by its
   type, not by its field" (T-64b). rmcp passes the arguments to a plain
-  `serde_json::from_value` (`src/handler/server/tool.rs`, `Parameters`).
+  `serde_json::from_value` (`src/handler/server/tool.rs`, the `Parameters` extractor).
 - `lambo_derive_image`, *Lambo's refusals never repeat your payload*: "that
   error quotes the value back to the caller" (D-143). Same serde path.
 - Errors intro: "Parameter errors are tool results too." rmcp turns an
   argument deserialization failure into an `isError` result
-  (`into_tool_argument_error` in `src/handler/server/router/tool.rs`); an
+  (`into_tool_argument_error` in `src/handler/server/router/tool.rs`). An
   unknown tool stays a JSON-RPC error ("tool not found", T-62).
 - `lambo_derive_image` intro: "the MCP library logs every request it receives at
-  debug level" (D-131b).
+  debug level" (D-131b). The dispatcher in `src/service.rs` still logs
+  `?request` on receipt of a tool request.
 
 ## Claims table
 

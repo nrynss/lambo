@@ -53,7 +53,7 @@ use std::time::Instant;
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use crate::ledger::Ledger;
@@ -502,11 +502,11 @@ impl ServerHandler for LamboServer {
         trace::with_caller(caller, auth, self.tool_router.call(call)).await
     }
 
-    fn get_info(&self) -> ServerInfo {
-        // `ServerInfo` / `Implementation` are `#[non_exhaustive]`: start from
+    fn get_info(&self) -> ServerConfig {
+        // `ServerConfig` / `Implementation` are `#[non_exhaustive]`: start from
         // the SDK's default (which carries the negotiated protocol version) and
         // set only what is ours.
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("lambo", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(format!(

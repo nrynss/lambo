@@ -100,8 +100,8 @@ async fn text_bodies_are_byte_exact_with_the_role_prefix() {
     let e = embedder(&server);
     let d = e.embed("red dress").await.unwrap();
     let q = e.embed_query("red dress").await.unwrap();
-    doc.assert_hits(1);
-    query.assert_hits(1);
+    doc.assert_calls(1);
+    query.assert_calls(1);
     assert_eq!(d.len(), 768);
     assert!((norm(&d) - 1.0).abs() < 1e-5);
     assert!((norm(&q) - 1.0).abs() < 1e-5);
@@ -121,7 +121,7 @@ async fn the_image_body_is_the_nested_image_url_data_uri() {
     });
     let input = crate::surface::image::validate(&png, "image/png").unwrap();
     let v = embedder(&server).embed_image(input).await.unwrap();
-    mock.assert_hits(1);
+    mock.assert_calls(1);
     assert_eq!(v.len(), 768);
     assert!((norm(&v) - 1.0).abs() < 1e-5);
 }
@@ -166,7 +166,7 @@ async fn the_image_body_carries_the_canonical_form() {
         let input = crate::surface::image::validate(bytes, mime).unwrap();
         let sha = input.sha256();
         let v = embedder(&server).embed_image(input).await.unwrap();
-        mock.assert_hits(1);
+        mock.assert_calls(1);
         assert_eq!(v.len(), 768);
         // What Lambo stores about the image still describes the submitted
         // bytes, not the canonical ones.
@@ -198,7 +198,7 @@ async fn an_unreadable_header_never_reaches_the_server() {
     let err = embedder(&server).embed_image(input).await.unwrap_err();
     assert!(matches!(&err, EmbedError::Unreadable(_)), "{err:?}");
     assert!(!err.is_transient());
-    any.assert_hits(0);
+    any.assert_calls(0);
 }
 
 /// An image whose data Lambo cannot decode never reaches the embeddings
@@ -222,7 +222,7 @@ async fn an_undecodable_large_image_never_reaches_the_server() {
         "{err:?}"
     );
     assert!(!err.is_transient());
-    embeddings.assert_hits(0);
+    embeddings.assert_calls(0);
 }
 
 /// The server and budget checks run before the full decode (22g review L4):
@@ -254,7 +254,7 @@ async fn the_server_is_checked_before_the_image_is_decoded() {
     let input = crate::surface::image::validate(&png, "image/png").unwrap();
     let err = embedder(&server).embed_image(input).await.unwrap_err();
     assert!(err.to_string().contains("reference image"), "{err}");
-    reference.assert_hits(1);
+    reference.assert_calls(1);
 }
 
 /// Empty text is refused before any request, like every other adapter.
@@ -276,7 +276,7 @@ async fn empty_text_is_refused_without_a_request() {
             Err(EmbedError::Unavailable(_))
         ));
     }
-    mock.assert_hits(0);
+    mock.assert_calls(0);
 }
 
 // ---------------------------------------------------------------- MRL
@@ -518,11 +518,11 @@ async fn a_verified_server_is_checked_with_the_reference_image() {
             }
         }
         if accepted {
-            reference.assert_hits(1);
-            image.assert_hits(2);
+            reference.assert_calls(1);
+            image.assert_calls(2);
         } else {
-            reference.assert_hits(2);
-            image.assert_hits(0);
+            reference.assert_calls(2);
+            image.assert_calls(0);
         }
     }
 }
@@ -546,13 +546,13 @@ async fn a_verified_server_without_the_token_count_refuses_images() {
     let image_post = server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body_contains("image_url");
+            .body_includes("image_url");
         then.status(200).json_body(ok_body(&native(), None));
     });
     server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body_contains("text: ");
+            .body_includes("text: ");
         then.status(200).json_body(ok_body(&native(), None));
     });
     let e = embedder(&server);
@@ -567,7 +567,7 @@ async fn a_verified_server_without_the_token_count_refuses_images() {
         "the build is named: {msg}"
     );
     // Only the reference was sent, not the image.
-    image_post.assert_hits(1);
+    image_post.assert_calls(1);
     e.embed("text still works").await.unwrap();
 
     // Not verified (a hosted endpoint): no reference, no count needed.
@@ -578,7 +578,7 @@ async fn a_verified_server_without_the_token_count_refuses_images() {
     });
     let input = crate::surface::image::validate(&png, "image/png").unwrap();
     embedder(&hosted).embed_image(input).await.unwrap();
-    hosted_post.assert_hits(1);
+    hosted_post.assert_calls(1);
 }
 
 // ---------------------------------------------------------------- images = false
@@ -601,7 +601,7 @@ async fn images_off_reports_text_only_and_never_sends_an_image() {
     let err = off.embed_image(input).await.unwrap_err();
     assert!(matches!(err, EmbedError::Unsupported(_)), "{err:?}");
     assert!(err.to_string().contains("images = false"), "{err}");
-    mock.assert_hits(0);
+    mock.assert_calls(0);
     assert!(off.embed("still embeds text").await.is_ok());
 }
 
@@ -631,7 +631,7 @@ async fn a_matching_server_is_verified_once() {
         e.check_server().await,
         Eg2ServerCheck::Verified { vision: Some(true) }
     );
-    props_mock.assert_hits(1);
+    props_mock.assert_calls(1);
 }
 
 /// Another model behind the EG2 kind (EmbeddingGemma 1, BGE-M3) or another
@@ -668,8 +668,8 @@ async fn a_mismatched_server_refuses_every_embed_until_fixed() {
         let png = png_1x1();
         let input = crate::surface::image::validate(&png, "image/png").unwrap();
         assert!(e.embed_image(input).await.is_err());
-        post.assert_hits(0);
-        bad.assert_hits(3);
+        post.assert_calls(0);
+        bad.assert_calls(3);
 
         bad.delete();
         server.mock(|when, then| {
@@ -678,7 +678,7 @@ async fn a_mismatched_server_refuses_every_embed_until_fixed() {
                 .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
         });
         e.embed("x").await.unwrap();
-        post.assert_hits(1);
+        post.assert_calls(1);
     }
 }
 
@@ -696,13 +696,13 @@ async fn a_server_without_vision_refuses_images_but_embeds_text() {
     let image_post = server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body_contains("image_url");
+            .body_includes("image_url");
         then.status(200).json_body(ok_body(&native(), Some(293)));
     });
     server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body_contains("text: ");
+            .body_includes("text: ");
         then.status(200).json_body(ok_body(&native(), Some(5)));
     });
     let e = embedder(&server);
@@ -710,13 +710,13 @@ async fn a_server_without_vision_refuses_images_but_embeds_text() {
     e.embed("still works, without asking /props again")
         .await
         .unwrap();
-    text_only.assert_hits(1);
+    text_only.assert_calls(1);
     let png = png_1x1();
     let input = crate::surface::image::validate(&png, "image/png").unwrap();
     let err = e.embed_image(input).await.unwrap_err();
     assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
     assert!(err.to_string().contains("--mmproj"), "{err}");
-    image_post.assert_hits(0);
+    image_post.assert_calls(0);
 
     // With images off the same server is fine for everything it is asked.
     let off = embedder(&server).with_images(false);
@@ -731,7 +731,7 @@ async fn a_server_without_vision_refuses_images_but_embeds_text() {
     let input = crate::surface::image::validate(&png, "image/png").unwrap();
     e.embed_image(input).await.unwrap();
     // The reference image, then the image itself.
-    image_post.assert_hits(2);
+    image_post.assert_calls(2);
 }
 
 /// A server that does not answer `/props` with a model (a 404 from a hosted
@@ -758,7 +758,7 @@ async fn an_endpoint_without_props_is_used_unchecked() {
         e.embed("a").await.unwrap();
         e.embed("b").await.unwrap();
         assert_eq!(e.check_server().await, Eg2ServerCheck::NotExposed, "{body}");
-        props_mock.assert_hits(1);
+        props_mock.assert_calls(1);
     }
 
     let server = MockServer::start();
@@ -773,13 +773,13 @@ async fn an_endpoint_without_props_is_used_unchecked() {
     let e = embedder(&server);
     e.embed("a").await.unwrap();
     e.embed("b").await.unwrap();
-    props_mock.assert_hits(1);
+    props_mock.assert_calls(1);
 
     // Turned off, nothing is asked.
     let skipped = embedder(&server).without_server_check();
     assert_eq!(skipped.check_server().await, Eg2ServerCheck::Skipped);
     skipped.embed("c").await.unwrap();
-    props_mock.assert_hits(1);
+    props_mock.assert_calls(1);
 }
 
 /// A `llama-server` restarted on the same URL with another model or another
@@ -808,8 +808,8 @@ async fn a_server_swapped_after_verification_is_caught_at_the_recheck() {
         let e = embedder(&server).with_props_recheck(Duration::ZERO);
         e.embed("a").await.unwrap();
         e.embed("b").await.unwrap();
-        good.assert_hits(2);
-        post.assert_hits(2);
+        good.assert_calls(2);
+        post.assert_calls(2);
 
         good.delete();
         server.mock(|when, then| {
@@ -819,7 +819,7 @@ async fn a_server_swapped_after_verification_is_caught_at_the_recheck() {
         let err = e.embed("c").await.unwrap_err();
         assert!(matches!(err, EmbedError::Backend(_)), "{file}: {err:?}");
         assert!(err.to_string().contains(needle), "{file}: {err}");
-        post.assert_hits(2);
+        post.assert_calls(2);
     }
 }
 
@@ -843,7 +843,7 @@ async fn an_unavailable_embed_forces_a_recheck() {
     });
     let e = embedder(&server);
     e.embed("a").await.unwrap();
-    good.assert_hits(1);
+    good.assert_calls(1);
 
     // The server goes down and comes back as BGE-M3 at 768 dims... or any
     // other model; the embed in between fails as unavailable.
@@ -860,7 +860,7 @@ async fn an_unavailable_embed_forces_a_recheck() {
     });
     let err = e.embed("b").await.unwrap_err();
     assert!(err.is_transient(), "{err:?}");
-    swapped.assert_hits(0);
+    swapped.assert_calls(0);
     loading.delete();
     let post = server.mock(|when, then| {
         when.method(POST).path("/v1/embeddings");
@@ -870,8 +870,8 @@ async fn an_unavailable_embed_forces_a_recheck() {
     let err = e.embed("c").await.unwrap_err();
     assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
     assert!(err.to_string().contains("does not name"), "{err}");
-    swapped.assert_hits(1);
-    post.assert_hits(0);
+    swapped.assert_calls(1);
+    post.assert_calls(0);
 }
 
 /// A server whose decoder refuses Lambo's 1x1 reference PNG is reported as a
@@ -916,8 +916,8 @@ async fn a_refused_reference_image_is_a_server_problem() {
             "{msg}"
         );
         assert!(!msg.contains("could not decode this image"), "{msg}");
-        reference.assert_hits(1);
-        image.assert_hits(0);
+        reference.assert_calls(1);
+        image.assert_calls(0);
     }
 }
 
@@ -971,8 +971,8 @@ async fn a_busy_server_keeps_its_checks_and_only_a_restart_drops_them() {
         then.status(200).json_body(ok_body(&native(), Some(260)));
     });
     e.embed_image(input()).await.unwrap();
-    props_mock.assert_hits(1);
-    reference.assert_hits(1);
+    props_mock.assert_calls(1);
+    reference.assert_calls(1);
 
     // A connection that gets no HTTP answer (the server is gone) and the
     // loading 503 both read as a restart.
@@ -1039,14 +1039,14 @@ async fn a_verified_server_that_stops_answering_props_is_held_back() {
         "{err}"
     );
     gone.delete();
-    post.assert_hits(1);
+    post.assert_calls(1);
 
     server.mock(|when, then| {
         when.method(GET).path("/props");
         then.status(200).json_body(good_props);
     });
     e.embed("d").await.unwrap();
-    post.assert_hits(2);
+    post.assert_calls(2);
 }
 
 /// A `/props` that answers 5xx (a gateway that routes only the embeddings
@@ -1074,15 +1074,15 @@ async fn a_props_check_that_cannot_run_backs_off_and_logs_once() {
     for text in ["a", "b", "c", "d"] {
         e.embed(text).await.unwrap();
     }
-    props_mock.assert_hits(1);
-    post.assert_hits(4);
+    props_mock.assert_calls(1);
+    post.assert_calls(4);
 
     // With no wait every embed asks, and the run is still logged once.
     let eager = embedder(&server).with_props_retry(Duration::ZERO);
     for text in ["a", "b", "c"] {
         eager.embed(text).await.unwrap();
     }
-    props_mock.assert_hits(4);
+    props_mock.assert_calls(4);
     let lines: Vec<String> = logs
         .lines()
         .into_iter()
@@ -1121,8 +1121,8 @@ async fn the_props_check_carries_the_bearer_token() {
         .with_bearer_token("eg2-test-placeholder")
         .unwrap();
     e.embed("x").await.unwrap();
-    props_mock.assert_hits(1);
-    post.assert_hits(1);
+    props_mock.assert_calls(1);
+    post.assert_calls(1);
     assert!(!format!("{e:?}").contains("eg2-test-placeholder"));
 }
 
@@ -1470,7 +1470,7 @@ async fn a_recall_by_image_sends_the_canonical_form() {
     };
     let input = crate::surface::image::validate(&png, "image/png").unwrap();
     let v = resolve(QueryBy::Image(input), &e, &live).await.unwrap();
-    mock.assert_hits(1);
+    mock.assert_calls(1);
     assert_eq!(v.len(), 768);
     assert!((norm(&v) - 1.0).abs() < 1e-5);
 
@@ -1487,5 +1487,5 @@ async fn a_recall_by_image_sends_the_canonical_form() {
         msg.starts_with("Lambo could not read the query image"),
         "{msg}"
     );
-    mock.assert_hits(1);
+    mock.assert_calls(1);
 }

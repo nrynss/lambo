@@ -200,7 +200,12 @@ impl ElasticRecall {
             .timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(DEFAULT_TIMEOUT);
-        let client = build_client(reqwest::Client::builder(), &base, auth.is_some(), timeout)?;
+        let client = build_client(
+            crate::http_client::builder(),
+            &base,
+            auth.is_some(),
+            timeout,
+        )?;
         Ok(Self {
             client,
             base,
@@ -946,8 +951,8 @@ mod tests {
         assert!(!text.contains("signed-target-xyzzy"), "no target: {text}");
         assert!(!text.contains("elsewhere"), "no target: {text}");
         assert!(!text.contains(&fake), "no key: {text}");
-        redirect.assert_hits_async(1).await;
-        target.assert_hits_async(0).await;
+        redirect.assert_calls_async(1).await;
+        target.assert_calls_async(0).await;
     }
 
     /// Mutation: make `bypasses_env_proxy` always false, or ignore `keyed`
@@ -993,7 +998,7 @@ mod tests {
         drop(dead);
         let base = Url::parse(&server.base_url()).unwrap();
         let client = |keyed| {
-            let proxied = reqwest::Client::builder().proxy(reqwest::Proxy::all(&proxy).unwrap());
+            let proxied = crate::http_client::builder().proxy(reqwest::Proxy::all(&proxy).unwrap());
             build_client(proxied, &base, keyed, Duration::from_secs(2)).unwrap()
         };
         let resp = client(true)
@@ -1008,7 +1013,7 @@ mod tests {
             .send()
             .await
             .expect_err("without a key the proxy (a closed port) is used");
-        mock.assert_hits_async(1).await;
+        mock.assert_calls_async(1).await;
     }
 
     /// Pre-existing (found in #233 review): the tier quoted `error.reason`
@@ -1103,9 +1108,9 @@ mod tests {
                     .path("/_bulk")
                     .query_param("refresh", "false")
                     .header("content-type", "application/x-ndjson")
-                    .body_contains("\"version_type\":\"external\"")
-                    .body_contains(format!("\"_index\":\"{name}\""))
-                    .body_contains("\"version\":4294967297");
+                    .body_includes("\"version_type\":\"external\"")
+                    .body_includes(format!("\"_index\":\"{name}\""))
+                    .body_includes("\"version\":4294967297");
                 then.status(200).json_body(json!({
                     "errors": true,
                     "items": [
@@ -1190,7 +1195,7 @@ mod tests {
             .mock_async(|when, then| {
                 when.method(POST)
                     .path(format!("/{name}/_search"))
-                    .json_body_partial(
+                    .json_body_includes(
                         json!({
                             "knn": {
                                 "field": "embedding",
@@ -1291,8 +1296,8 @@ mod tests {
             .write_marker(&sid, SyncMarker { synced_epoch: 3 }, Some(9))
             .await
             .unwrap();
-        put.assert_hits_async(2).await;
-        create.assert_hits_async(1).await;
+        put.assert_calls_async(2).await;
+        create.assert_calls_async(1).await;
 
         let get = server
             .mock_async(|when, then| {
@@ -1369,7 +1374,7 @@ mod tests {
                 when.method(POST)
                     .path("/lambo-v-*/_delete_by_query")
                     .query_param("conflicts", "proceed")
-                    .json_body_partial(
+                    .json_body_includes(
                         json!({ "query": { "bool": { "filter": [
                             { "term": { "session_id": "s" } },
                             { "range": { "v": { "lt": 12 } } }
@@ -1489,21 +1494,23 @@ mod tests {
         let name = index.index_name(&contract());
         let create = server
             .mock_async(|when, then| {
-                when.method(PUT).path(format!("/{name}")).json_body_partial(
-                    json!({ "mappings": { "properties": {
+                when.method(PUT)
+                    .path(format!("/{name}"))
+                    .json_body_includes(
+                        json!({ "mappings": { "properties": {
                         "embedding": { "type": "dense_vector", "dims": 2,
                                        "index": true, "similarity": "cosine",
                                        "index_options": { "type": "hnsw" } },
                         "session_id": { "type": "keyword" }
                     } } })
-                    .to_string(),
-                );
+                        .to_string(),
+                    );
                 then.status(200).json_body(json!({ "acknowledged": true }));
             })
             .await;
         index.ensure_index(&contract()).await.unwrap();
         index.ensure_index(&contract()).await.unwrap();
-        create.assert_hits_async(1).await;
+        create.assert_calls_async(1).await;
     }
 
     #[tokio::test]

@@ -163,13 +163,13 @@ impl<D: Dialect> PgStore<D> {
     /// Camera-proofs EXPLAIN this string, not a hand-copied lookalike.
     #[cfg(all(test, feature = "store-postgres"))]
     pub(crate) fn vector_candidates_sql(&self) -> &str {
-        &self.sql.vector_candidates
+        self.sql.vector_candidates.as_str()
     }
 
     /// Session-scoped fallback of [`Self::vector_candidates_sql`].
     #[cfg(all(test, feature = "store-postgres"))]
     pub(crate) fn session_vector_candidates_sql(&self) -> &str {
-        &self.sql.session_vector_candidates
+        self.sql.session_vector_candidates.as_str()
     }
 
     pub(super) async fn legacy_vector_candidates(
@@ -224,7 +224,7 @@ impl<D: Dialect> VectorCandidateSource for PgStore<D> {
         // fallback, and commit as one unit.
         tx_retry(|| async {
             let mut tx = pool.begin().await.map_err(backend)?;
-            let Some(contract_row) = sqlx::query(&self.sql.select_session)
+            let Some(contract_row) = sqlx::query(self.sql.select_session.clone())
                 .bind(session.as_str())
                 .fetch_optional(&mut *tx)
                 .await
@@ -265,7 +265,7 @@ impl<D: Dialect> VectorCandidateSource for PgStore<D> {
                 let fetch = i64::try_from(fetch).map_err(|_| {
                     StoreError::Invariant("vector fetch window does not fit i64".into())
                 })?;
-                let rows = sqlx::query(&self.sql.vector_candidates)
+                let rows = sqlx::query(self.sql.vector_candidates.clone())
                     .bind(&probe)
                     .bind(fetch)
                     .fetch_all(&mut *tx)
@@ -297,7 +297,7 @@ impl<D: Dialect> VectorCandidateSource for PgStore<D> {
                     let exact_limit = i64::try_from(limit).map_err(|_| {
                         StoreError::Invariant("vector candidate limit does not fit i64".into())
                     })?;
-                    let fallback_rows = sqlx::query(&self.sql.session_vector_candidates)
+                    let fallback_rows = sqlx::query(self.sql.session_vector_candidates.clone())
                         .bind(&probe)
                         .bind(session.as_str())
                         .bind(exact_limit)

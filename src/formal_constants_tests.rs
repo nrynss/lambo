@@ -813,28 +813,15 @@ fn resolve() {
             .to::<usize>()
     );
 
-    // EmbedderKind.implemented: every kind but Bedrock, pinned as
-    // `has_adapter` in every build (no CI row compiles `embed-bedrock`, so
-    // `is_ready` alone would compare false with false for it).
-    let implemented = lean.table("EmbedderKind.implemented", "EmbedderKind → Bool");
     let (ctor, listed) = lean_ctors!(EmbedderKind {
         BgeM3 => "bgeM3",
         Candle => "candle",
         Gemini => "gemini",
-        Bedrock => "bedrock",
         Fixture => "fixture",
         EmbeddingGemma2 => "eg2",
         Elastic => "elastic",
     });
-    implemented.check_names(&listed.map(ctor));
-    for kind in listed {
-        assert_pin!(kind.has_adapter(), implemented.at(ctor(kind)).bool());
-        assert_eq!(
-            kind.is_ready(),
-            kind.is_compiled() && kind.has_adapter(),
-            "{kind:?}"
-        );
-    }
+    lean.check_ctors("EmbedderKind", &listed.map(ctor));
 
     let pg_max_width = lean.def("pgMaxWidth", "Nat").nat().to::<usize>();
     #[cfg(feature = "store-postgres")]

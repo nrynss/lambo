@@ -32,7 +32,7 @@ pub(super) async fn ensure_column(
     pool: &SqlitePool,
     table: &str,
     column: &str,
-    alter_ddl: &str,
+    alter_ddl: &'static str,
 ) -> Result<(), StoreError> {
     if !column_present(pool, table, column).await? {
         add_column(pool, table, column, alter_ddl).await?;
@@ -61,7 +61,7 @@ pub(super) async fn add_column(
     pool: &SqlitePool,
     table: &str,
     column: &str,
-    alter_ddl: &str,
+    alter_ddl: &'static str,
 ) -> Result<(), StoreError> {
     match sqlx::query(alter_ddl).execute(pool).await {
         Ok(_) => Ok(()),
@@ -86,14 +86,17 @@ impl SqliteStore {
 
         // Both timestamp columns are authoritative DDL metadata. Historical
         // partial session tables must converge before the loader reads them.
-        for column in ["created_at", "closed_at"] {
-            ensure_column(
-                self.pool(),
-                "sessions",
-                column,
-                &format!("ALTER TABLE sessions ADD COLUMN {column} TEXT"),
-            )
-            .await?;
+        for (column, alter) in [
+            (
+                "created_at",
+                "ALTER TABLE sessions ADD COLUMN created_at TEXT",
+            ),
+            (
+                "closed_at",
+                "ALTER TABLE sessions ADD COLUMN closed_at TEXT",
+            ),
+        ] {
+            ensure_column(self.pool(), "sessions", column, alter).await?;
         }
 
         // Post-T3.1 columns (P3 wave 2 remediation): fresh databases carry them

@@ -58,8 +58,8 @@ def changelog_section(changelog: str, version: str) -> str:
 
 def render(template: str, version: str, section: str) -> str:
     """Substitute the version, splice the CHANGELOG section into What's
-    new, and drop the Known-limits fill-in line (the static bedrock bullet
-    stays). The maintainer HTML comment is stripped: published notes carry
+    new, and drop the Known-limits fill-in line and its empty section.
+    Strip the maintainer HTML comment so the published notes carry
     no scaffolding. Missing placeholders fail: the template drifted."""
     if "__LAMBO_VERSION__" not in template:
         raise NotesError("template has no __LAMBO_VERSION__ placeholder")
@@ -70,7 +70,8 @@ def render(template: str, version: str, section: str) -> str:
     out = out.replace(WHATS_NEW_PLACEHOLDER, section.rstrip("\n"))
     if LIMITS_PLACEHOLDER not in out:
         raise NotesError("template's Known-limits placeholder is gone")
-    out = out.replace(LIMITS_PLACEHOLDER + "\n", "")
+    out = out.replace(LIMITS_PLACEHOLDER, "")
+    out = re.sub(r"(?m)^## Known limits[ \t]*\n(?:[ \t]*\n)*(?=## |\Z)", "", out)
     return out
 
 

@@ -1302,7 +1302,7 @@ fn write_identity_entry(cache_dir: &Path, entry: &Path, fingerprint: &str, diges
 fn write_identity_entry(_cache_dir: &Path, _entry: &Path, _fingerprint: &str, _digest: &str) {}
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// Fetch `filename` via hf-hub into the `HF_HOME` cache [`cache_get`] reads.
@@ -1355,7 +1355,7 @@ fn sha256_file(path: &Path) -> Result<String, EmbedError> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 use sha2::{Digest, Sha256};

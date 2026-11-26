@@ -246,7 +246,7 @@ pub(crate) mod corpus {
             .issue_forced_exact_scan(&mut tx)
             .await
             .expect("plan: forced-exact GUC");
-        let rows = sqlx::query(&format!("EXPLAIN {sql}"))
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!("EXPLAIN {sql}")))
             .bind(&encoded)
             .bind(limit)
             .fetch_all(&mut *tx)

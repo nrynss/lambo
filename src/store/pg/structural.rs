@@ -70,7 +70,7 @@ impl<D: Dialect> PgStore<D> {
         }
         let pool = &self.pool().await?;
         let sql = keyword_candidates_sql::<D>(tokens.len());
-        let mut q = sqlx::query(&sql).bind(&session.0);
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(&session.0);
         for t in &tokens {
             q = q.bind(t);
         }
@@ -158,7 +158,7 @@ impl<D: Dialect> PgStore<D> {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
         let pool = &self.pool().await?;
-        let own = sqlx::query(&self.sql.select_evidence_own_origin)
+        let own = sqlx::query(self.sql.select_evidence_own_origin.clone())
             .bind(&session.0)
             .bind(node.0)
             .fetch_optional(pool)
@@ -170,7 +170,7 @@ impl<D: Dialect> PgStore<D> {
             )?),
             None => None,
         };
-        let rows = sqlx::query(&self.sql.select_evidence_rows)
+        let rows = sqlx::query(self.sql.select_evidence_rows.clone())
             .bind(&session.0)
             .bind(node.0)
             .fetch_all(pool)

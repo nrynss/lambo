@@ -177,7 +177,7 @@ impl<D: Dialect> PgStore<D> {
             {
                 return Err(crate::store::erase::erased_session_error(sid));
             }
-            sqlx::query(&self.sql.upsert_session)
+            sqlx::query(self.sql.upsert_session.clone())
                 .bind(sid)
                 .bind(root_goal)
                 .bind(snapshot.created_at)

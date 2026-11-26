@@ -394,13 +394,15 @@ async fn assert_index_backed(store: &CockroachStore) -> bool {
     // The store's own composed statement, for the reason
     // `vector_explain_camera_proof` spells out: the plan has to be the plan
     // of the query production runs.
-    let vector_candidates_sql = &store.sql.vector_candidates;
-    let rows = sqlx::query(&format!("EXPLAIN {vector_candidates_sql}"))
-        .bind(&probe)
-        .bind(5i64)
-        .fetch_all(pool)
-        .await
-        .unwrap();
+    let vector_candidates_sql = store.sql.vector_candidates.as_str();
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN {vector_candidates_sql}"
+    )))
+    .bind(&probe)
+    .bind(5i64)
+    .fetch_all(pool)
+    .await
+    .unwrap();
     let text: String = rows
         .iter()
         .map(|r| r.try_get::<String, usize>(0).unwrap())

@@ -1189,9 +1189,9 @@ mod sqlite {
             "synonyms",
             "write_intents",
         ] {
-            let n: i64 = sqlx::query_scalar(&format!(
+            let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                 "SELECT count(*) FROM {table} WHERE session_id = 'beta'"
-            ))
+            )))
             .fetch_one(&raw)
             .await
             .unwrap();
@@ -1293,10 +1293,6 @@ mod sqlite {
         sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
             .await
             .unwrap()
-    }
-
-    async fn count(pool: &sqlx::SqlitePool, sql: &str) -> i64 {
-        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1423,7 +1419,12 @@ mod sqlite {
             "split_imports",
         ] {
             assert_eq!(
-                count(&pool, &format!("SELECT count(*) FROM {table}")).await,
+                sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM {table}"
+                )))
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
                 0,
                 "{table}"
             );

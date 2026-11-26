@@ -95,6 +95,13 @@ mod formal_oracle_tests;
 #[cfg(any(feature = "embed-gemini", feature = "store-postgres"))]
 pub mod gcp_auth;
 pub mod graph;
+#[cfg(any(
+    feature = "embed-bge",
+    feature = "embed-gemini",
+    feature = "recall-elastic",
+    feature = "store-postgres",
+))]
+mod http_client;
 pub mod ledger;
 pub mod mcp;
 pub mod memory;

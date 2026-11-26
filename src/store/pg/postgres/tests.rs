@@ -55,6 +55,7 @@ fn access_columns_ride_the_concept_upsert_and_the_load() {
     let rows = [crate::store::batch::ConceptRow::new(&c)];
     let sql = crate::store::pg::concept_upsert_query(&rows, &[None], PostgresDialect::VECTOR_CAST)
         .sql()
+        .as_str()
         .to_string();
     let (insert, on_conflict) = sql.split_once("ON CONFLICT").expect("an upsert");
     assert!(insert.contains("access_count, last_accessed"), "{sql}");
@@ -65,6 +66,7 @@ fn access_columns_ride_the_concept_upsert_and_the_load() {
         );
     }
     let select = crate::store::pg::DialectSql::for_dialect::<PostgresDialect>().select_concepts;
+    let select = select.as_str();
     assert!(select.contains("access_count, last_accessed"), "{select}");
 }
 
@@ -88,6 +90,7 @@ fn the_access_update_is_narrow_monotonic_and_dialect_free() {
         .collect();
     let sql = crate::store::pg::access_update_query(&rows)
         .sql()
+        .as_str()
         .to_string();
     let set = &sql[sql.find(" SET").unwrap()..sql.find("FROM (").unwrap()];
     assert_eq!(set.matches(" = ").count(), 2, "two columns only: {sql}");
@@ -577,11 +580,13 @@ async fn init_schema_at_two_widths_creates_hnsw() {
         .unwrap_or_else(|e| panic!("connect admin DSN: {e}"));
     for dim in [768_usize, 1536] {
         let db = format!("lambo_b2_w{dim}");
-        sqlx::query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
-            .execute(&admin)
-            .await
-            .unwrap_or_else(|e| panic!("drop {db}: {e}"));
-        sqlx::query(&format!("CREATE DATABASE {db}"))
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {db} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .unwrap_or_else(|e| panic!("drop {db}: {e}"));
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {db}")))
             .execute(&admin)
             .await
             .unwrap_or_else(|e| panic!("create {db}: {e}"));
@@ -883,11 +888,11 @@ async fn the_iam_pool_is_rebuilt_when_its_token_expires() {
 
     store.pool().await.expect("first pool");
     store.pool().await.expect("cached pool");
-    mint.assert_hits(1);
+    mint.assert_calls(1);
 
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
     store.pool().await.expect("rotated pool");
-    mint.assert_hits(2);
+    mint.assert_calls(2);
 
     std::fs::remove_file(&creds).ok();
 }
@@ -923,7 +928,7 @@ async fn the_minted_token_is_the_connection_password_across_a_rotation() {
         // narrower scope matches no mock here and fails on the 404.
         when.method(POST)
             .path("/token")
-            .matches(assertion_asks_for_the_sql_login_scope);
+            .is_true(assertion_asks_for_the_sql_login_scope);
         then.status(200)
             .json_body(serde_json::json!({ "access_token": "tok-1", "expires_in": 62 }));
     });
@@ -989,13 +994,13 @@ async fn the_minted_token_is_the_connection_password_across_a_rotation() {
     let mint2 = server.mock(|when, then| {
         when.method(POST)
             .path("/token")
-            .matches(assertion_asks_for_the_sql_login_scope);
+            .is_true(assertion_asks_for_the_sql_login_scope);
         then.status(200)
             .json_body(serde_json::json!({ "access_token": "tok-2", "expires_in": 3600 }));
     });
     tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
     let rotated = store.pool().await.expect("rotated pool");
-    mint2.assert_hits(1);
+    mint2.assert_calls(1);
     let _ = rotated.acquire().await;
     let second = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
         .await
@@ -1174,33 +1179,13 @@ async fn an_empty_iam_opt_in_means_the_password_path() {
 /// the form body would pass on anything. This opens the assertion with the test key pair
 /// and reads the claim, which is the only way to see what the store actually asked for.
 fn assertion_asks_for_the_sql_login_scope(req: &httpmock::prelude::HttpMockRequest) -> bool {
-    let Some(body) = req.body.as_ref() else {
-        return false;
-    };
-    let body = String::from_utf8_lossy(body);
+    let body = req.body_string();
     let Some(assertion) = body.split('&').find_map(|kv| kv.strip_prefix("assertion=")) else {
         return false;
     };
-    // Form encoding turns the JWT's dots and base64url payload into escapes.
-    let assertion = assertion
-        .replace("%2E", ".")
-        .replace("%2F", "/")
-        .replace("%2B", "+");
-    let key = jsonwebtoken::DecodingKey::from_rsa_pem(
-        crate::gcp_auth::TEST_RSA_PUBLIC_KEY_PEM.as_bytes(),
-    )
-    .expect("test public key");
-    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-    validation.validate_aud = false;
-    validation.set_required_spec_claims(&["iss", "exp"]);
-    match jsonwebtoken::decode::<serde_json::Value>(&assertion, &key, &validation) {
-        Ok(data) => data
-            .claims
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| s.contains("sqlservice.login")),
-        Err(_) => false,
-    }
+    let assertion = assertion.replace("%2E", ".");
+    crate::gcp_auth::verify_test_assertion(&assertion)
+        .is_some_and(|claims| claims.scope.contains("sqlservice.login"))
 }
 
 /// Run `build` with the IAM opt-in set (and `credentials` pointing where the caller
@@ -1249,9 +1234,11 @@ impl Drop for LiveDb {
                 Ok(p) => p,
                 Err(e) => return eprintln!("cleanup: connect admin for {db}: {e}"),
             };
-            if let Err(e) = sqlx::query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
-                .execute(&admin)
-                .await
+            if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS {db} WITH (FORCE)"
+            )))
+            .execute(&admin)
+            .await
             {
                 eprintln!("cleanup: drop {db}: {e}");
             }
@@ -1278,7 +1265,7 @@ async fn unique_live_db(test: &str) -> Option<LiveDb> {
         .await
         .unwrap_or_else(|e| panic!("{test}: connect admin DSN: {e}"));
     let db = format!("lambo_b3_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE {db}"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {db}")))
         .execute(&admin)
         .await
         .unwrap_or_else(|e| panic!("{test}: create {db}: {e}"));
@@ -1329,7 +1316,7 @@ async fn provision_preserves_legacy_index_in_later_search_path_schema() {
     .await
     .expect("install shadow index and search path");
     let ddl = PostgresDialect::init_sql(8).expect("DDL");
-    sqlx::raw_sql(&ddl)
+    sqlx::raw_sql(sqlx::AssertSqlSafe(ddl))
         .execute(&mut *tx)
         .await
         .expect("re-provision");
@@ -1418,7 +1405,7 @@ async fn long_canonical_keys_survive_postgres_provision_and_close() {
     let sid = SessionId::new("long-key");
     let agent = AgentId::new("writer");
     let content = (0_u64..96)
-        .map(|n| format!("key0{:x}", Sha256::digest(n.to_be_bytes())))
+        .map(|n| format!("key0{}", hex::encode(Sha256::digest(n.to_be_bytes()))))
         .collect::<Vec<_>>()
         .join(" ");
     let key = canonical_key(&content, |_| None);
@@ -1508,7 +1495,7 @@ async fn long_canonical_keys_survive_postgres_provision_and_close() {
 async fn explain_vector_candidates(
     store: &PostgresStore,
     probe: &[f32],
-    extra_set: Option<&str>,
+    extra_set: Option<&'static str>,
 ) -> String {
     let pool = &store.pool().await.expect("pool");
     let probe = encode_vector(probe).expect("encode probe");
@@ -1524,7 +1511,7 @@ async fn explain_vector_candidates(
         .issue_forced_exact_scan(&mut tx)
         .await
         .unwrap_or_else(|e| panic!("forced-exact GUC: {e}"));
-    let rows = sqlx::query(&format!("EXPLAIN {sql}"))
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!("EXPLAIN {sql}")))
         .bind(&probe)
         .bind(5i64)
         .fetch_all(&mut *tx)
@@ -1589,7 +1576,7 @@ async fn explain_recall_uses_hnsw() {
     // plan meant anything either.
     let pool = &store.pool().await.expect("pool");
     let encoded = encode_vector(&probe).expect("encode probe");
-    let dists: Vec<f64> = sqlx::query(store.vector_candidates_sql())
+    let dists: Vec<f64> = sqlx::query(sqlx::AssertSqlSafe(store.vector_candidates_sql()))
         .bind(&encoded)
         .bind(5i64)
         .fetch_all(pool)

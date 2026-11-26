@@ -1,0 +1,48 @@
+# The audit workflow passes an explicit target and shipped feature set.
+[advisories]
+unmaintained = "all"
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "Chrono migration is tracked in https://github.com/nrynss/lambo/issues/362 and awaits the rmcp release for https://github.com/modelcontextprotocol/rust-sdk/pull/1474." },
+    { id = "RUSTSEC-2024-0436", reason = "Candle's gemm and tokenizers still require paste for build-time macros. Track https://github.com/huggingface/candle and https://github.com/huggingface/tokenizers for releases that remove it." },
+]
+
+[bans]
+# base64 0.23 is direct; SQLx and hyper-util retain 0.22, while Candle
+# builds pull 0.13 through spm_precompiled and tokenizers.
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    { crate = "aws-config", reason = "The unused Bedrock feature was removed in #352." },
+    { crate = "aws-sdk-bedrockruntime", reason = "The unused Bedrock feature was removed in #352." },
+    { crate = "aws-lc-sys", reason = "Shipped TLS uses ring and preserves system-only dylibs." },
+    { name = "hyper", version = "<1", reason = "Shipped and development clients share Hyper 1." },
+    { crate = "onig_sys", reason = "Tokenizers builds with its pure-Rust regex backend." },
+    { name = "reqwest", version = "<0.13", reason = "Shipped clients share reqwest 0.13." },
+    { name = "rustls", version = "<0.23", reason = "Shipped TLS uses the current Rustls line." },
+    { name = "tokenizers", version = "<0.23", reason = "Candle and Lambo share Tokenizers 0.23." },
+]
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
