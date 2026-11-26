@@ -59,16 +59,22 @@ the token does not fit a positive signed 64-bit version. For a counter below
 def mirrorVersion (t c : Nat) : Option Nat :=
   if t ≤ maxTok then some (t * shift + c) else none
 
-/-- `next_version`: restart the counter for a new token, refuse to wrap it
+/-- `next_version`: refuse an older token, restart the counter for a newer token, refuse to wrap it
 (`checked_add`) or to overflow the version. Returns the new `(token, counter)`
-and the version, or `none` (the Rust's error string). -/
+and the version, or `none` (abstracting the Rust `StoreError`). -/
 def nextVersion (tok cnt t : Nat) : Option (Nat × Nat × Nat) :=
-  let c := if tok = t then cnt else 0
-  if c + 1 ≤ u32Max then
-    match mirrorVersion t (c + 1) with
-    | some v => some (t, c + 1, v)
-    | none => none
-  else none
+  if t < tok then none else
+    let c := if tok = t then cnt else 0
+    if c + 1 ≤ u32Max then
+      match mirrorVersion t (c + 1) with
+      | some v => some (t, c + 1, v)
+      | none => none
+    else none
+
+/-- A stale pass cannot reserve a version with a token older than the recorded token. -/
+theorem nextVersion_refuses_older {tok cnt t : Nat} (h : t < tok) :
+    nextVersion tok cnt t = none := by
+  simp [nextVersion, h]
 
 theorem mirrorVersion_lt_tok {t t' c c' : Nat} (hc : c < shift) (ht : t < t')
     (h' : t' ≤ maxTok) : ∃ v v', mirrorVersion t c = some v ∧ mirrorVersion t' c' = some v' ∧
@@ -106,6 +112,7 @@ theorem nextVersion_gt {tok cnt t t' c' v w : Nat} (hcnt : cnt ≤ u32Max) (ht :
     (hold : mirrorVersion tok cnt = some w) (h : nextVersion tok cnt t = some (t', c', v)) :
     w < v ∧ t' = t ∧ c' ≤ u32Max := by
   unfold nextVersion at h
+  simp only [Nat.not_lt_of_ge ht, ite_false] at h
   by_cases he : tok = t
   · subst he
     simp only [ite_true] at h

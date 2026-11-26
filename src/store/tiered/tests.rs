@@ -604,7 +604,7 @@ async fn a_mirror_stops_submitting_index_writes_after_another_store_erases() {
         ("erase-during-mirror-bulk", PauseBefore::Bulk, true),
     ] {
         let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
-        let store = tier(&primary, &fake);
+        let store = tier(&primary, &fake).with_repair_chunk(1);
         let sid = SessionId::new(session);
         let writer = holder("old-writer");
         let token = attach(&store, &sid, &writer).await;
@@ -613,7 +613,27 @@ async fn a_mirror_stops_submitting_index_writes_after_another_store_erases() {
         settle(&store).await;
         assert_eq!(fake.marker(&sid), Some(1));
 
-        let (concept, second) = one_more(&sid, &seed, 2);
+        let first_id = NodeId::new();
+        let next = NodeId::new();
+        let second = batch(
+            2,
+            vec![
+                upsert(concept(
+                    &sid,
+                    first_id,
+                    seed.origin,
+                    "first",
+                    Some(vec![0.0, 0.0, 1.0, 0.0]),
+                )),
+                upsert(concept(
+                    &sid,
+                    next,
+                    seed.origin,
+                    "next",
+                    Some(vec![0.0, 0.0, 1.0, 0.0]),
+                )),
+            ],
+        );
         let (entered, resume) = fake.pause_next_call(pause);
         let before = fake.bulk_calls.load(Ordering::SeqCst);
         let flush = store.flush(&second, Some(token));
@@ -644,7 +664,8 @@ async fn a_mirror_stops_submitting_index_writes_after_another_store_erases() {
         );
         let live = fake.live(&sid);
         assert_eq!(live.len(), usize::from(bulk_in_flight));
-        assert_eq!(live.contains_key(&concept.0.to_string()), bulk_in_flight);
+        assert_eq!(live.contains_key(&first_id.0.to_string()), bulk_in_flight);
+        assert!(!live.contains_key(&next.0.to_string()));
         assert_eq!(
             fake.marker(&sid),
             None,
@@ -2151,6 +2172,133 @@ async fn an_unreachable_index_is_not_rechecked_on_every_read() {
         1,
         "one durable load to check, then the backoff holds"
     );
+}
+
+#[tokio::test]
+async fn issue321_an_older_repair_cannot_rewind_the_new_holders_versions() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("stale-repair-version");
+    let first = holder("first");
+    let old_token = attach(&store, &sid, &first).await;
+    let (seed, initial) = seed_batch(&sid, 1);
+    store.flush(&initial, Some(old_token)).await.unwrap();
+    settle(&store).await;
+    let old_snapshot = primary.load_session(&sid).await.unwrap();
+
+    store.release_lease(&sid, &first).await.unwrap();
+    let new_token = attach(&store, &sid, &holder("second")).await;
+    assert!(new_token > old_token);
+    let (_, current) = one_more(&sid, &seed, 2);
+    store.flush(&current, Some(new_token)).await.unwrap();
+    settle(&store).await;
+    let before = store.tier_status(&sid);
+    assert_eq!(before.token, new_token);
+    assert_eq!(fake.marker(&sid), Some(2));
+
+    let result = store
+        .tier
+        .reconcile(
+            &sid,
+            old_snapshot.embedding.as_ref(),
+            &old_snapshot.concepts,
+            old_snapshot.mutation_epoch,
+            old_token,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(StoreError::StaleWrite(_))),
+        "{result:?}"
+    );
+    let after = store.tier_status(&sid);
+    assert_eq!(after.token, before.token, "a stale pass rewound the token");
+    assert_eq!(after.flush_counter, before.flush_counter);
+    assert_eq!(after.sync, TierSync::InSync);
+
+    let (_, next) = one_more(&sid, &seed, 3);
+    store.flush(&next, Some(new_token)).await.unwrap();
+    assert_eq!(fake.marker(&sid), Some(3));
+    assert_eq!(
+        store.tier_status(&sid).flush_counter,
+        before.flush_counter + 1
+    );
+}
+
+#[tokio::test]
+async fn issue321_repair_uses_the_snapshot_from_its_ahead_marker_recheck() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let shared = Shared::new(primary.clone());
+    let pin = shared.1.clone();
+    let store = TieredStore::new(Box::new(shared), Box::new(fake.clone()), Some(4));
+    let sid = SessionId::new("ahead-then-behind");
+    let token = attach(&store, &sid, &holder("writer")).await;
+    let (seed, first) = seed_batch(&sid, 1);
+    store.flush(&first, Some(token)).await.unwrap();
+    settle(&store).await;
+    let older = primary.load_session(&sid).await.unwrap();
+
+    store
+        .flush(
+            &batch(2, vec![Mutation::DeleteNode { id: seed.c2 }]),
+            Some(token),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fake.marker(&sid), Some(2));
+    let (added, unmirrored) = one_more(&sid, &seed, 3);
+    primary.flush(&unmirrored, Some(token)).await.unwrap();
+    pin.lock().push(older);
+
+    store.tier.repair_once(&sid, token).await.unwrap();
+    assert_eq!(
+        fake.marker(&sid),
+        Some(3),
+        "repair must publish the rechecked epoch"
+    );
+    let live = fake.live(&sid);
+    assert!(
+        !live.contains_key(&seed.c2.0.to_string()),
+        "repair revived a deleted vector"
+    );
+    assert!(
+        live.contains_key(&added.0.to_string()),
+        "repair omitted a durable vector"
+    );
+}
+
+#[tokio::test]
+async fn issue321_a_large_mirror_uses_bounded_bulk_requests() {
+    use std::sync::atomic::Ordering;
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake).with_repair_chunk(2);
+    let sid = SessionId::new("chunked-mirror");
+    let token = attach(&store, &sid, &holder("writer")).await;
+    let (seed, first) = seed_batch(&sid, 1);
+    store.flush(&first, Some(token)).await.unwrap();
+    settle(&store).await;
+    let bulks = fake.bulk_calls.load(Ordering::SeqCst);
+    let (ids, mutations): (Vec<_>, Vec<_>) = (0..5)
+        .map(|i| {
+            let id = NodeId::new();
+            let mutation = upsert(concept(
+                &sid,
+                id,
+                seed.origin,
+                &format!("extra-{i}"),
+                Some(vec![0.0, 0.0, 1.0, 0.0]),
+            ));
+            (id, mutation)
+        })
+        .unzip();
+
+    store
+        .flush(&batch(2, mutations), Some(token))
+        .await
+        .unwrap();
+    assert_eq!(fake.bulk_calls.load(Ordering::SeqCst) - bulks, 3);
+    assert_eq!(fake.marker(&sid), Some(2));
+    let live = fake.live(&sid);
+    assert!(ids.iter().all(|id| live.contains_key(&id.0.to_string())));
 }
 
 /// A counter that would wrap refuses the mirror instead (the issue's

@@ -98,6 +98,9 @@
 
 ### Fixed
 
+- Elasticsearch recall repairs keep the newest writer's mirror version and
+  rebuild from the snapshot used to check the sync marker. Large flushes send
+  vector changes in bounded bulk requests (#321).
 - PostgreSQL now accepts canonical keys beyond the B-tree text size limit
   (#323). Stop the writer and run `lambo provision` after upgrading to install
   the replacement index.
