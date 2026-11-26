@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.16.0 (2026-11-27)
+
+### Highlights
+
+- Startup replay isolates rejected writes and keeps later intents available
+  for a clean restart (#324).
+- PostgreSQL stores long canonical keys, and Elasticsearch recall repairs
+  preserve the latest writer's mirror state (#323, #321).
+- New guides cover choosing between stdio and Streamable HTTP, operating an
+  HTTP writer, troubleshooting missing memory, and checking Lean models
+  against Rust (#353).
+
+### Upgrading from 0.15.0
+
+- **PostgreSQL.** Stop the writer before upgrading. Run
+  `lambo --config lambo.toml provision` with the v0.16.0 binary and the
+  configuration for the existing store. Restart the writer after provisioning
+  succeeds. Provision replaces the canonical-key index with one that indexes
+  a fixed-width digest. Lambo retains the full keys for matching and refuses
+  to attach while the store still uses the legacy index (#323).
+- **Configuration.** Remove `canonization_min_peer_count` if set. Configurations
+  that name `bedrock` or `titan` must select a supported embedder kind (#352).
+- **Source builds.** Use Rust 1.100 or later (#352).
+
 ### Changes
 
 - `lambo serve-web` no longer loads the embedder at startup (#247). Browsing
@@ -118,8 +142,7 @@
   rebuild from the snapshot used to check the sync marker. Large flushes send
   vector changes in bounded bulk requests (#321).
 - PostgreSQL now accepts canonical keys beyond the B-tree text size limit
-  (#323). Stop the writer and run `lambo provision` after upgrading to install
-  the replacement index.
+  (#323).
 - MCP errors for control characters in an `agent_id` now explain the
   single-line rule and show the offending code point (#338).
 - A delayed lease-loss detach can only close the HTTP attachment that lost
