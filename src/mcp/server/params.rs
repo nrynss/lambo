@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use super::response::bad_param;
 use super::LamboServer;
+use crate::surface::limits::MAX_CONTENT_BYTES;
 use crate::surface::validate::{check_size as validate_size, require_nonempty};
 use crate::types::{AgentId, ConceptType};
 
@@ -782,11 +783,8 @@ pub(super) const MAX_AGENT_ID_CHARS: usize = 256;
 /// a table: that set is `{U+000B, U+000C, U+2028, U+2029} ∪ {CR, LF, U+0085}`,
 /// a strict subset of what the two arms below already give, and it would also
 /// drop `\t`, which forges a column rather than a line but is refused for the
-/// same reason. Anything merely *invisible* stays `check_size`'s business
-/// (`INVISIBLE_RANGES`, which runs first and names the codepoint it refuses);
-/// this predicate answers one question only — does this character forge a line
-/// or a column — so widening it would duplicate a table that already exists
-/// and then drift from it.
+/// same reason. The shared formatting check in `check_size` handles invisible
+/// characters and names the refused codepoint.
 pub(super) fn breaks_one_line(c: char) -> bool {
     c.is_control() || c == '\u{2028}' || c == '\u{2029}'
 }
@@ -819,7 +817,10 @@ impl LamboServer {
     /// server instructions — not silently assumed.
     pub(super) fn check_agent_id(&self, agent_id: &str) -> Result<(), CallToolResult> {
         require_nonempty("agent_id", agent_id).map_err(bad_param)?;
-        check_size("agent_id", agent_id)?;
+        // Preserve the shared byte-limit error before scanning characters.
+        if agent_id.len() > MAX_CONTENT_BYTES {
+            return check_size("agent_id", agent_id);
+        }
         // J1-R1-1. `check_size` allows `\n` and `\t` on purpose, because both
         // are legitimate inside a concept's `content` — but this id is not
         // content. Since J1 it is rendered **verbatim into the T5.3 context
@@ -837,11 +838,9 @@ impl LamboServer {
         // round 1 prescribed, because that list was incomplete the day it was
         // written: U+2028/U+2029 are Zl/Zp, so they are neither controls nor
         // members of `INVISIBLE_RANGES`, and they slipped every layer (J1-R2-1).
-        // The same predicate folds `conflict_err`'s message, so the two cannot
-        // drift apart again. (`\r` and the other C0/C1 controls are already
-        // refused upstream by `check_size`; the class covers them here anyway so
-        // this rule reads complete and survives a change to that exception
-        // table.)
+        // The same predicate folds `conflict_err`'s message. Check it before
+        // shared validation, whose control-character error allows tabs and
+        // newlines in ordinary content.
         //
         // **Why the door and not `AgentId::new`.** The type is also constructed
         // from the operator's own `--agent` by the CLI and by library callers —
@@ -877,6 +876,7 @@ impl LamboServer {
                 c as u32
             )));
         }
+        check_size("agent_id", agent_id)?;
         if agent_id.chars().count() > MAX_AGENT_ID_CHARS {
             return Err(bad_param(format!(
                 "agent_id must be at most {MAX_AGENT_ID_CHARS} characters (got {}); it is a \

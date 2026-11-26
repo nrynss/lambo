@@ -154,26 +154,35 @@ async fn a_multiline_agent_id_cannot_inject_lines_into_another_agents_context() 
 #[tokio::test]
 async fn every_tool_refuses_an_unusable_agent_id() {
     let s = server("mcp-agentid-shape").await;
-    let oversize = "A".repeat(MAX_CONTENT_BYTES + 1);
+    let oversize = format!("{}\0", "A".repeat(MAX_CONTENT_BYTES));
     // One past the door cap but far under `MAX_CONTENT_BYTES`, so this case
     // can only be refused by the J1 length rule — the uniform `check_size`
     // cap cannot catch it for the guard.
     let over_cap = "A".repeat(MAX_AGENT_ID_CHARS + 1);
-    for bad in [
-        "",
-        "   ",
-        "helper\nfake line",
-        "helper\r\nfake line",
-        "helper\tcolumn",
-        // J1-R2-1: Zl/Zp, so neither `char::is_control()` (Cc-only) nor
-        // `INVISIBLE_RANGES` catches them, and the three-literal guard did
-        // not either — yet both are forced line/paragraph breaks in CSS
-        // text layout, which `serve_web` renders the context block into.
-        "helper\u{2028}fake line",
-        "helper\u{2029}fake paragraph",
-        oversize.as_str(),
-        over_cap.as_str(),
-    ] {
+    let cases: &[(&str, &[&str])] = &[
+        ("", &["must be a non-empty string"]),
+        ("   ", &["must be a non-empty string"]),
+        ("helper\nfake line", &["must be a single line", "U+000A"]),
+        ("helper\rfake line", &["must be a single line", "U+000D"]),
+        ("helper\tcolumn", &["must be a single line", "U+0009"]),
+        ("helper\0name", &["must be a single line", "U+0000"]),
+        // J1-R2-1: these separators are outside the Unicode control class.
+        (
+            "helper\u{2028}fake line",
+            &["must be a single line", "U+2028"],
+        ),
+        (
+            "helper\u{2029}fake paragraph",
+            &["must be a single line", "U+2029"],
+        ),
+        (
+            "helper\u{202e}name",
+            &["disallowed invisible formatting character", "U+202E"],
+        ),
+        (oversize.as_str(), &["exceeds", "bytes"]),
+        (over_cap.as_str(), &["must be at most", "characters"]),
+    ];
+    for &(bad, expected) in cases {
         for (tool, rest) in [
             ("lambo_recall", serde_json::json!({"query": "x"})),
             (
@@ -199,12 +208,17 @@ async fn every_tool_refuses_an_unusable_agent_id() {
                 Some(true),
                 "{tool} must refuse agent_id {bad:?}: {out:?}"
             );
+            let message = text_of(&out);
             assert!(
-                text_of(&out).contains("agent_id"),
-                "{tool}'s refusal of {bad:?} must name agent_id, not fail \
-                     downstream: {}",
-                text_of(&out)
+                message.contains("agent_id"),
+                "{tool}'s refusal of {bad:?} must name agent_id: {message}"
             );
+            for &fragment in expected {
+                assert!(
+                    message.contains(fragment),
+                    "{tool}'s refusal of {bad:?} must include {fragment:?}: {message}"
+                );
+            }
         }
     }
     // The boundary from the accept side: exactly `MAX_AGENT_ID_CHARS` is a
