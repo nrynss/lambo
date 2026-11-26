@@ -1,4 +1,5 @@
 import { defineConfig } from 'astro/config';
+import { unified } from '@astrojs/markdown-remark';
 import starlight from '@astrojs/starlight';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -11,8 +12,10 @@ export default defineConfig({
   // KaTeX renders the canonization formulas on /canonization/. `$...$` inline
   // and `$$...$$` display, the same syntax GitHub renders in the README.
   markdown: {
-    remarkPlugins: [remarkMath],
-    rehypePlugins: [rehypeKatex],
+    processor: unified({
+      remarkPlugins: [remarkMath],
+      rehypePlugins: [rehypeKatex],
+    }),
   },
   integrations: [
     starlight({
