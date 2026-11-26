@@ -138,6 +138,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS concepts_key_digest_non_obs_idx
 -- IF NOT EXISTS can skip an unrelated relation with this name. Refuse the
 -- entire atomic DDL batch before removing the old protection in that case.
 DO $$
+DECLARE
+    legacy_index regclass;
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_index i
@@ -153,8 +155,16 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'invalid concepts_key_digest_non_obs_idx; remove the conflicting relation and run lambo provision';
     END IF;
+    -- Never let search_path resolve the legacy name to another table's index.
+    SELECT i.indexrelid::regclass INTO legacy_index
+    FROM pg_index i
+    JOIN pg_class idx ON idx.oid = i.indexrelid
+    WHERE i.indrelid = 'concepts'::regclass
+      AND idx.relname = 'concepts_key_non_obs_idx';
+    IF legacy_index IS NOT NULL THEN
+        EXECUTE format('DROP INDEX %s', legacy_index);
+    END IF;
 END $$;
-DROP INDEX IF EXISTS concepts_key_non_obs_idx;
 ALTER TABLE concepts DROP CONSTRAINT IF EXISTS concepts_session_id_canonical_key_key;
 
 -- Partial: NULL embeddings must not enter the index. The recall query

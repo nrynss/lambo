@@ -1303,6 +1303,48 @@ async fn live_store_at(test: &str, dsn: &str, dim: usize) -> PostgresStore {
     store
 }
 
+/// Re-provision must not remove a different schema's legacy index merely
+/// because it is visible later in the connection's search path.
+#[tokio::test]
+#[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+async fn provision_preserves_legacy_index_in_later_search_path_schema() {
+    let Some((_db, store)) = unique_live_store(
+        "provision_preserves_legacy_index_in_later_search_path_schema",
+        8,
+    )
+    .await
+    else {
+        return;
+    };
+    let pool = store.pool().await.expect("pool");
+    let mut tx = pool.begin().await.expect("transaction");
+    sqlx::raw_sql(
+        "CREATE SCHEMA shadow; \
+         CREATE TABLE shadow.concepts (session_id text, canonical_key text); \
+         CREATE UNIQUE INDEX concepts_key_non_obs_idx \
+         ON shadow.concepts (session_id, canonical_key); \
+         SET LOCAL search_path = public, shadow",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("install shadow index and search path");
+    let ddl = PostgresDialect::init_sql(8).expect("DDL");
+    sqlx::raw_sql(&ddl)
+        .execute(&mut *tx)
+        .await
+        .expect("re-provision");
+    let shadow_index: bool =
+        sqlx::query_scalar("SELECT to_regclass('shadow.concepts_key_non_obs_idx') IS NOT NULL")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("lookup shadow index");
+    assert!(
+        shadow_index,
+        "re-provision must preserve the other schema's index"
+    );
+    tx.rollback().await.expect("rollback test schema");
+}
+
 /// An old schema converges on provision, and a large admitted key survives
 /// a close with the original full text key.
 #[cfg(feature = "embed-fixture")]

@@ -293,11 +293,12 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Canonical.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:a8bbc6e4cac9144042a9a2d1e669f58556ad1a76ef8f3f6f7e4548c9f18fe266"
+read_digest = "v2:sha256:f6fe744c10edde9ea193c2359868c4b80e303c544717fef6e13569514252a524"
 rust = [
   "src/graph/canonical.rs",
   "src/graph/graph/names.rs#name_key",
   "src/store/pg/postgres/tests.rs#long_canonical_keys_survive_postgres_provision_and_close",
+  "src/store/pg/postgres/tests.rs#provision_preserves_legacy_index_in_later_search_path_schema",
 ]
 
 [[model]]
