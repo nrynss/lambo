@@ -1,0 +1,2570 @@
+{
+  "hardware": {
+    "cpu": "Apple M3 Pro",
+    "memory_bytes": 19327352832,
+    "macos_version": "26.7.3"
+  },
+  "builds": {
+    "0.15.0": {
+      "git_sha": "8f5fdd07edae0c6ab5172f85ca9ce8bd05660d66",
+      "asset": "lambo-0.15.0-macos-arm64-metal",
+      "sha256": "cfb399f03f5b852c32cb514ccbd88c8a6ad2ef739f12eba47d5b529068f74796"
+    },
+    "0.16.0": {
+      "git_sha": "28efff5cd0f11f63223011112101c5875fabd052",
+      "asset": "lambo-0.16.0-macos-arm64-metal",
+      "sha256": "ffc674ef5699378b92ac723145118ba3a549e8e13b4891b739cb16217ad0a46b"
+    }
+  },
+  "snapshot": {
+    "taken_utc": "2026-11-26T20:39:20+00:00",
+    "concepts": 8251,
+    "sessions": 8,
+    "settled_intents": 7,
+    "owed_intents": 0,
+    "lambo": {
+      "concepts": 2907,
+      "edges": 7886,
+      "interactions": 1158
+    },
+    "general_concepts": 41
+  },
+  "replay": {
+    "reconstruction": {
+      "T": "2026-10-13T16:24:12.119Z",
+      "n_calls": 330,
+      "n_derive": 42,
+      "n_action": 258,
+      "n_variants": 30,
+      "n_warn": 45,
+      "exit_codes": {
+        "a": 0,
+        "b": 0
+      },
+      "content_included": false
+    },
+    "passed": true,
+    "different_calls": 0,
+    "unexpected_calls": 0,
+    "not_applied_both": 0,
+    "outcomes": {
+      "0.15.0": {
+        "calls": 330,
+        "state:applied": 330,
+        "created_count": 534,
+        "matched_count": 1,
+        "semantic_merged": 26,
+        "reinforced": 0,
+        "embedded": 534,
+        "edges": 857
+      },
+      "0.16.0": {
+        "calls": 330,
+        "state:applied": 330,
+        "created_count": 534,
+        "matched_count": 1,
+        "semantic_merged": 26,
+        "reinforced": 0,
+        "embedded": 534,
+        "edges": 857
+      }
+    },
+    "store": {
+      "base": {
+        "concepts": 5623,
+        "embedded": 5623,
+        "unembedded": 0,
+        "interactions": 2115,
+        "concepts_by_type": {
+          "Constraint": 501,
+          "Entity": 829,
+          "Logic": 1203,
+          "Observation": 659,
+          "Resource": 2431
+        },
+        "edges_by_type": {
+          "Causal": 2828,
+          "CoOccurrence": 1844,
+          "Dependency": 1153,
+          "Derives": 5646,
+          "Hierarchical": 48,
+          "Semantic": 64,
+          "Temporal": 2107
+        },
+        "canonization_status": {
+          "Candidate": 623,
+          "None": 4981,
+          "Venerable": 19
+        },
+        "edges": 13690
+      },
+      "a": {
+        "concepts": 6157,
+        "embedded": 6157,
+        "unembedded": 0,
+        "interactions": 2445,
+        "concepts_by_type": {
+          "Constraint": 513,
+          "Entity": 893,
+          "Logic": 1250,
+          "Observation": 686,
+          "Resource": 2815
+        },
+        "edges_by_type": {
+          "Causal": 3146,
+          "CoOccurrence": 1873,
+          "Dependency": 1692,
+          "Derives": 6181,
+          "Hierarchical": 48,
+          "Semantic": 90,
+          "Temporal": 2437
+        },
+        "canonization_status": {
+          "Candidate": 623,
+          "None": 5515,
+          "Venerable": 19
+        },
+        "edges": 15467
+      },
+      "b": {
+        "concepts": 6157,
+        "embedded": 6157,
+        "unembedded": 0,
+        "interactions": 2445,
+        "concepts_by_type": {
+          "Constraint": 513,
+          "Entity": 893,
+          "Logic": 1250,
+          "Observation": 686,
+          "Resource": 2815
+        },
+        "edges_by_type": {
+          "Causal": 3146,
+          "CoOccurrence": 1873,
+          "Dependency": 1692,
+          "Derives": 6181,
+          "Hierarchical": 48,
+          "Semantic": 90,
+          "Temporal": 2437
+        },
+        "canonization_status": {
+          "Candidate": 623,
+          "None": 5515,
+          "Venerable": 19
+        },
+        "edges": 15467
+      }
+    },
+    "content_diff": {
+      "concepts_created": {
+        "only_a": 0,
+        "only_b": 0
+      },
+      "semantic_edges": {
+        "only_a": 0,
+        "only_b": 0
+      },
+      "unembedded_new": {
+        "a": 0,
+        "b": 0
+      },
+      "hierarchical_ends_unembedded": {
+        "a": 0,
+        "b": 0
+      }
+    }
+  },
+  "sequential": {
+    "sides": [
+      "0.15.0",
+      "0.16.0"
+    ],
+    "rounds": 10,
+    "derives": 30,
+    "latency_ms": {
+      "0.15.0": {
+        "recall": {
+          "n": 200,
+          "p50": 2.17,
+          "p90": 6.29,
+          "p99": 25.3,
+          "mean": 4.17,
+          "max": 28.55
+        },
+        "stats": {
+          "n": 10,
+          "p50": 0.39,
+          "p90": 0.4,
+          "p99": 0.98,
+          "mean": 0.44,
+          "max": 0.98
+        },
+        "derive_ack": {
+          "n": 30,
+          "p50": 0.52,
+          "p90": 0.55,
+          "p99": 0.73,
+          "mean": 0.52,
+          "max": 0.73
+        },
+        "derive_applied": {
+          "n": 30,
+          "p50": 25.94,
+          "p90": 26.33,
+          "p99": 33.72,
+          "mean": 26.13,
+          "max": 33.72
+        }
+      },
+      "0.16.0": {
+        "recall": {
+          "n": 200,
+          "p50": 2.19,
+          "p90": 6.25,
+          "p99": 26.27,
+          "mean": 4.23,
+          "max": 32.37
+        },
+        "stats": {
+          "n": 10,
+          "p50": 0.36,
+          "p90": 0.4,
+          "p99": 0.55,
+          "mean": 0.38,
+          "max": 0.55
+        },
+        "derive_ack": {
+          "n": 30,
+          "p50": 0.51,
+          "p90": 0.53,
+          "p99": 0.93,
+          "mean": 0.52,
+          "max": 0.93
+        },
+        "derive_applied": {
+          "n": 30,
+          "p50": 25.99,
+          "p90": 26.16,
+          "p99": 31.23,
+          "mean": 26.07,
+          "max": 31.23
+        }
+      }
+    },
+    "errors": {
+      "0.15.0": 0,
+      "0.16.0": 0
+    },
+    "recall_topk_jaccard": {
+      "n": 20,
+      "p50": 1.0,
+      "p90": 1.0,
+      "p99": 1.0,
+      "mean": 1.0,
+      "max": 1.0
+    },
+    "rate_limited_retries": {
+      "0.15.0": 0,
+      "0.16.0": 0
+    },
+    "ranked_recall": {
+      "pairs": 200,
+      "ordered_top8_matches": 200,
+      "full_response_set_matches": 200,
+      "max_score_delta_when_ordered_top8_match": 0.0,
+      "first_round_full_set_jaccard_mean": 1.0,
+      "responses_with_more_than_eight_hits": {
+        "0.15.0": 0,
+        "0.16.0": 0
+      },
+      "responses_with_more_than_eight_hits_and_hot_warning": {
+        "0.15.0": 0,
+        "0.16.0": 0
+      }
+    }
+  },
+  "concurrent": {
+    "runs": {
+      "eight-0.15.0": {
+        "workers": 8,
+        "seed": 1,
+        "think": 1.0,
+        "secs": 120.0,
+        "wall_s": 122.8,
+        "calls": 939,
+        "ok_calls": 939,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.0,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 369,
+            "p50": 2.11,
+            "p90": 4.63,
+            "p99": 14.84,
+            "mean": 2.79,
+            "max": 27.02
+          },
+          "lambo_recall": {
+            "n": 355,
+            "p50": 11.13,
+            "p90": 19.53,
+            "p99": 38.46,
+            "mean": 11.63,
+            "max": 47.92
+          },
+          "lambo_record_action": {
+            "n": 174,
+            "p50": 1.53,
+            "p90": 3.59,
+            "p99": 15.62,
+            "mean": 2.63,
+            "max": 17.45
+          },
+          "lambo_stats": {
+            "n": 41,
+            "p50": 2.17,
+            "p90": 3.53,
+            "p99": 12.63,
+            "mean": 2.47,
+            "max": 12.63
+          }
+        },
+        "writes": {
+          "acked": 543,
+          "settled": 543,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 543,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 543
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 3859,
+          "embedded_concepts": 3859,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T20:52:28Z",
+          "last_load_call_utc": "2026-11-26T20:54:28Z",
+          "calls_by_tool": {
+            "lambo_recall": 358,
+            "lambo_stats": 585,
+            "lambo_record_action": 174,
+            "lambo_derive": 369
+          },
+          "completions": 543,
+          "recall_ms": {
+            "n": 343,
+            "p50": 8.97,
+            "p90": 14.11,
+            "p99": 34.42,
+            "max": 39.98
+          },
+          "ack_ms": {
+            "n": 543,
+            "p50": 0.18,
+            "p90": 2.16,
+            "p99": 13.69,
+            "max": 25.14
+          },
+          "apply_lag_ms": {
+            "n": 543,
+            "p50": 51.45,
+            "p90": 65.62,
+            "p99": 94.01,
+            "max": 141.94
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "eight-0.16.0": {
+        "workers": 8,
+        "seed": 1,
+        "think": 1.0,
+        "secs": 120.0,
+        "wall_s": 122.6,
+        "calls": 939,
+        "ok_calls": 939,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.0,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 369,
+            "p50": 1.89,
+            "p90": 3.97,
+            "p99": 18.54,
+            "mean": 2.77,
+            "max": 57.27
+          },
+          "lambo_recall": {
+            "n": 355,
+            "p50": 10.45,
+            "p90": 17.69,
+            "p99": 39.21,
+            "mean": 11.35,
+            "max": 41.7
+          },
+          "lambo_record_action": {
+            "n": 174,
+            "p50": 1.92,
+            "p90": 7.29,
+            "p99": 14.52,
+            "mean": 2.94,
+            "max": 23.05
+          },
+          "lambo_stats": {
+            "n": 41,
+            "p50": 1.5,
+            "p90": 3.78,
+            "p99": 4.8,
+            "mean": 2.09,
+            "max": 4.8
+          }
+        },
+        "writes": {
+          "acked": 543,
+          "settled": 543,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 543,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 543
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 3859,
+          "embedded_concepts": 3859,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T20:55:07Z",
+          "last_load_call_utc": "2026-11-26T20:57:07Z",
+          "calls_by_tool": {
+            "lambo_recall": 358,
+            "lambo_stats": 585,
+            "lambo_record_action": 174,
+            "lambo_derive": 369
+          },
+          "completions": 543,
+          "recall_ms": {
+            "n": 343,
+            "p50": 8.23,
+            "p90": 14.4,
+            "p99": 36.35,
+            "max": 38.08
+          },
+          "ack_ms": {
+            "n": 543,
+            "p50": 0.17,
+            "p90": 1.42,
+            "p99": 13.78,
+            "max": 53.68
+          },
+          "apply_lag_ms": {
+            "n": 543,
+            "p50": 51.2,
+            "p90": 68.72,
+            "p99": 103.56,
+            "max": 198.48
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "single1-0.15.0": {
+        "workers": 16,
+        "seed": 1,
+        "think": 0.5,
+        "secs": 120.0,
+        "wall_s": 121.4,
+        "calls": 3713,
+        "ok_calls": 3713,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.0,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 1436,
+            "p50": 0.9,
+            "p90": 13.71,
+            "p99": 33.7,
+            "mean": 4.59,
+            "max": 60.53
+          },
+          "lambo_recall": {
+            "n": 1440,
+            "p50": 6.11,
+            "p90": 18.01,
+            "p99": 38.9,
+            "mean": 8.94,
+            "max": 77.45
+          },
+          "lambo_record_action": {
+            "n": 686,
+            "p50": 0.91,
+            "p90": 14.15,
+            "p99": 35.81,
+            "mean": 4.7,
+            "max": 90.96
+          },
+          "lambo_stats": {
+            "n": 151,
+            "p50": 0.77,
+            "p90": 5.14,
+            "p99": 22.18,
+            "mean": 2.32,
+            "max": 33.79
+          }
+        },
+        "writes": {
+          "acked": 2122,
+          "settled": 2122,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 2122,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 2122
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 6505,
+          "embedded_concepts": 6505,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T20:57:47Z",
+          "last_load_call_utc": "2026-11-26T20:59:47Z",
+          "calls_by_tool": {
+            "lambo_recall": 1443,
+            "lambo_derive": 1436,
+            "lambo_stats": 2274,
+            "lambo_record_action": 686
+          },
+          "completions": 2122,
+          "recall_ms": {
+            "n": 1378,
+            "p50": 5.13,
+            "p90": 13.03,
+            "p99": 29.47,
+            "max": 44.41
+          },
+          "ack_ms": {
+            "n": 2122,
+            "p50": 0.07,
+            "p90": 10.57,
+            "p99": 30.23,
+            "max": 87.1
+          },
+          "apply_lag_ms": {
+            "n": 2122,
+            "p50": 52.52,
+            "p90": 115.21,
+            "p99": 206.01,
+            "max": 311.84
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "single2-0.16.0": {
+        "workers": 16,
+        "seed": 1,
+        "think": 0.5,
+        "secs": 120.0,
+        "wall_s": 121.7,
+        "calls": 3721,
+        "ok_calls": 3721,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.0,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 1436,
+            "p50": 0.79,
+            "p90": 9.45,
+            "p99": 18.81,
+            "mean": 2.96,
+            "max": 27.15
+          },
+          "lambo_recall": {
+            "n": 1444,
+            "p50": 5.82,
+            "p90": 15.63,
+            "p99": 30.06,
+            "mean": 8.02,
+            "max": 77.49
+          },
+          "lambo_record_action": {
+            "n": 690,
+            "p50": 0.77,
+            "p90": 8.8,
+            "p99": 18.66,
+            "mean": 2.82,
+            "max": 29.25
+          },
+          "lambo_stats": {
+            "n": 151,
+            "p50": 0.78,
+            "p90": 3.34,
+            "p99": 14.17,
+            "mean": 1.83,
+            "max": 15.8
+          }
+        },
+        "writes": {
+          "acked": 2126,
+          "settled": 2126,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 2126,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 2126
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 6509,
+          "embedded_concepts": 6509,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T21:01:22Z",
+          "last_load_call_utc": "2026-11-26T21:03:22Z",
+          "calls_by_tool": {
+            "lambo_recall": 1447,
+            "lambo_derive": 1436,
+            "lambo_stats": 2278,
+            "lambo_record_action": 690
+          },
+          "completions": 2126,
+          "recall_ms": {
+            "n": 1383,
+            "p50": 4.9,
+            "p90": 11.29,
+            "p99": 22.98,
+            "max": 36.35
+          },
+          "ack_ms": {
+            "n": 2126,
+            "p50": 0.06,
+            "p90": 5.18,
+            "p99": 15.06,
+            "max": 23.54
+          },
+          "apply_lag_ms": {
+            "n": 2126,
+            "p50": 51.16,
+            "p90": 101.79,
+            "p99": 175.96,
+            "max": 291.08
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "single3-0.16.0": {
+        "workers": 16,
+        "seed": 1,
+        "think": 0.5,
+        "secs": 120.0,
+        "wall_s": 121.7,
+        "calls": 3723,
+        "ok_calls": 3723,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.5,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 1438,
+            "p50": 0.8,
+            "p90": 8.74,
+            "p99": 20.1,
+            "mean": 2.9,
+            "max": 34.0
+          },
+          "lambo_recall": {
+            "n": 1444,
+            "p50": 5.95,
+            "p90": 15.69,
+            "p99": 29.36,
+            "mean": 8.15,
+            "max": 61.84
+          },
+          "lambo_record_action": {
+            "n": 690,
+            "p50": 0.76,
+            "p90": 9.9,
+            "p99": 16.66,
+            "mean": 2.91,
+            "max": 20.65
+          },
+          "lambo_stats": {
+            "n": 151,
+            "p50": 0.77,
+            "p90": 3.67,
+            "p99": 15.39,
+            "mean": 2.03,
+            "max": 19.01
+          }
+        },
+        "writes": {
+          "acked": 2128,
+          "settled": 2128,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 2128,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 2128
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 6513,
+          "embedded_concepts": 6513,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T21:04:57Z",
+          "last_load_call_utc": "2026-11-26T21:06:57Z",
+          "calls_by_tool": {
+            "lambo_recall": 1447,
+            "lambo_derive": 1438,
+            "lambo_stats": 2281,
+            "lambo_record_action": 690
+          },
+          "completions": 2128,
+          "recall_ms": {
+            "n": 1384,
+            "p50": 4.94,
+            "p90": 12.25,
+            "p99": 21.59,
+            "max": 38.4
+          },
+          "ack_ms": {
+            "n": 2128,
+            "p50": 0.06,
+            "p90": 5.25,
+            "p99": 15.21,
+            "max": 23.72
+          },
+          "apply_lag_ms": {
+            "n": 2128,
+            "p50": 51.8,
+            "p90": 105.17,
+            "p99": 181.93,
+            "max": 259.72
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "single4-0.15.0": {
+        "workers": 16,
+        "seed": 1,
+        "think": 0.5,
+        "secs": 120.0,
+        "wall_s": 121.1,
+        "calls": 3747,
+        "ok_calls": 3747,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 1.0,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 1447,
+            "p50": 0.86,
+            "p90": 11.61,
+            "p99": 21.79,
+            "mean": 3.54,
+            "max": 32.51
+          },
+          "lambo_recall": {
+            "n": 1455,
+            "p50": 6.03,
+            "p90": 15.04,
+            "p99": 25.52,
+            "mean": 8.04,
+            "max": 54.53
+          },
+          "lambo_record_action": {
+            "n": 694,
+            "p50": 0.87,
+            "p90": 12.97,
+            "p99": 20.32,
+            "mean": 3.85,
+            "max": 24.89
+          },
+          "lambo_stats": {
+            "n": 151,
+            "p50": 0.79,
+            "p90": 6.32,
+            "p99": 15.81,
+            "mean": 2.14,
+            "max": 16.83
+          }
+        },
+        "writes": {
+          "acked": 2141,
+          "settled": 2141,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 2141,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 2141
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 6535,
+          "embedded_concepts": 6535,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T22:54:38Z",
+          "last_load_call_utc": "2026-11-26T22:56:38Z",
+          "calls_by_tool": {
+            "lambo_recall": 1458,
+            "lambo_derive": 1447,
+            "lambo_stats": 2295,
+            "lambo_record_action": 694
+          },
+          "completions": 2141,
+          "recall_ms": {
+            "n": 1393,
+            "p50": 5.06,
+            "p90": 11.44,
+            "p99": 21.49,
+            "max": 25.92
+          },
+          "ack_ms": {
+            "n": 2141,
+            "p50": 0.06,
+            "p90": 8.39,
+            "p99": 18.95,
+            "max": 27.45
+          },
+          "apply_lag_ms": {
+            "n": 2141,
+            "p50": 46.36,
+            "p90": 99.38,
+            "p99": 166.5,
+            "max": 271.42
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "single5-0.15.0": {
+        "workers": 16,
+        "seed": 1,
+        "think": 0.5,
+        "secs": 120.0,
+        "wall_s": 121.9,
+        "calls": 3722,
+        "ok_calls": 3722,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.0,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 1437,
+            "p50": 0.77,
+            "p90": 11.19,
+            "p99": 19.89,
+            "mean": 3.38,
+            "max": 40.47
+          },
+          "lambo_recall": {
+            "n": 1444,
+            "p50": 5.87,
+            "p90": 15.11,
+            "p99": 30.99,
+            "mean": 8.01,
+            "max": 64.62
+          },
+          "lambo_record_action": {
+            "n": 690,
+            "p50": 0.78,
+            "p90": 10.92,
+            "p99": 21.14,
+            "mean": 3.51,
+            "max": 48.02
+          },
+          "lambo_stats": {
+            "n": 151,
+            "p50": 0.74,
+            "p90": 3.04,
+            "p99": 17.5,
+            "mean": 1.99,
+            "max": 36.0
+          }
+        },
+        "writes": {
+          "acked": 2127,
+          "settled": 2127,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 2127,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 2127
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 6511,
+          "embedded_concepts": 6511,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T22:43:17Z",
+          "last_load_call_utc": "2026-11-26T22:45:17Z",
+          "calls_by_tool": {
+            "lambo_recall": 1447,
+            "lambo_derive": 1437,
+            "lambo_stats": 2279,
+            "lambo_record_action": 690
+          },
+          "completions": 2127,
+          "recall_ms": {
+            "n": 1383,
+            "p50": 4.95,
+            "p90": 11.91,
+            "p99": 21.63,
+            "max": 64.18
+          },
+          "ack_ms": {
+            "n": 2127,
+            "p50": 0.06,
+            "p90": 7.72,
+            "p99": 18.28,
+            "max": 47.04
+          },
+          "apply_lag_ms": {
+            "n": 2127,
+            "p50": 50.58,
+            "p90": 101.44,
+            "p99": 188.48,
+            "max": 277.55
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "single6-0.16.0": {
+        "workers": 16,
+        "seed": 1,
+        "think": 0.5,
+        "secs": 120.0,
+        "wall_s": 121.1,
+        "calls": 3747,
+        "ok_calls": 3747,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.5,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 1448,
+            "p50": 0.83,
+            "p90": 10.58,
+            "p99": 20.72,
+            "mean": 3.22,
+            "max": 31.92
+          },
+          "lambo_recall": {
+            "n": 1454,
+            "p50": 6.06,
+            "p90": 15.38,
+            "p99": 25.06,
+            "mean": 8.13,
+            "max": 48.25
+          },
+          "lambo_record_action": {
+            "n": 694,
+            "p50": 0.85,
+            "p90": 10.86,
+            "p99": 20.91,
+            "mean": 3.4,
+            "max": 24.12
+          },
+          "lambo_stats": {
+            "n": 151,
+            "p50": 0.8,
+            "p90": 3.42,
+            "p99": 14.9,
+            "mean": 1.9,
+            "max": 20.71
+          }
+        },
+        "writes": {
+          "acked": 2142,
+          "settled": 2142,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 2142,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 2142
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 6537,
+          "embedded_concepts": 6537,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T22:46:46Z",
+          "last_load_call_utc": "2026-11-26T22:48:46Z",
+          "calls_by_tool": {
+            "lambo_recall": 1457,
+            "lambo_derive": 1448,
+            "lambo_stats": 2295,
+            "lambo_record_action": 694
+          },
+          "completions": 2142,
+          "recall_ms": {
+            "n": 1392,
+            "p50": 5.07,
+            "p90": 11.48,
+            "p99": 20.7,
+            "max": 30.76
+          },
+          "ack_ms": {
+            "n": 2142,
+            "p50": 0.06,
+            "p90": 6.44,
+            "p99": 17.35,
+            "max": 28.41
+          },
+          "apply_lag_ms": {
+            "n": 2142,
+            "p50": 46.91,
+            "p90": 100.85,
+            "p99": 180.27,
+            "max": 271.25
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "pair1-0.15.0": {
+        "workers": 16,
+        "seed": 1,
+        "think": 0.5,
+        "secs": 120.0,
+        "wall_s": 121.7,
+        "calls": 3724,
+        "ok_calls": 3724,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.0,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 1439,
+            "p50": 0.73,
+            "p90": 12.83,
+            "p99": 28.05,
+            "mean": 3.79,
+            "max": 35.65
+          },
+          "lambo_recall": {
+            "n": 1444,
+            "p50": 5.55,
+            "p90": 15.71,
+            "p99": 33.09,
+            "mean": 7.81,
+            "max": 79.49
+          },
+          "lambo_record_action": {
+            "n": 690,
+            "p50": 0.74,
+            "p90": 14.0,
+            "p99": 26.95,
+            "mean": 4.18,
+            "max": 44.16
+          },
+          "lambo_stats": {
+            "n": 151,
+            "p50": 0.75,
+            "p90": 3.23,
+            "p99": 17.72,
+            "mean": 1.79,
+            "max": 22.9
+          }
+        },
+        "writes": {
+          "acked": 2129,
+          "settled": 2129,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 2129,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 2129
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 6515,
+          "embedded_concepts": 6515,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T22:50:19Z",
+          "last_load_call_utc": "2026-11-26T22:52:19Z",
+          "calls_by_tool": {
+            "lambo_recall": 1447,
+            "lambo_derive": 1439,
+            "lambo_stats": 2281,
+            "lambo_record_action": 690
+          },
+          "completions": 2129,
+          "recall_ms": {
+            "n": 1383,
+            "p50": 4.65,
+            "p90": 11.42,
+            "p99": 24.31,
+            "max": 37.3
+          },
+          "ack_ms": {
+            "n": 2129,
+            "p50": 0.06,
+            "p90": 9.15,
+            "p99": 24.47,
+            "max": 43.43
+          },
+          "apply_lag_ms": {
+            "n": 2129,
+            "p50": 93.96,
+            "p90": 277.16,
+            "p99": 572.34,
+            "max": 891.12
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "pair1-0.16.0": {
+        "workers": 16,
+        "seed": 1,
+        "think": 0.5,
+        "secs": 120.0,
+        "wall_s": 121.8,
+        "calls": 3723,
+        "ok_calls": 3723,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.0,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 1438,
+            "p50": 0.74,
+            "p90": 11.85,
+            "p99": 24.28,
+            "mean": 3.45,
+            "max": 30.84
+          },
+          "lambo_recall": {
+            "n": 1444,
+            "p50": 5.54,
+            "p90": 14.96,
+            "p99": 32.34,
+            "mean": 7.77,
+            "max": 79.85
+          },
+          "lambo_record_action": {
+            "n": 690,
+            "p50": 0.74,
+            "p90": 11.8,
+            "p99": 25.54,
+            "mean": 3.56,
+            "max": 35.62
+          },
+          "lambo_stats": {
+            "n": 151,
+            "p50": 0.77,
+            "p90": 5.13,
+            "p99": 20.81,
+            "mean": 2.07,
+            "max": 24.94
+          }
+        },
+        "writes": {
+          "acked": 2128,
+          "settled": 2128,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 2128,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 2128
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 6513,
+          "embedded_concepts": 6513,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T22:50:19Z",
+          "last_load_call_utc": "2026-11-26T22:52:19Z",
+          "calls_by_tool": {
+            "lambo_recall": 1447,
+            "lambo_derive": 1438,
+            "lambo_stats": 2280,
+            "lambo_record_action": 690
+          },
+          "completions": 2128,
+          "recall_ms": {
+            "n": 1383,
+            "p50": 4.62,
+            "p90": 10.78,
+            "p99": 24.16,
+            "max": 46.08
+          },
+          "ack_ms": {
+            "n": 2128,
+            "p50": 0.06,
+            "p90": 6.95,
+            "p99": 21.02,
+            "max": 34.83
+          },
+          "apply_lag_ms": {
+            "n": 2128,
+            "p50": 93.99,
+            "p90": 262.65,
+            "p99": 566.87,
+            "max": 1047.95
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "pair2-0.16.0": {
+        "workers": 16,
+        "seed": 1,
+        "think": 0.5,
+        "secs": 120.0,
+        "wall_s": 121.6,
+        "calls": 3726,
+        "ok_calls": 3726,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.0,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 1440,
+            "p50": 0.62,
+            "p90": 10.48,
+            "p99": 23.18,
+            "mean": 3.16,
+            "max": 38.98
+          },
+          "lambo_recall": {
+            "n": 1445,
+            "p50": 5.26,
+            "p90": 14.67,
+            "p99": 31.15,
+            "mean": 7.32,
+            "max": 77.92
+          },
+          "lambo_record_action": {
+            "n": 690,
+            "p50": 0.6,
+            "p90": 9.63,
+            "p99": 23.49,
+            "mean": 2.96,
+            "max": 32.37
+          },
+          "lambo_stats": {
+            "n": 151,
+            "p50": 0.64,
+            "p90": 3.0,
+            "p99": 17.56,
+            "mean": 1.81,
+            "max": 24.65
+          }
+        },
+        "writes": {
+          "acked": 2130,
+          "settled": 2130,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 2130,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 2130
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 6517,
+          "embedded_concepts": 6517,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T22:03:55Z",
+          "last_load_call_utc": "2026-11-26T22:05:55Z",
+          "calls_by_tool": {
+            "lambo_recall": 1448,
+            "lambo_derive": 1440,
+            "lambo_stats": 2282,
+            "lambo_record_action": 690
+          },
+          "completions": 2130,
+          "recall_ms": {
+            "n": 1384,
+            "p50": 4.51,
+            "p90": 9.66,
+            "p99": 22.14,
+            "max": 43.08
+          },
+          "ack_ms": {
+            "n": 2130,
+            "p50": 0.05,
+            "p90": 6.62,
+            "p99": 19.96,
+            "max": 31.6
+          },
+          "apply_lag_ms": {
+            "n": 2130,
+            "p50": 86.64,
+            "p90": 268.87,
+            "p99": 538.84,
+            "max": 1024.6
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      },
+      "pair2-0.15.0": {
+        "workers": 16,
+        "seed": 1,
+        "think": 0.5,
+        "secs": 120.0,
+        "wall_s": 121.7,
+        "calls": 3724,
+        "ok_calls": 3724,
+        "worker_errors": 0,
+        "drain": {
+          "drained": true,
+          "drain_s": 0.0,
+          "drain_timeout_s": 300.0
+        },
+        "flags": {
+          "expired_receipts": 0,
+          "retention_risk": false,
+          "receipt_retention_s": 300.0
+        },
+        "latency_ms": {
+          "lambo_derive": {
+            "n": 1439,
+            "p50": 0.61,
+            "p90": 11.84,
+            "p99": 24.67,
+            "mean": 3.48,
+            "max": 41.86
+          },
+          "lambo_recall": {
+            "n": 1444,
+            "p50": 5.25,
+            "p90": 13.97,
+            "p99": 30.16,
+            "mean": 7.21,
+            "max": 72.45
+          },
+          "lambo_record_action": {
+            "n": 690,
+            "p50": 0.6,
+            "p90": 10.28,
+            "p99": 23.33,
+            "mean": 3.13,
+            "max": 32.76
+          },
+          "lambo_stats": {
+            "n": 151,
+            "p50": 0.64,
+            "p90": 7.31,
+            "p99": 22.92,
+            "mean": 2.18,
+            "max": 26.24
+          }
+        },
+        "writes": {
+          "acked": 2129,
+          "settled": 2129,
+          "refused_at_ack": 0,
+          "transport_failed": 0,
+          "receipts_queried": 2129,
+          "failed": 0,
+          "receipt_states": {
+            "applied": 2129
+          },
+          "sampled": false,
+          "write_failure_rate_all": 0.0
+        },
+        "final_stats": {
+          "write_queue_outstanding": 0,
+          "write_queue_replay_owed": 0,
+          "write_queue_replayed": 0,
+          "concept_count": 6515,
+          "embedded_concepts": 6515,
+          "dead_lettered": 0,
+          "degraded": false
+        },
+        "server": {
+          "first_call_utc": "2026-11-26T22:03:55Z",
+          "last_load_call_utc": "2026-11-26T22:05:55Z",
+          "calls_by_tool": {
+            "lambo_recall": 1447,
+            "lambo_derive": 1439,
+            "lambo_stats": 2281,
+            "lambo_record_action": 690
+          },
+          "completions": 2129,
+          "recall_ms": {
+            "n": 1382,
+            "p50": 4.48,
+            "p90": 9.72,
+            "p99": 21.99,
+            "max": 38.38
+          },
+          "ack_ms": {
+            "n": 2129,
+            "p50": 0.05,
+            "p90": 7.23,
+            "p99": 21.85,
+            "max": 40.95
+          },
+          "apply_lag_ms": {
+            "n": 2129,
+            "p50": 89.47,
+            "p90": 261.62,
+            "p99": 555.96,
+            "max": 1176.67
+          },
+          "slow_calls": 0,
+          "slow_call_max_ms": 0.0,
+          "slow_seconds": 0
+        }
+      }
+    },
+    "pairs": [
+      {
+        "a": "pair1-0.15.0",
+        "b": "pair1-0.16.0",
+        "seconds_compared": 115,
+        "seconds_with_slowest_call_at_least_ms": {
+          "50": {
+            "pair1-0.15.0": 0,
+            "pair1-0.16.0": 0,
+            "both": 0
+          },
+          "100": {
+            "pair1-0.15.0": 0,
+            "pair1-0.16.0": 0,
+            "both": 0
+          },
+          "250": {
+            "pair1-0.15.0": 0,
+            "pair1-0.16.0": 0,
+            "both": 0
+          },
+          "500": {
+            "pair1-0.15.0": 0,
+            "pair1-0.16.0": 0,
+            "both": 0
+          }
+        },
+        "per_second_slowest_b_minus_a_median_ms": -0.44,
+        "seconds_b_slower_by_over_5ms": 23,
+        "seconds_a_slower_by_over_5ms": 26,
+        "slow_seconds": {
+          "pair1-0.15.0": 0,
+          "pair1-0.16.0": 0
+        },
+        "slow_seconds_shared_within_1s": {
+          "pair1-0.15.0": 0,
+          "pair1-0.16.0": 0
+        },
+        "slow_seconds_only": {
+          "pair1-0.15.0": 0,
+          "pair1-0.16.0": 0
+        }
+      },
+      {
+        "a": "pair2-0.15.0",
+        "b": "pair2-0.16.0",
+        "seconds_compared": 115,
+        "seconds_with_slowest_call_at_least_ms": {
+          "50": {
+            "pair2-0.15.0": 0,
+            "pair2-0.16.0": 0,
+            "both": 0
+          },
+          "100": {
+            "pair2-0.15.0": 0,
+            "pair2-0.16.0": 0,
+            "both": 0
+          },
+          "250": {
+            "pair2-0.15.0": 0,
+            "pair2-0.16.0": 0,
+            "both": 0
+          },
+          "500": {
+            "pair2-0.15.0": 0,
+            "pair2-0.16.0": 0,
+            "both": 0
+          }
+        },
+        "per_second_slowest_b_minus_a_median_ms": 0.5,
+        "seconds_b_slower_by_over_5ms": 22,
+        "seconds_a_slower_by_over_5ms": 21,
+        "slow_seconds": {
+          "pair2-0.15.0": 0,
+          "pair2-0.16.0": 0
+        },
+        "slow_seconds_shared_within_1s": {
+          "pair2-0.15.0": 0,
+          "pair2-0.16.0": 0
+        },
+        "slow_seconds_only": {
+          "pair2-0.15.0": 0,
+          "pair2-0.16.0": 0
+        }
+      }
+    ]
+  },
+  "offline": {
+    "forward": {
+      "canon_clock_utc": "2026-11-26T20:39:21Z",
+      "database_content_unchanged": true,
+      "version_order": [
+        "0.15.0",
+        "0.16.0"
+      ],
+      "session-load": {
+        "0.15.0": {
+          "wall_clock_seconds": [
+            {
+              "value": 0.143428375,
+              "unit": "second"
+            },
+            {
+              "value": 0.142557666,
+              "unit": "second"
+            },
+            {
+              "value": 0.1439195,
+              "unit": "second"
+            },
+            {
+              "value": 0.142471708,
+              "unit": "second"
+            },
+            {
+              "value": 0.143841667,
+              "unit": "second"
+            },
+            {
+              "value": 0.143730875,
+              "unit": "second"
+            },
+            {
+              "value": 0.16566012500000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.155942667,
+              "unit": "second"
+            },
+            {
+              "value": 0.161896,
+              "unit": "second"
+            },
+            {
+              "value": 0.162890792,
+              "unit": "second"
+            },
+            {
+              "value": 0.17063675,
+              "unit": "second"
+            },
+            {
+              "value": 0.17435925000000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.16541208300000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.161199,
+              "unit": "second"
+            },
+            {
+              "value": 0.165388916,
+              "unit": "second"
+            },
+            {
+              "value": 0.16456558300000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.15604979100000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.164579583,
+              "unit": "second"
+            },
+            {
+              "value": 0.156942834,
+              "unit": "second"
+            },
+            {
+              "value": 0.155978167,
+              "unit": "second"
+            },
+            {
+              "value": 0.155300875,
+              "unit": "second"
+            },
+            {
+              "value": 0.155393959,
+              "unit": "second"
+            },
+            {
+              "value": 0.16079558300000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.153375959,
+              "unit": "second"
+            },
+            {
+              "value": 0.15861054100000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.15833670800000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.156188125,
+              "unit": "second"
+            },
+            {
+              "value": 0.158917042,
+              "unit": "second"
+            },
+            {
+              "value": 0.154572875,
+              "unit": "second"
+            },
+            {
+              "value": 0.16266687500000002,
+              "unit": "second"
+            }
+          ],
+          "wall_clock_summary_seconds": {
+            "count": 30,
+            "mean": 0.1571869958,
+            "median": 0.157639771,
+            "stddev": 0.008510294892460458,
+            "min": 0.142471708,
+            "max": 0.17435925000000002
+          },
+          "peak_resident_bytes_mean": 107902293.33333333
+        },
+        "0.16.0": {
+          "wall_clock_seconds": [
+            {
+              "value": 0.153142458,
+              "unit": "second"
+            },
+            {
+              "value": 0.157019333,
+              "unit": "second"
+            },
+            {
+              "value": 0.150774291,
+              "unit": "second"
+            },
+            {
+              "value": 0.15179175,
+              "unit": "second"
+            },
+            {
+              "value": 0.15319433400000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.15540525000000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.15146720800000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.154689667,
+              "unit": "second"
+            },
+            {
+              "value": 0.15492666700000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.157008958,
+              "unit": "second"
+            },
+            {
+              "value": 0.153787541,
+              "unit": "second"
+            },
+            {
+              "value": 0.15599025,
+              "unit": "second"
+            },
+            {
+              "value": 0.15695800000000001,
+              "unit": "second"
+            },
+            {
+              "value": 0.16201200000000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.14935400000000001,
+              "unit": "second"
+            },
+            {
+              "value": 0.15333991600000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.148864125,
+              "unit": "second"
+            },
+            {
+              "value": 0.149075375,
+              "unit": "second"
+            },
+            {
+              "value": 0.1490795,
+              "unit": "second"
+            },
+            {
+              "value": 0.149764333,
+              "unit": "second"
+            },
+            {
+              "value": 0.14867333300000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.148328667,
+              "unit": "second"
+            },
+            {
+              "value": 0.14719100000000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.16077525,
+              "unit": "second"
+            },
+            {
+              "value": 0.154083667,
+              "unit": "second"
+            },
+            {
+              "value": 0.15082837500000001,
+              "unit": "second"
+            },
+            {
+              "value": 0.152562417,
+              "unit": "second"
+            },
+            {
+              "value": 0.15768775000000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.16563825000000001,
+              "unit": "second"
+            },
+            {
+              "value": 0.152910041,
+              "unit": "second"
+            }
+          ],
+          "wall_clock_summary_seconds": {
+            "count": 30,
+            "mean": 0.15354412353333335,
+            "median": 0.153168396,
+            "stddev": 0.004336092637206355,
+            "min": 0.14719100000000002,
+            "max": 0.16563825000000001
+          },
+          "peak_resident_bytes_mean": 109228851.2
+        }
+      },
+      "canon-dry-run": {
+        "0.15.0": {
+          "wall_clock_seconds": [
+            {
+              "value": 2.403105666,
+              "unit": "second"
+            },
+            {
+              "value": 2.439980083,
+              "unit": "second"
+            },
+            {
+              "value": 2.399546209,
+              "unit": "second"
+            },
+            {
+              "value": 2.391660959,
+              "unit": "second"
+            },
+            {
+              "value": 2.408060542,
+              "unit": "second"
+            },
+            {
+              "value": 2.50325975,
+              "unit": "second"
+            },
+            {
+              "value": 2.6036,
+              "unit": "second"
+            },
+            {
+              "value": 2.378374209,
+              "unit": "second"
+            }
+          ],
+          "wall_clock_summary_seconds": {
+            "count": 8,
+            "mean": 2.44094842725,
+            "median": 2.4055831039999998,
+            "stddev": 0.07644960181046018,
+            "min": 2.378374209,
+            "max": 2.6036
+          },
+          "peak_resident_bytes_mean": 103327744.0
+        },
+        "0.16.0": {
+          "wall_clock_seconds": [
+            {
+              "value": 1.668458292,
+              "unit": "second"
+            },
+            {
+              "value": 1.708934084,
+              "unit": "second"
+            },
+            {
+              "value": 1.68825325,
+              "unit": "second"
+            },
+            {
+              "value": 1.662773625,
+              "unit": "second"
+            },
+            {
+              "value": 1.6975424170000002,
+              "unit": "second"
+            },
+            {
+              "value": 1.6834316660000002,
+              "unit": "second"
+            },
+            {
+              "value": 1.687887042,
+              "unit": "second"
+            },
+            {
+              "value": 1.6889975000000002,
+              "unit": "second"
+            }
+          ],
+          "wall_clock_summary_seconds": {
+            "count": 8,
+            "mean": 1.6857847344999999,
+            "median": 1.688070146,
+            "stddev": 0.01478524510301082,
+            "min": 1.662773625,
+            "max": 1.708934084
+          },
+          "peak_resident_bytes_mean": 102516736.0
+        }
+      },
+      "canon-dry-run-policy_reports_match": {
+        "Swarm": true,
+        "Solo": true
+      },
+      "canon-dry-run-policies": {
+        "0.15.0": {
+          "Swarm": {
+            "cycles": 30,
+            "canonical_total": 5,
+            "stop": "fixed_point",
+            "final_status_counts": {
+              "Candidate": 480,
+              "Canonical": 5,
+              "None": 2407,
+              "Venerable": 15
+            },
+            "all_invariants_held": true
+          },
+          "Solo": {
+            "cycles": 34,
+            "canonical_total": 5,
+            "stop": "fixed_point",
+            "final_status_counts": {
+              "Candidate": 646,
+              "Canonical": 5,
+              "None": 2241,
+              "Venerable": 15
+            },
+            "all_invariants_held": true
+          }
+        },
+        "0.16.0": {
+          "Swarm": {
+            "cycles": 30,
+            "canonical_total": 5,
+            "stop": "fixed_point",
+            "final_status_counts": {
+              "Candidate": 480,
+              "Canonical": 5,
+              "None": 2407,
+              "Venerable": 15
+            },
+            "all_invariants_held": true
+          },
+          "Solo": {
+            "cycles": 34,
+            "canonical_total": 5,
+            "stop": "fixed_point",
+            "final_status_counts": {
+              "Candidate": 646,
+              "Canonical": 5,
+              "None": 2241,
+              "Venerable": 15
+            },
+            "all_invariants_held": true
+          }
+        }
+      },
+      "canon-dry-run-source_invariants_held": {
+        "0.15.0": true,
+        "0.16.0": true
+      }
+    },
+    "reverse": {
+      "canon_clock_utc": "2026-11-26T20:39:21Z",
+      "database_content_unchanged": true,
+      "version_order": [
+        "0.16.0",
+        "0.15.0"
+      ],
+      "session-load": {
+        "0.16.0": {
+          "wall_clock_seconds": [
+            {
+              "value": 0.155447,
+              "unit": "second"
+            },
+            {
+              "value": 0.161433541,
+              "unit": "second"
+            },
+            {
+              "value": 0.151509417,
+              "unit": "second"
+            },
+            {
+              "value": 0.154386459,
+              "unit": "second"
+            },
+            {
+              "value": 0.151031458,
+              "unit": "second"
+            },
+            {
+              "value": 0.153332459,
+              "unit": "second"
+            },
+            {
+              "value": 0.16445700000000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.16514675,
+              "unit": "second"
+            },
+            {
+              "value": 0.145165375,
+              "unit": "second"
+            },
+            {
+              "value": 0.159824458,
+              "unit": "second"
+            },
+            {
+              "value": 0.16390558300000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.157082375,
+              "unit": "second"
+            },
+            {
+              "value": 0.15681445800000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.15437166600000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.158385792,
+              "unit": "second"
+            },
+            {
+              "value": 0.15872904200000001,
+              "unit": "second"
+            },
+            {
+              "value": 0.158357875,
+              "unit": "second"
+            },
+            {
+              "value": 0.15331054100000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.156532959,
+              "unit": "second"
+            },
+            {
+              "value": 0.15992475,
+              "unit": "second"
+            },
+            {
+              "value": 0.158102625,
+              "unit": "second"
+            },
+            {
+              "value": 0.16672566700000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.183851333,
+              "unit": "second"
+            },
+            {
+              "value": 0.177074,
+              "unit": "second"
+            },
+            {
+              "value": 0.182684584,
+              "unit": "second"
+            },
+            {
+              "value": 0.17535229200000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.160455083,
+              "unit": "second"
+            },
+            {
+              "value": 0.15411125,
+              "unit": "second"
+            },
+            {
+              "value": 0.15418741600000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.15183279200000002,
+              "unit": "second"
+            }
+          ],
+          "wall_clock_summary_seconds": {
+            "count": 30,
+            "mean": 0.16011753333333342,
+            "median": 0.15823025000000002,
+            "stddev": 0.009175487645849623,
+            "min": 0.145165375,
+            "max": 0.183851333
+          },
+          "peak_resident_bytes_mean": 109451673.6
+        },
+        "0.15.0": {
+          "wall_clock_seconds": [
+            {
+              "value": 0.160941792,
+              "unit": "second"
+            },
+            {
+              "value": 0.156050416,
+              "unit": "second"
+            },
+            {
+              "value": 0.157359458,
+              "unit": "second"
+            },
+            {
+              "value": 0.16103050000000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.16871812500000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.168050792,
+              "unit": "second"
+            },
+            {
+              "value": 0.169221917,
+              "unit": "second"
+            },
+            {
+              "value": 0.15322433300000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.157524,
+              "unit": "second"
+            },
+            {
+              "value": 0.15854933400000001,
+              "unit": "second"
+            },
+            {
+              "value": 0.152335583,
+              "unit": "second"
+            },
+            {
+              "value": 0.15427425,
+              "unit": "second"
+            },
+            {
+              "value": 0.16034108300000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.155535,
+              "unit": "second"
+            },
+            {
+              "value": 0.151873833,
+              "unit": "second"
+            },
+            {
+              "value": 0.160087792,
+              "unit": "second"
+            },
+            {
+              "value": 0.157469084,
+              "unit": "second"
+            },
+            {
+              "value": 0.151416625,
+              "unit": "second"
+            },
+            {
+              "value": 0.15545112500000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.153342375,
+              "unit": "second"
+            },
+            {
+              "value": 0.153681167,
+              "unit": "second"
+            },
+            {
+              "value": 0.15472295900000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.16097550000000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.153848792,
+              "unit": "second"
+            },
+            {
+              "value": 0.160206375,
+              "unit": "second"
+            },
+            {
+              "value": 0.151477417,
+              "unit": "second"
+            },
+            {
+              "value": 0.14765191700000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.16151879100000002,
+              "unit": "second"
+            },
+            {
+              "value": 0.152279,
+              "unit": "second"
+            },
+            {
+              "value": 0.14938241700000002,
+              "unit": "second"
+            }
+          ],
+          "wall_clock_summary_seconds": {
+            "count": 30,
+            "mean": 0.15695139173333333,
+            "median": 0.155792708,
+            "stddev": 0.005429160150720038,
+            "min": 0.14765191700000002,
+            "max": 0.169221917
+          },
+          "peak_resident_bytes_mean": 107829657.6
+        }
+      },
+      "canon-dry-run": {
+        "0.16.0": {
+          "wall_clock_seconds": [
+            {
+              "value": 1.667639334,
+              "unit": "second"
+            },
+            {
+              "value": 1.654983292,
+              "unit": "second"
+            },
+            {
+              "value": 1.723359791,
+              "unit": "second"
+            },
+            {
+              "value": 1.678350208,
+              "unit": "second"
+            },
+            {
+              "value": 1.710040459,
+              "unit": "second"
+            },
+            {
+              "value": 1.689000083,
+              "unit": "second"
+            },
+            {
+              "value": 1.677884792,
+              "unit": "second"
+            },
+            {
+              "value": 1.6913208750000002,
+              "unit": "second"
+            }
+          ],
+          "wall_clock_summary_seconds": {
+            "count": 8,
+            "mean": 1.6865723542500002,
+            "median": 1.6836751455,
+            "stddev": 0.022142123061887155,
+            "min": 1.654983292,
+            "max": 1.723359791
+          },
+          "peak_resident_bytes_mean": 102850560.0
+        },
+        "0.15.0": {
+          "wall_clock_seconds": [
+            {
+              "value": 2.405807208,
+              "unit": "second"
+            },
+            {
+              "value": 2.444972458,
+              "unit": "second"
+            },
+            {
+              "value": 2.434631625,
+              "unit": "second"
+            },
+            {
+              "value": 2.37697325,
+              "unit": "second"
+            },
+            {
+              "value": 2.390680417,
+              "unit": "second"
+            },
+            {
+              "value": 2.392102375,
+              "unit": "second"
+            },
+            {
+              "value": 2.411111667,
+              "unit": "second"
+            },
+            {
+              "value": 2.395711042,
+              "unit": "second"
+            }
+          ],
+          "wall_clock_summary_seconds": {
+            "count": 8,
+            "mean": 2.40649875525,
+            "median": 2.400759125,
+            "stddev": 0.023111676587523992,
+            "min": 2.37697325,
+            "max": 2.444972458
+          },
+          "peak_resident_bytes_mean": 103684096.0
+        }
+      },
+      "canon-dry-run-policy_reports_match": {
+        "Swarm": true,
+        "Solo": true
+      },
+      "canon-dry-run-policies": {
+        "0.15.0": {
+          "Swarm": {
+            "cycles": 30,
+            "canonical_total": 5,
+            "stop": "fixed_point",
+            "final_status_counts": {
+              "Candidate": 480,
+              "Canonical": 5,
+              "None": 2407,
+              "Venerable": 15
+            },
+            "all_invariants_held": true
+          },
+          "Solo": {
+            "cycles": 34,
+            "canonical_total": 5,
+            "stop": "fixed_point",
+            "final_status_counts": {
+              "Candidate": 646,
+              "Canonical": 5,
+              "None": 2241,
+              "Venerable": 15
+            },
+            "all_invariants_held": true
+          }
+        },
+        "0.16.0": {
+          "Swarm": {
+            "cycles": 30,
+            "canonical_total": 5,
+            "stop": "fixed_point",
+            "final_status_counts": {
+              "Candidate": 480,
+              "Canonical": 5,
+              "None": 2407,
+              "Venerable": 15
+            },
+            "all_invariants_held": true
+          },
+          "Solo": {
+            "cycles": 34,
+            "canonical_total": 5,
+            "stop": "fixed_point",
+            "final_status_counts": {
+              "Candidate": 646,
+              "Canonical": 5,
+              "None": 2241,
+              "Venerable": 15
+            },
+            "all_invariants_held": true
+          }
+        }
+      },
+      "canon-dry-run-source_invariants_held": {
+        "0.15.0": true,
+        "0.16.0": true
+      }
+    }
+  }
+}
