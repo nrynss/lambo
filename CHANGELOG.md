@@ -98,6 +98,21 @@
 
 ### Fixed
 
+- MCP errors for control characters in an `agent_id` now explain the
+  single-line rule and show the offending code point (#338).
+- A delayed lease-loss detach can only close the HTTP attachment that lost
+  its lease. A replacement continues serving its requests (#312).
+- The Elasticsearch mirror checks the durable writer lease before sending a
+  bulk write and again before sending the sync marker. An already authorized
+  request can still land after session erasure (#320).
+- Closing a session reports an error after a background flush task panic and
+  still attempts to flush surviving writes. A receipt whose intent was lost
+  can return `restart_lost` after a restart (#318).
+- Startup replay isolates a rejected write and reports `failed` after the
+  store confirms its outcome. Later intents remain `pending_replay` and can
+  apply on a later restart. Lambo refuses new writes during startup replay,
+  while outcomes await confirmation, or when recovery requires a restart
+  (#324).
 - **A bind beyond loopback with no credential, and a misused
   `--ledger-heartbeat`, are refused before anything is built, with exit 2
   (#316).** `lambo serve --transport http --bind 0.0.0.0` with no token and
