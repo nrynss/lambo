@@ -136,6 +136,12 @@ impl Dialect for PostgresDialect {
         )
     }
 
+    fn canonical_index_preflight_sql() -> Option<&'static str> {
+        Some(include_str!(
+            "../../../migrations/postgres/canonical_index_preflight.sql"
+        ))
+    }
+
     const NAME: &'static str = "postgres";
     const STORE_TYPE_NAME: &'static str = "PostgresStore";
     const DSN_ENV: &'static str = "LAMBO_POSTGRES_DSN";

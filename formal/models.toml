@@ -293,10 +293,11 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Canonical.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:6525163291921f6474da7132300be28c5b87bd30ae8114a43657b74357e1892c"
+read_digest = "v2:sha256:a8bbc6e4cac9144042a9a2d1e669f58556ad1a76ef8f3f6f7e4548c9f18fe266"
 rust = [
   "src/graph/canonical.rs",
   "src/graph/graph/names.rs#name_key",
+  "src/store/pg/postgres/tests.rs#long_canonical_keys_survive_postgres_provision_and_close",
 ]
 
 [[model]]
@@ -684,7 +685,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Resolve/Construction.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:4cab7ef63edef981f280e32b4d76cff432cd7e66ad52c8272dca330d2a58bd70"
+read_digest = "v2:sha256:d0003793fb6d653aa3f41af96eb0729826488b375904abeff0f20090275d276e"
 rust = [
   "src/main.rs#Commands::needs_embedder",
   "src/main.rs#Commands::allow_embedding_mismatch",

@@ -1347,4 +1347,24 @@ non-trivial input. -/
 example : key stop0 id (key stop0 id "The-Lease-writer".toList) = key stop0 id "The-Lease-writer".toList :=
   key_idem (stable_id stop0) _
 
+
+/-- The PostgreSQL unique index stores the session ID and a SHA-256 digest of
+the full canonical key. SHA-256 is an opaque function with a 32-byte output.
+The full text key is stored separately for canonical matching. -/
+def pgIndexKey (digest : List Char → Fin 32 → UInt8) (session key : List Char) :
+    List Char × List UInt8 :=
+  (session, List.ofFn (digest key))
+
+/-- The canonical key contributes 32 bytes to the PostgreSQL index value,
+regardless of its text length. This excludes index row metadata and the session ID. -/
+theorem pgIndexKey_width (digest : List Char → Fin 32 → UInt8) (session key : List Char) :
+    (pgIndexKey digest session key).2.length = 32 := by
+  simp [pgIndexKey]
+
+/-- Copies of a full key conflict in the same session and remain independent
+across sessions. No injectivity of the digest is assumed. -/
+theorem pgIndexKey_same_key (digest : List Char → Fin 32 → UInt8) (session other key : List Char) :
+    pgIndexKey digest session key = pgIndexKey digest other key ↔ session = other := by
+  simp [pgIndexKey]
+
 end Lambo.Canonical

@@ -872,7 +872,7 @@ A request whose declared `Content-Length` exceeds `4 MiB` is refused with `413` 
 
 ## Provisioning a durable store
 
-Before you serve against SQLite or CockroachDB, create the schema.
+Before you serve against SQLite, CockroachDB, or PostgreSQL, create the schema.
 
 ```bash
 lambo --config lambo.toml provision
@@ -885,6 +885,9 @@ lambo --config lambo.toml provision
 | `memory` | Nothing. It reports that the in-memory store needs no schema. |
 | `sqlite` | Creates the schema in the file at `store.path`. |
 | `cockroach` | Runs `scripts/provision.sh`, which also reconciles the vector index. |
+| `postgres` | Creates or migrates the schema and its pgvector indexes. |
+
+For an existing PostgreSQL store, stop the writer and run `lambo provision` with the new binary. It replaces the canonical-key index with one that indexes a 32-byte SHA-256 digest. Lambo keeps the full key for concept matching. Attach refuses an old or invalid index with `lambo provision` guidance. If provision reports a conflicting `concepts_key_digest_non_obs_idx`, remove or rename that unexpected relation and run provision again. {/* lean: Canonical.pgIndexKey_width, Canonical.pgIndexKey_same_key */} {/* test: src/store/pg/postgres/tests.rs long_canonical_keys_survive_postgres_provision_and_close */}
 
 <Note>
 Because the CockroachDB path runs the repository's script, run it from inside a checkout of Lambo. Lambo looks for `scripts/provision.sh` next to the project's `Cargo.toml`, searching the current directory and its parents, and tells you to run from the repository if it cannot find it.
