@@ -202,6 +202,35 @@ header.header {
   font-weight: 600;
 }
 
+/* Match Starlight's breakpoint for the desktop table of contents. */
+@media screen and (min-width: 72rem) {
+  [data-has-sidebar][data-has-toc] {
+    --sl-content-width: 72rem;
+    --lambo-toc-width: clamp(12.5rem, 16vw, 16rem);
+  }
+
+  [data-has-sidebar][data-has-toc] .main-pane {
+    flex: 1;
+    min-width: 0;
+    --sl-content-margin-inline: auto;
+  }
+
+  [data-has-sidebar][data-has-toc] .right-sidebar-container {
+    flex-shrink: 0;
+    width: var(--lambo-toc-width);
+  }
+
+  [data-has-sidebar][data-has-toc] .right-sidebar {
+    inset-inline-end: 0;
+    width: var(--lambo-toc-width);
+  }
+
+  [data-has-sidebar][data-has-toc] .right-sidebar-panel .sl-container {
+    width: auto;
+    max-width: none;
+  }
+}
+
 /* ==========================================================================
    Hero Section
    ========================================================================== */
@@ -440,7 +469,9 @@ header.header {
 
 .sl-markdown-content table {
   display: block;
-  width: 100%;
+  /* Fit the frame to its cells and scroll when they exceed the article width. */
+  width: fit-content;
+  max-width: 100%;
   overflow-x: auto;
   border-collapse: separate;
   border-spacing: 0;
