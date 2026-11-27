@@ -1546,20 +1546,28 @@ fn length_chunks(lens: &[usize]) -> Vec<Vec<usize>> {
 /// One forward over `texts`, with each caller's failure kept to that
 /// caller (#125).
 ///
-/// When a forward over several texts fails or panics, a one-word canary
-/// forward decides whose failure it is (review M3):
+/// When the forward fails or panics, a one-word canary forward decides
+/// whose failure it is (review M3):
 ///
 /// * **The canary fails too:** the device or model is failing, not a text.
 ///   Every caller gets [`EmbedError::Unavailable`] (transient: nothing was
 ///   learned about any input), and nothing is retried, so a broken device
 ///   costs two forwards per chunk instead of one per text.
-/// * **The canary succeeds:** a text is at fault. Each text is run alone,
-///   and only a text that fails alone gets [`EmbedError::Backend`]. Before
-///   this, the coalescer failed every caller in the batch with the batch's
-///   error, so a write coalesced with a bad text by timing alone failed as a
-///   permanent refusal and its durable intent was settled `failed`.
+/// * **The canary succeeds:** a text is at fault, or the device's fault has
+///   passed. Each text is run alone, once, and only a text that fails alone
+///   gets [`EmbedError::Backend`]. Before this, the coalescer failed every
+///   caller in the batch with the batch's error, so a write coalesced with a
+///   bad text by timing alone failed as a permanent refusal and its durable
+///   intent was settled `failed`.
 ///
-/// A lone text that fails is judged the same way, by the canary.
+/// A lone text is rerun like any other (#310), so a failed chunk of one text
+/// costs three forwards: the text, the canary and the text again. Before
+/// that the canary alone judged a lone text, and a device fault that had
+/// passed by the canary (a Metal command buffer error, a CUDA out-of-memory)
+/// was charged to the text as a permanent refusal, while two texts in the
+/// same position were rerun and embedded. A text whose rerun fails gets
+/// `Backend` whatever the cause, so a device fault that spares the canary and
+/// returns for the rerun is still charged to the text.
 ///
 /// A width mismatch is not retried: it is a fact about the loaded model, not
 /// about a text, so every caller gets it (K2-R1-4).
@@ -1615,9 +1623,8 @@ where
             .map(|_| Err(EmbedError::Unavailable(msg.clone())))
             .collect();
     }
-    if texts.len() <= 1 {
-        return vec![Err(EmbedError::Backend(msg))];
-    }
+    // The canary passed: every text gets one run alone, a lone text too
+    // (#310), and its own result.
     texts
         .iter()
         .map(|text| match once(std::slice::from_ref(text)) {
@@ -2069,11 +2076,47 @@ mod tests {
     fn a_lone_bad_text_is_permanent_when_the_canary_passes() {
         let forwards = AtomicUsize::new(0);
         let out = forward_isolated(&["bad"], 4, fake_forward(&forwards, 4));
-        assert_eq!(forwards.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            forwards.load(Ordering::SeqCst),
+            3,
+            "the text, the canary, then the text again (#310)"
+        );
+        assert_eq!(out.len(), 1);
         assert!(
             matches!(out[0], Err(EmbedError::Backend(_))),
             "{:?}",
             out[0]
+        );
+    }
+
+    #[test]
+    fn a_lone_text_is_rerun_after_a_fault_that_has_passed_by_the_canary() {
+        // #310: the device fails one forward and has recovered by the canary
+        // (a Metal command buffer error, a CUDA out-of-memory that clears).
+        // Two or more texts were each rerun alone and embedded, but a lone
+        // text, the usual chunk under low load, was answered `Backend`
+        // without a rerun, so its write was refused for good.
+        let forwards = AtomicUsize::new(0);
+        let fails_once = |texts: &[&str]| -> Result<Vec<Vec<f32>>, EmbedError> {
+            if forwards.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(EmbedError::Backend("metal command buffer error".into()));
+            }
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut v = vec![0.0; 4];
+                    v[t.len() % 4] = 1.0;
+                    v
+                })
+                .collect())
+        };
+        let out = forward_isolated(&["a"], 4, fails_once);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].as_ref().expect("the rerun embeds")[1], 1.0);
+        assert_eq!(
+            forwards.load(Ordering::SeqCst),
+            3,
+            "the text, the canary, then the text again"
         );
     }
 

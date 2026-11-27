@@ -574,8 +574,8 @@ theorem good_work_serving (hw : 1 ≤ c.width) (hg : Good c f dim s) (t : Take)
         calls := hg.calls
         wired := by simp }
     · next haw =>
-      have hne : (items.filter (fun r => r ∉ s.gaveUp)).map (·.txt) ≠ [] := by simpa using haw
-      have hlen := forwardIsolated_length f dim s.calls _ hne
+      have hlen := forwardIsolated_length f dim s.calls
+        ((items.filter (fun r => r ∉ s.gaveUp)).map (·.txt))
       simp only [List.length_map] at hlen
       have hfst : ((items.filter (fun r => r ∉ s.gaveUp)).zip
           (forwardIsolated f dim s.calls ((items.filter (fun r => r ∉ s.gaveUp)).map (·.txt))).1).map
@@ -946,8 +946,8 @@ theorem work_progress {c : Cfg} {f : Fwd} {dim : Nat} {s : St} (hm : 0 < c.maxBa
         simp only [Pc.hand, Pc.rank, hti, ite_false, haw, List.length_nil] at hsp ⊢
         split <;> omega
       · next haw =>
-        have hne' : (items.filter (fun r => r ∉ s.gaveUp)).map (·.txt) ≠ [] := by simpa using haw
-        have hlen := forwardIsolated_length f dim s.calls _ hne'
+        have hlen := forwardIsolated_length f dim s.calls
+          ((items.filter (fun r => r ∉ s.gaveUp)).map (·.txt))
         simp only [List.length_map] at hlen
         have hfst := List.map_fst_zip (l₁ := items.filter (fun r => r ∉ s.gaveUp))
           (l₂ := (forwardIsolated f dim s.calls ((items.filter (fun r => r ∉ s.gaveUp)).map (·.txt))).1)

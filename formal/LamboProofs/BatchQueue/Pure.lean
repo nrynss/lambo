@@ -30,19 +30,17 @@ exactly the chunk's requests (`removeDesc_eq`). Isolation: with a row-wise
 forward each caller gets what its text gets alone, whatever it was batched
 with (`forwardIsolated_rowwise`); a failing device fails every caller
 `Unavailable` in two forwards, a width mismatch every caller `Backend` in one,
-and there is one answer per text (`forwardIsolated_device_down`,
+and there is one answer per text, for no texts too (`forwardIsolated_device_down`,
 `forwardIsolated_width_mismatch`, `forwardIsolated_length`). Fairness: at most
 `MAX_SINGLE_STREAK` single forwards in a row while a take has bulk texts
 (`pick_progress`), and a take ends within `phi + 1` iterations whatever
 arrives (`take_ends`; `|single| + 132·|bulk| + 1` with the Rust's constants,
-`phi_rust`). About the current code: a device fault that has passed by the
-canary is charged to a lone text as permanent, while two texts are rerun alone
-and embed (`lone_transient_fault_permanent`,
-`paired_transient_fault_recovers`, `test_lone_vs_pair`); with `MAX_BATCH`
-singles at every take a queued bulk text is never taken
-(`takePrioritized_no_bulk`); `texts.len() <= 1` answers one slot for no texts,
-unreachable from `serve_take` (`forwardIsolated_empty_quirk`). The tests'
-`fake_forward` cases are `decide` runs (`test_healthy` and the others).
+`phi_rust`). Since #310 a device fault that has passed by the canary costs no
+text anything: every text of the chunk, a lone text included, is rerun alone
+(`transient_fault_recovers`, `test_lone_rerun`). About the current code: with
+`MAX_BATCH` singles at every take a queued bulk text is never taken
+(`takePrioritized_no_bulk`). The tests' `fake_forward` cases are `decide` runs
+(`test_healthy` and the others).
 
 Boundary: tensor math, tokenization, padding and messages are not modelled,
 and the real forward's rows depend on their batch up to rounding (padding,
@@ -144,16 +142,15 @@ def solos (f : Fwd) (dim : Nat) : Nat → List Txt → List Res
 
 /-- `forward_isolated(texts, dim, forward)`, with `k` the index of its first
 forward. Returns the per-slot results and the forwards it ran, in order (the
-batch, then the canary, then each text alone). -/
+batch, then the canary, then each text alone; since #310 a lone text is rerun
+like any other). -/
 def forwardIsolated (f : Fwd) (dim k : Nat) (ts : List Txt) : List Res × List (List Txt) :=
   match once f k ts with
   | some vs => (widthChecked dim vs, [ts])
   | none =>
     match once f (k + 1) [canary] with
     | none => (ts.map (fun _ => .unavailable), [ts, [canary]])
-    | some _ =>
-      if ts.length ≤ 1 then ([.backend], [ts, [canary]])
-      else (solos f dim (k + 2) ts, [ts, [canary]] ++ ts.map (fun t => [t]))
+    | some _ => (solos f dim (k + 2) ts, [ts, [canary]] ++ ts.map (fun t => [t]))
 
 /-! ## Requests and the queue (`Pending`, `BatchQueue`) -/
 
@@ -895,18 +892,14 @@ theorem once_length {f : Fwd} {k : Nat} {ts : List Txt} {vs : List Vec} (h : onc
   · cases h
 
 /-- One answer per text, so `items.zip(results)` drops nobody. -/
-theorem forwardIsolated_length (f : Fwd) (dim k : Nat) (ts : List Txt) (h : ts ≠ []) :
+theorem forwardIsolated_length (f : Fwd) (dim k : Nat) (ts : List Txt) :
     (forwardIsolated f dim k ts).1.length = ts.length := by
   unfold forwardIsolated
   split
   · next vs hv => rw [widthChecked_length, once_length hv]
   · split
     · simp
-    · split
-      · next hl => cases ts with
-        | nil => exact absurd rfl h
-        | cons t ts => simp at hl ⊢; omega
-      · simp [solos_length]
+    · simp [solos_length]
 
 /-- Every forward `forward_isolated` runs is the chunk itself or one text
 (the canary, or a text of the chunk alone). -/
@@ -917,14 +910,12 @@ theorem forwardIsolated_fwds (f : Fwd) (dim k : Nat) (ts : List Txt) :
   · simp
   · split
     · simp
-    · split
-      · simp
-      · intro b hb
-        simp only [List.cons_append, List.nil_append, List.mem_cons, List.mem_map] at hb
-        rcases hb with rfl | rfl | ⟨t, ht, rfl⟩
-        · exact Or.inl rfl
-        · exact Or.inr (Or.inl rfl)
-        · exact Or.inr (Or.inr ⟨t, ht, rfl⟩)
+    · intro b hb
+      simp only [List.cons_append, List.nil_append, List.mem_cons, List.mem_map] at hb
+      rcases hb with rfl | rfl | ⟨t, ht, rfl⟩
+      · exact Or.inl rfl
+      · exact Or.inr (Or.inl rfl)
+      · exact Or.inr (Or.inr ⟨t, ht, rfl⟩)
 
 theorem forwardIsolated_fwds_caps (c : Cfg) (f : Fwd) (dim k : Nat) (ts : List Txt)
     (hw : ts.length ≤ c.width) (h1 : 1 ≤ c.width) (hs : Slack c ts) :
@@ -1072,55 +1063,38 @@ theorem forwardIsolated_rowwise (row : Txt → Option Vec) (dim w k : Nat) (hu :
     have hco : once (rowFwd row) (k + 1) [canary] = some [v] := by simp [once, rowFwd, hv]
     unfold forwardIsolated
     rw [ho, hco]
-    simp only
-    split
-    · next hl =>
-      cases ts with
-      | nil => exact absurd rfl hne
-      | cons t ts =>
-        cases ts with
-        | cons _ _ => simp at hl
-        | nil =>
-          have : row t = none := by
-            cases hr : row t with
-            | none => rfl
-            | some _ => exact absurd (by intro x hx; simp at hx; subst hx; simp [hr]) hall
-          simp [soloRes, this]
-    · exact solos_rowFwd row dim (k + 2) ts
+    exact solos_rowFwd row dim (k + 2) ts
 
-/-- Shown about the Rust: the canary judges a lone text without running it
-again, so a fault of the device that has passed by the canary is charged to
-a lone text as permanent (`Backend`), while the same fault on a chunk of two
-lets each text run alone and both embed. A write's text is often queued
-alone; `Backend` makes the write path settle it `failed` and consume its
-intent (`LamboError::Embed`, see `Drain/Worker.lean`). -/
+/-- A device fault that has passed by the canary: the first forward fails
+whatever it holds, and every later one is the row-wise forward. -/
 def flaky (row : Txt → Option Vec) : Fwd := fun k ts => if k = 0 then .err else rowFwd row k ts
 
-/-- `forward_isolated`: a transient device fault on a lone text's forward is
-answered as a permanent backend error, since a one-text batch is not retried.
--/
-theorem lone_transient_fault_permanent (row : Txt → Option Vec) (dim : Nat) (t : Txt)
+/-- Since #310 `forward_isolated` charges no text for a device fault that has
+passed by the canary: after the failed forward and a canary that embeds, every
+text of the chunk, a lone text included, is run alone and gets what it gets
+alone (`soloRes`), so a write's text queued alone is not refused as `Backend`
+for the device's fault. -/
+theorem transient_fault_recovers (row : Txt → Option Vec) (dim : Nat) (ts : List Txt)
     (hc : (row canary).isSome) :
-    (forwardIsolated (flaky row) dim 0 [t]).1 = [.backend] := by
+    (forwardIsolated (flaky row) dim 0 ts).1 = ts.map (soloRes row dim) := by
   obtain ⟨v, hv⟩ := Option.isSome_iff_exists.mp hc
-  simp [forwardIsolated, once, flaky, rowFwd, hv]
-
-/-- `forward_isolated`: when a transient device fault fails a pair's batched
-forward and the canary then embeds, each text is retried alone and gets what
-it gets alone (`soloRes`), as if the fault had not happened. -/
-theorem paired_transient_fault_recovers (row : Txt → Option Vec) (dim : Nat) (t u : Txt)
-    (hc : (row canary).isSome) :
-    (forwardIsolated (flaky row) dim 0 [t, u]).1 = [soloRes row dim t, soloRes row dim u] := by
-  obtain ⟨v, hv⟩ := Option.isSome_iff_exists.mp hc
-  have h0 : once (flaky row) 0 [t, u] = none := by simp [once, flaky]
+  have h0 : once (flaky row) 0 ts = none := by simp [once, flaky]
   have h1 : once (flaky row) (0 + 1) [canary] = some [v] := by simp [once, flaky, rowFwd, hv]
-  have he : solos (flaky row) dim 2 [t, u] = solos (rowFwd row) dim 2 [t, u] := by
-    simp [solos, solo, once, flaky]
+  have he : ∀ (us : List Txt) (k : Nat), 0 < k →
+      solos (flaky row) dim k us = solos (rowFwd row) dim k us := by
+    intro us
+    induction us with
+    | nil => intro k _; rfl
+    | cons u us ih =>
+      intro k hk
+      have hk0 : k ≠ 0 := by omega
+      simp only [solos]
+      rw [ih (k + 1) (by omega)]
+      congr 1
+      simp [solo, once, flaky, hk0]
   unfold forwardIsolated
   rw [h0, h1]
-  split
-  · next hl => simp at hl
-  · rw [he, solos_rowFwd]; rfl
+  exact (he ts 2 (by omega)).trans (solos_rowFwd row dim 2 ts)
 
 /-! ### The tests' `fake_forward`
 
@@ -1160,27 +1134,21 @@ theorem test_device_down :
       ([.unavailable, .unavailable, .unavailable, .unavailable],
         [[tA, tBB, tCCC, ⟨4, 4⟩], [canary]]) := by decide
 
-/-- `a_lone_bad_text_is_permanent_when_the_canary_passes`: two forwards. -/
-theorem test_lone_bad : forwardIsolated (fake 4) 4 0 [tBad] = ([.backend], [[tBad], [canary]]) := by
+/-- `a_lone_bad_text_is_permanent_when_the_canary_passes`: three forwards
+(the text, the canary, the text again). -/
+theorem test_lone_bad :
+    forwardIsolated (fake 4) 4 0 [tBad] = ([.backend], [[tBad], [canary], [tBad]]) := by
   decide
 
 /-- `a_width_mismatch_fails_every_caller_without_a_retry`. -/
 theorem test_width_mismatch :
     forwardIsolated (fake 4) 8 0 [tA, tBB] = ([.backend, .backend], [[tA, tBB]]) := by decide
 
-/-- `forward_isolated` on concrete texts with a device fault on the first
-forward only: a lone text fails (`backend`), a pair recovers both. -/
-theorem test_lone_vs_pair :
-    (forwardIsolated (fun k ts => if k = 0 then .err else fake 4 k ts) 4 0 [tA]).1 = [.backend] ∧
-      (forwardIsolated (fun k ts => if k = 0 then .err else fake 4 k ts) 4 0 [tA, tBB]).1 =
-        [.vec ⟨4, 1⟩, .vec ⟨4, 2⟩] := by decide
-
-/-- The `texts.len() <= 1` guard answers one slot for no texts when the
-forward fails on an empty batch. Unreachable: `serve_take` never forwards an
-empty chunk (`still_awaited` empties it to a `continue`). -/
-theorem forwardIsolated_empty_quirk :
-    (forwardIsolated (fun _ ts => if ts = [] then .err else fake 4 0 ts) 4 0 []).1 = [.backend] := by
-  decide
+/-- `a_lone_text_is_rerun_after_a_fault_that_has_passed_by_the_canary`: the
+first forward fails, the canary embeds, and the lone text's rerun embeds. -/
+theorem test_lone_rerun :
+    forwardIsolated (fun k ts => if k = 0 then .err else fake 4 k ts) 4 0 [tA] =
+      ([.vec ⟨4, 1⟩], [[tA], [canary], [tA]]) := by decide
 
 
 /-! ## One `serve_take` iteration -/
