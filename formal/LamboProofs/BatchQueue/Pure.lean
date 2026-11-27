@@ -29,18 +29,20 @@ restated loop is the Rust's `last_mut` loop (`lengthChunks_perm`,
 exactly the chunk's requests (`removeDesc_eq`). Isolation: with a row-wise
 forward each caller gets what its text gets alone, whatever it was batched
 with (`forwardIsolated_rowwise`); a failing device fails every caller
-`Unavailable` in two forwards, a width mismatch every caller `Backend` in one,
-and there is one answer per text, for no texts too (`forwardIsolated_device_down`,
-`forwardIsolated_width_mismatch`, `forwardIsolated_length`). Fairness: at most
-`MAX_SINGLE_STREAK` single forwards in a row while a take has bulk texts
-(`pick_progress`), and a take ends within `phi + 1` iterations whatever
-arrives (`take_ends`; `|single| + 132·|bulk| + 1` with the Rust's constants,
-`phi_rust`). Since #310 a device fault that has passed by the canary costs no
-text anything: every text of the chunk, a lone text included, is rerun alone
-(`transient_fault_recovers`, `test_lone_rerun`). About the current code: with
-`MAX_BATCH` singles at every take a queued bulk text is never taken
-(`takePrioritized_no_bulk`). The tests' `fake_forward` cases are `decide` runs
-(`test_healthy` and the others).
+`Unavailable` in two forwards, a width mismatch every caller `Backend` in
+one, and there is one answer per text, for no texts too
+(`forwardIsolated_device_down`, `forwardIsolated_width_mismatch`,
+`forwardIsolated_length`). Fairness: at most `MAX_SINGLE_STREAK` single
+forwards in a row while a take has bulk texts (`pick_progress`), and a take
+ends within `phi + 1` iterations whatever arrives (`take_ends`;
+`|single| + 132·|bulk| + 1` with the Rust's constants, `phi_rust`). Since
+#310 a device fault that has passed by the canary changes no text's answer:
+every text of the chunk, a lone text included, is rerun alone and gets what
+it gets alone (`transient_fault_recovers`); for a lone text that costs three
+forwards, the text, the canary and the text again (`test_lone_rerun`). About
+the current code: with `MAX_BATCH` singles at every take a queued bulk text
+is never taken (`takePrioritized_no_bulk`). The tests' `fake_forward` cases
+are `decide` runs (`test_healthy` and the others).
 
 Boundary: tensor math, tokenization, padding and messages are not modelled,
 and the real forward's rows depend on their batch up to rounding (padding,
@@ -1149,7 +1151,6 @@ first forward fails, the canary embeds, and the lone text's rerun embeds. -/
 theorem test_lone_rerun :
     forwardIsolated (fun k ts => if k = 0 then .err else fake 4 k ts) 4 0 [tA] =
       ([.vec ⟨4, 1⟩], [[tA], [canary], [tA]]) := by decide
-
 
 /-! ## One `serve_take` iteration -/
 

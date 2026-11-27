@@ -79,12 +79,12 @@ Other references, theorems with at least one: named 1406, simp 37, example 6, an
 
 ## `BatchQueue/Pure.lean`
 
-- (a) `takePrioritized_snd_sublist` (line 393): reviewed against the rule: the doc states what `take_prioritized` does, no more broadly than the statement.
-- (a) `pick_some` (line 1176): reviewed against the rule: `serve_take`'s pick always yields a batch while anything is left to serve.
+- (a) `takePrioritized_snd_sublist` (line 395): reviewed against the rule: the doc states what `take_prioritized` does, no more broadly than the statement.
+- (a) `pick_some` (line 1177): reviewed against the rule: `serve_take`'s pick always yields a batch while anything is left to serve.
 
 ## `BatchQueue/Runs.lean`
 
-- (a) `test_spawn_failure_wedges` (line 206): reviewed against the rule: `supervise` after a failed spawn: only timeouts answer (the test of that name).
+- (a) `test_spawn_failure_wedges` (line 212): reviewed against the rule: `supervise` after a failed spawn: only timeouts answer (the test of that name).
 
 ## `Canon.lean`
 

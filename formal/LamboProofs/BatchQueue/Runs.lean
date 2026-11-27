@@ -10,12 +10,13 @@ coalescer tests in `src/embed/candle.rs` (`test_take_singles_first`,
 `test_gave_up_not_forwarded`, `test_spawn_failure_wedges`), and the runs that
 show what the Rust does.
 
-Results about the Rust: a worker death answers the requests in its hands
-`Unavailable` ("worker exited mid-batch"), transient, as `forward_isolated`
-classes a failure that is not the text's (`worker_death_transient`, since
-#309; the path is defensive). The supervisor
-restarts the worker and the queue is served (`restart_serves_queue`), but not
-after shutdown, when only the drop of `Shared` answers the queue
+Results about the Rust: a worker death answers the requests in its hands at
+once by dropping their senders, which the model's class table marks
+transient, as `recv_bounded` and `embed_batch` report it since #309
+(`worker_exited()`, `Unavailable`; `worker_death_transient`, whose Rust test
+pins the class; the path is defensive). The supervisor restarts the worker
+and the queue is served (`restart_serves_queue`), but not after shutdown,
+when only the drop of `Shared` answers the queue
 (`death_after_shutdown_abandons_queue`, harmless: no caller can be waiting);
 after a failed spawn only timeouts answer (`wedged_stays`). With `MAX_BATCH`
 singles queued at every take a queued bulk text is never taken
@@ -129,14 +130,19 @@ theorem test_gave_up_not_forwarded :
 
 /-! ## What the model shows about the Rust -/
 
-/-- Since #309 a worker death is transient for the requests the worker held:
-each caller sees a dropped sender, which `recv_bounded` and `embed_batch`
-report as `worker_exited()`, `Unavailable`, so a write's text is refused
-retryably (`LamboError::EmbedUnavailable`) and not as a refusal of the text.
-The Rust test is `a_worker_death_answers_the_requests_it_held_as_transient`. -/
+/-- `a_worker_death_answers_the_requests_it_held_as_transient` (#309): a
+worker that dies holding a take of a single embed and a write's two bulk
+texts answers each of their callers by dropping its sender unsent, with no
+forward run, and each caller's observation is in the class `Obs.transient`
+gives a dropped sender, transient. That class is the model's table of what
+`recv_bounded` and `embed_batch` report (`worker_exited()`, `Unavailable`,
+since #309); nothing in the model derives it, and the Rust test is what
+pins it to the Rust. -/
 theorem worker_death_transient :
-    let s := run Cfg.rust okFwd 4 St.init [.supervise true, .enqueue (sReq 1 7), .work, .die]
-    s.obs = [(sReq 1 7, .dropped)] ∧ Obs.transient .dropped = some true := by decide
+    let s := run Cfg.rust okFwd 4 St.init
+      [.supervise true, .enqueue (sReq 1 7), .enqueueMany [bReq 2 5, bReq 3 5], .work, .die]
+    s.obs = [(sReq 1 7, .dropped), (bReq 2 5, .dropped), (bReq 3 5, .dropped)] ∧ s.fwds = [] ∧
+      s.obs.all (fun p => p.2.transient == some true) = true := by decide
 
 /-- The queue survives a worker death: the supervisor restarts the worker
 and the queued request is served. -/
@@ -229,7 +235,6 @@ def starveEvs : List Ev :=
 theorem queued_bulk_starves :
     let s := run cfg2 okFwd 4 St.init starveEvs
     s.queue = [bReq 0 9] ∧ s.fwds.length = 3 ∧ (bReq 0 9).txt ∉ s.fwds.flatten := by decide
-
 
 /-- The reviewer's scenario: a take of 24 bulk texts of 11 bytes; a 200-byte
 recall (`longR`) arrives during the first bulk forward; then a 5-byte single
