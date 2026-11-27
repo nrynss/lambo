@@ -254,13 +254,39 @@ Open the backup with `?immutable=1` when checking it; `mode=ro` can fail with er
 
 It is idempotent. It prints `sqlite schema provisioned (init_schema, idempotent)` and any re-key it did or skipped (`docs/reference/cli.mdx`, "Provision a store"). A refusal that names a held session means a writer still holds it: go back to step 3. Run any post-provision verb that step 1 of "Before you start" found, now, while the writer is stopped.
 
-7. Point the agent at the new binary and start it:
+7. Replace the first launch argument with the new binary path. The
+   `plutil -replace ProgramArguments.0` command can insert a second path
+   into the array. Use Python 3 to check the complete plist before
+   starting the writer.
 
-```sh
-plutil -replace ProgramArguments.0 -string "$RIG/bin/lambo-$V" "$PLIST"
-plutil -lint "$PLIST"
-plutil -extract ProgramArguments.0 raw "$PLIST"   # must print $RIG/bin/lambo-$V
-launchctl bootstrap gui/$(id -u) "$PLIST"
+```bash
+python3 - "$PLIST" "$RIG/bin/lambo-$OLD" "$RIG/bin/lambo-$V" <<'PY' &&
+import os
+from pathlib import Path
+import plistlib
+import shutil
+import subprocess
+import sys
+import tempfile
+
+path, old_binary, new_binary = sys.argv[1:]
+plist = Path(path)
+original = plistlib.loads(plist.read_bytes())
+args = original.get("ProgramArguments")
+if "Program" in original or not isinstance(args, list) or not args or args[0] != old_binary:
+    raise SystemExit("Expected the old binary in ProgramArguments[0] and no Program override")
+
+updated = {**original, "ProgramArguments": [new_binary, *args[1:]]}
+with tempfile.TemporaryDirectory(dir=plist.parent, prefix=".lambo-repin-") as directory:
+    staged = Path(directory) / plist.name
+    staged.write_bytes(plistlib.dumps(updated, sort_keys=False))
+    shutil.copymode(plist, staged)
+    subprocess.run(["plutil", "-lint", str(staged)], check=True)
+    if plistlib.loads(staged.read_bytes()) != updated:
+        raise SystemExit("LaunchAgent validation failed")
+    os.replace(staged, plist)
+PY
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
 ```
 
 Then run [Verify the upgrade](#verify-the-upgrade).
