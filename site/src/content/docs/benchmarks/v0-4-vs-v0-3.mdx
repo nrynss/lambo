@@ -1,0 +1,37 @@
+---
+title: "Lambo v0.4.0 vs. v0.3.0"
+description: "Measured faster recall and found concurrent write failures."
+sidebar:
+  label: "v0.4.0 vs. v0.3.0"
+  order: -1
+---
+
+On Metal, v0.4.0 reduced median recall latency from 310.0 ms to 5.7 ms for the repeated
+HTTP queries. For 75 distinct stdio queries after warm-up, the median fell from 315 ms
+to 26 ms. The top-eight sets matched on all 20 HTTP queries.
+
+## Metal comparison
+
+Both releases used Candle BGE-M3 on Apple M3 Pro and copies of the same dogfood store.
+
+| Measurement | v0.3.0 | v0.4.0 |
+| --- | --- | --- |
+| Eight-agent recall p50 | 16,431 ms | 7 ms |
+| 16-agent recall p50 | 47,041 ms | 6 ms |
+| Sequential derive to applied receipt p50 | 317.8 ms | 35.9 ms |
+
+Both releases had concurrent write failures. The v0.4.0 16-agent run reached the drain
+time limit with writes outstanding. The release replay recorded 140 differing calls of
+330, all attributable to documented v0.4.0 changes.
+
+## CUDA comparison
+
+The Linux test compared v0.4.0 against commit `bef53e6` on an 8,496-concept store.
+Client recall p50 fell from 804.8 ms to 15.4 ms in that comparison.
+
+## Source data
+
+For more information, refer to the [Metal concurrency, replay, and crash report](https://github.com/nrynss/lambo/blob/main/evidence/0.4.0-vs-0.3.0-load/README.md) and
+[Metal and CUDA sequential latency report](https://github.com/nrynss/lambo/blob/main/evidence/issue-108-perf/README.md).
+
+See [Lambo v0.4.0 release notes](/lambo/release-notes/v0-4-0/) to check upgrade steps.

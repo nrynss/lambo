@@ -1,0 +1,34 @@
+---
+title: "Lambo 0.2.2"
+description: "Enforces session embedding contracts and adds structured recall to the portal. Last release with a Windows binary."
+sidebar:
+  label: "0.2.2"
+  order: -4
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-08-17.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.2.2) · [Compare with v0.2.1](https://github.com/nrynss/lambo/compare/v0.2.1...v0.2.2)
+
+## Protect the session’s embedding space
+
+<Badge text="Enhancement" variant="note" />
+
+Writer attach and vector reads check the session’s embedding contract so vectors from a
+different model or width cannot silently enter the same search space.
+
+## Render structured recall in the web portal
+
+<Badge text="New" variant="success" />
+
+The read-only portal presents structured results alongside the verbatim recall block and
+suppresses promotion gate figures that do not apply to Canonical concepts.
+
+## Windows binary availability
+
+<Badge text="Behavior change" variant="caution" />
+
+This is the last release with a Windows binary. The shared local session endpoint introduced
+in v0.3.0 uses Unix sockets.

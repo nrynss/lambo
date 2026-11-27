@@ -1,0 +1,54 @@
+---
+title: "Lambo 0.4.0"
+description: "Adds image memory, multi-session HTTP, a multi-session web portal, and an optional Elasticsearch recall index."
+sidebar:
+  label: "0.4.0"
+  order: -6
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-10-11.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.4.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.4.0/CHANGELOG.md#040-2026-10-11)
+
+For benchmark results, see [v0.4.0 vs. v0.3.0](/lambo/benchmarks/v0-4-vs-v0-3/).
+
+## Provision existing SQL stores and update source builds
+
+<Badge text="Breaking change" variant="danger" />
+
+Run `lambo provision` before attaching an existing SQLite, PostgreSQL, or CockroachDB store.
+The release adds `concepts.embedding_source`. Building from source requires Rust 1.99 or
+later. Rust callers should also review the changelog’s changed public struct fields and enum
+variants.
+
+## Store and recall images
+
+<Badge text="New" variant="success" />
+
+EmbeddingGemma 2 embeds text and images into the same space when `llama-server` is
+configured for images. Use `lambo_derive_image` or `lambo derive-image` to store an image
+concept.
+
+## Serve multiple sessions over HTTP
+
+<Badge text="New" variant="success" />
+
+Use per-session MCP URLs and session-scoped credentials with `lambo serve`. The read-only
+web portal adds a session picker. Operators can also erase an entire session and leave an
+erasure tombstone.
+
+## Add an Elasticsearch recall index
+
+<Badge text="New" variant="success" />
+
+The optional Elasticsearch tier mirrors vectors for recall while the store remains
+authoritative.
+
+## Speed up warm SQLite recall
+
+<Badge text="Enhancement" variant="note" />
+
+The session holder ranks SQLite vectors from memory and caches repeated query embeddings. In
+the release benchmark, warm median recall went from 219 ms to 4.3 ms.

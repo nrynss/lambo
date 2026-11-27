@@ -1,0 +1,39 @@
+---
+title: "Lambo v0.8.0, v0.7.0, and v0.6.0"
+description: "Measured the recall improvements across three releases and the write-latency trade-off."
+sidebar:
+  label: "v0.8.0, v0.7.0, and v0.6.0"
+  order: -5
+---
+
+The RTX 4070 SUPER rig tested v0.7.0 alongside v0.6.0 and v0.8.0 to identify when
+recall sped up. All three builds returned the same top-eight sets on all 20 queries.
+The replay comparisons against v0.8.0 found zero unexpected differences.
+
+## CUDA results
+
+Each build used a copy of the 9,746-concept SQLite backup with Candle BGE-M3.
+The table shows the 16-agent runs.
+
+| Measurement | v0.6.0 | v0.7.0 | v0.8.0 |
+| --- | --- | --- | --- |
+| Recall p50 / p99 | 191.3 / 945.5 ms | 43.2 / 132.8 ms | 49.9 / 135.0 ms |
+| Apply lag p50, server | 157 ms | 70 ms | 113 ms |
+| Failed / acknowledged writes | 0 / 1,651 | 0 / 2,001 | 0 / 1,982 |
+
+Most of the recall gain appeared in v0.7.0. The v0.8.0 run retained most of that gain
+and took longer to apply writes than v0.7.0 at 16 agents. The report has one run per
+release at each load level.
+
+## Synthetic SQLite measurements
+
+In a separate performance test with 9,508 concepts and the fixture embedder, 16
+concurrent recalls reached 1,104 requests per second after lock changes, up from 63.
+The synthetic benchmark isolates the recall path from production embedding costs.
+
+## Source data
+
+For more information, refer to the [Three-release CUDA report and captures](https://github.com/nrynss/lambo/blob/main/evidence/0.8.0-vs-0.6.0/README.md) and
+[Synthetic SQLite performance report](https://github.com/nrynss/lambo/blob/main/evidence/issue-171-perf/README.md).
+
+See [Lambo v0.8.0 release notes](/lambo/release-notes/v0-8-0/) and [Lambo v0.7.0 release notes](/lambo/release-notes/v0-7-0/) to check upgrade steps.

@@ -106,9 +106,29 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Benchmarks',
+          items: [
+            { label: 'Overview and methodology', slug: 'benchmarks' },
+            { label: 'Recall quality', slug: 'benchmarks/recall-quality' },
+            {
+              label: 'Release comparisons',
+              collapsed: true,
+              items: [{ autogenerate: { directory: 'benchmarks' } }],
+            },
+          ],
+        },
+        {
           label: 'Evidence',
           items: [
             { label: 'Evidence & evaluation', slug: 'evidence' },
+          ],
+        },
+        {
+          label: 'Release notes',
+          collapsed: true,
+          items: [
+            { slug: 'release-notes' },
+            { autogenerate: { directory: 'release-notes' } },
           ],
         },
       ],

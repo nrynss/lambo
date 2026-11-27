@@ -1,0 +1,36 @@
+---
+title: "Lambo v0.6.0 vs. v0.5.0"
+description: "Caught a tail-latency regression on structural recall queries."
+sidebar:
+  label: "v0.6.0 vs. v0.5.0"
+  order: -3
+---
+
+The RTX 4070 SUPER rig found a tail-latency regression for structural questions such as
+`blast radius` and `depends on` on a 9,064-concept SQLite backup. Median recall latency
+was similar in both sequential comparisons.
+
+## CUDA results
+
+The harness ran two interleaved HTTP comparisons. The table shows the client timing
+range across those runs and the write results from concurrent load tests.
+
+| Measurement | v0.5.0 | v0.6.0 |
+| --- | --- | --- |
+| Sequential recall p50 | 17.5–17.7 ms | 17.6–18.0 ms |
+| Sequential recall p99 | 23.5–50.6 ms | 288.0–310.9 ms |
+| Eight-agent failed / attempted writes | 0 / 540 | 0 / 533 |
+| 16-agent failed / attempted writes | 0 / 1,825 | 0 / 1,763 |
+
+Both builds returned identical top-eight sets on all 20 queries. The 330-call replay
+had fewer differences between releases than the v0.5.0 same-build control.
+The v0.7.0 results in the next CUDA gate show the recall tail after the fix.
+
+See [the three-release CUDA comparison](/lambo/benchmarks/v0-8-vs-v0-6/) to check
+how v0.7.0 and v0.8.0 performed on the later store.
+
+## Source data
+
+For more information, refer to the [CUDA report and captures](https://github.com/nrynss/lambo/blob/main/evidence/0.6.0-vs-0.5.0/README.md).
+
+See [Lambo v0.6.0 release notes](/lambo/release-notes/v0-6-0/) to check upgrade steps.

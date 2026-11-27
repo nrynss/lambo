@@ -1,0 +1,71 @@
+---
+title: "Recall quality"
+description: "See how vector retrieval and rank fusion score on labeled queries."
+sidebar:
+  hidden: true
+---
+
+The public evaluation corpus has 100 Lambo concepts. Each answerable query has graded
+relevance labels. The fusion study uses a development split to choose settings and a
+held-out split to measure how those settings perform on other queries.
+
+## Vector retrieval baseline
+
+The Candle BGE-M3 CPU baseline uses 1,024-dimensional embeddings and 204 answerable
+queries from an earlier revision of the corpus. It ranks concepts by vector similarity.
+The test repeats each concept's text to match the embedding input for a derive that stores
+one concept. Query text goes to the embedder as written.
+
+Hit@k is the share of queries with a directly relevant concept among the first k results.
+Normalized discounted cumulative gain at 10 (nDCG@10) scores the first 10 results using
+their relevance grades and positions.
+
+| Query split | Queries | Hit@1 | Hit@5 | Hit@10 | nDCG@10 |
+|---|---|---|---|---|---|
+| All answerable | 204 | 0.779 | 0.941 | 0.966 | 0.876 |
+| Development | 125 | 0.808 | 0.952 | 0.960 | 0.893 |
+| Held out | 79 | 0.734 | 0.924 | 0.975 | 0.850 |
+
+For more information, refer to the [baseline report and recorded model identity](https://github.com/nrynss/lambo/tree/8d2269a9/evidence/eval-set).
+
+## Fusion on the expanded corpus
+
+The fusion study used 262 answerable queries, including 97 held-out queries. Its reported
+reciprocal rank fusion (RRF) setting uses `k = 3`. RRF improved overall ranking and
+reduced scores on some query families.
+
+| Held-out queries | Max fusion | BGE-M3 with RRF | EmbeddingGemma 2 with RRF |
+|---|---|---|---|
+| All answerable (97) | 0.840 | 0.872 | 0.863 |
+| Vocabulary mismatch (18) | 0.672 | 0.724 | 0.744 |
+| Exact identifier (11) | 0.948 | 0.899 | 0.881 |
+| Contrast (14) | 0.912 | 0.879 | 0.864 |
+
+The table shows nDCG@10. Max fusion remains the general default. Calibrated Qwen3
+Embedding 4B contracts use RRF by default when fusion is unset, based on a separate
+evaluation.
+
+For more information, refer to the [expanded fusion experiment](https://github.com/nrynss/lambo/blob/main/evidence/issue-173-fusion/README.md)
+and the [Qwen3 Embedding 4B experiment](https://github.com/nrynss/lambo/blob/main/evidence/issue-221/README.md#fusion-follow-up-reopened-221-measured-4-nov-2026).
+
+## Run the vector evaluation
+
+Run the evaluator from the repository root with Rust and the Candle BGE-M3 model. It
+writes metrics for the checked-out corpus to a JSON file in your temporary directory.
+The published baseline used the corpus and model revision recorded with that run.
+
+```bash
+LAMBO_EMBEDDER=candle LAMBO_EMBED_DEVICE=cpu \
+  cargo run --release --features embed-candle --example eval_measure -- \
+  --out /tmp/lambo-recall-quality.json
+```
+
+For more information, refer to the [evaluation corpus and labeling rules](https://github.com/nrynss/lambo/blob/main/fixtures/eval/README.md)
+and the [fusion reproduction script](https://github.com/nrynss/lambo/blob/main/evidence/issue-173-fusion/run-v2.sh).
+
+## Evaluation limits
+
+The corpus covers Lambo topics. Relevance labeling included a review of BGE-M3 results,
+which can favor that model. The corpus has no graph edges, so the scores describe lookup
+and ranking on text. See [Evidence and evaluation](/lambo/evidence/) to find shared-layer
+and live multi-agent results.

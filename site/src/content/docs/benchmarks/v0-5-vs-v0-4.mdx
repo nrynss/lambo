@@ -1,0 +1,34 @@
+---
+title: "Lambo v0.5.0 vs. v0.4.0"
+description: "Verified that concurrent writes stopped failing in the tested workloads."
+sidebar:
+  label: "v0.5.0 vs. v0.4.0"
+  order: -2
+---
+
+The Metal release comparison recorded zero failed or dropped writes on v0.5.0
+at eight and 16 agents. On v0.4.0, write failures and queue drops increased under
+load. The v0.5.0 16-agent run still took 10.2 s at median to apply a write.
+
+## Metal results
+
+The table uses the full release comparison suite. The acceptance report covers a
+separate set of runs.
+
+| Measurement | v0.4.0 | v0.5.0 |
+| --- | --- | --- |
+| Sequential recall p50 / p99 | 5.3 / 25.4 ms | 5.3 / 25.8 ms |
+| Eight-agent failed / attempted writes | 253 / 519 | 0 / 521 |
+| 16-agent failed plus dropped / attempted | 1,441 / 2,009 | 0 / 2,003 |
+| Stdio time until ready | 3.4 s | 0.8 s |
+| Proxy footprint after election | 90 MB | 6.5 MB |
+
+Both releases returned the same top-eight sets on all 20 queries. Differences in the
+330-call replay matched the v0.4.0 same-build control.
+
+## Source data
+
+For more information, refer to the [Metal release comparison and captures](https://github.com/nrynss/lambo/blob/main/evidence/0.5.0-vs-0.4.0/README.md) and
+[Separate acceptance runs](https://github.com/nrynss/lambo/blob/main/evidence/0.5.0-acceptance/README.md).
+
+See [Lambo v0.5.0 release notes](/lambo/release-notes/v0-5-0/) to check upgrade steps.

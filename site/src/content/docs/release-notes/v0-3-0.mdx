@@ -1,0 +1,35 @@
+---
+title: "Lambo 0.3.0"
+description: "Adds a local endpoint for sharing a session writer, durable garbage-collection counters, and configurable promotion policy."
+sidebar:
+  label: "0.3.0"
+  order: -5
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-10-07.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.3.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.3.0/CHANGELOG.md#030-2026-10-07)
+
+## Provision existing stores and review platform builds
+
+<Badge text="Breaking change" variant="danger" />
+
+Run `lambo provision` on existing SQL stores to add the new session counters before
+attaching the writer. Windows users can find the last Windows binary in
+[v0.2.2](/lambo/release-notes/v0-2-2/).
+
+## Share the local writer
+
+<Badge text="New" variant="success" />
+
+A shared session endpoint lets local clients use the same writer. The release also
+introduced the Apple silicon Metal build.
+
+## Select a promotion policy from configuration
+
+<Badge text="New" variant="success" />
+
+Set `promotion_policy` in `lambo.toml` or `LAMBO_PROMOTION_POLICY` in the environment to
+choose between `Swarm` and `Solo`.

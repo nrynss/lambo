@@ -57,3 +57,16 @@ The first deploy runs on the next push to `main`. You can also trigger it manual
 Update shared prose in both `docs/reference/` and `src/content/docs/`, preserving the site's component imports, `/lambo/` link prefixes and marked site-only sections. Run `scripts/docs/check-mirror-drift.sh` from the repository root to compare the mirrored pages. Then run `npm run build` from `site/` to validate MDX and generate the site.
 
 Add new pages to `astro.config.mjs`'s sidebar and, for shared reference pages, `docs/reference/docs.json`. The migration guide covers existing-memory upgrades and repair; keep it linked from installation and the interface references when their upgrade requirements change.
+
+## Release notes
+
+When preparing a release, add a page under `src/content/docs/release-notes/` using the `v0-16-0.mdx` example. Lead with any required upgrade steps, then describe user-visible changes. Link to the GitHub release for downloads and the tagged `CHANGELOG.md` for details.
+
+Set the new page's `sidebar.order` to one less than the previous release and add its summary at the top of the index table. Starlight adds the page to the sidebar automatically.
+
+## Benchmarks
+
+Add a release comparison under `src/content/docs/benchmarks/` and link it from the
+Benchmarks index and the corresponding release notes. Set `sidebar.order` to one less
+than the most recent comparison. Include the tested builds, hardware, workload, and
+links to the published reports in `evidence/`.

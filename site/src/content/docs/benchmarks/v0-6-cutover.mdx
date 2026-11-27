@@ -1,0 +1,32 @@
+---
+title: "Lambo v0.6.0 session cutover"
+description: "Compared one mixed session with per-project sessions on the same release."
+sidebar:
+  label: "v0.6.0 session cutover"
+  order: -4
+---
+
+The Metal rig used v0.6.0 on both sides to compare one mixed session with eight
+sessions. Project sessions could read the shared `general` layer. After the split,
+the verification queries returned zero hits from other projects.
+
+## Before and after the split
+
+The sequential comparison sent 240 recalls per side. Concurrent load tests measured
+eight agents on one project and two agents per project across four sessions.
+
+| Measurement | Mixed session | Split sessions |
+| --- | --- | --- |
+| Sequential recall p50 / p99 | 5.64 / 144.05 ms | 2.69 / 74.93 ms |
+| Derive to applied receipt p50 | 30.65 ms | 26.18 ms |
+| Eight-agent applied / attempted writes | 541 / 541 | 543 / 543 |
+
+All 527 writes applied in the four-session run. Project recall@5 scored from 0.852
+through 1.000 against the old responses for projects with comparable results. The split
+assigns new node IDs, so the report checks hit content for the HTTP comparison.
+
+## Source data
+
+For more information, refer to the [Session cutover report and captures](https://github.com/nrynss/lambo/blob/main/evidence/0.6.0-cutover/README.md).
+
+See [Lambo v0.6.0 release notes](/lambo/release-notes/v0-6-0/) to check upgrade steps.

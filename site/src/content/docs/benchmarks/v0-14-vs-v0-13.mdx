@@ -1,0 +1,31 @@
+---
+title: "Lambo v0.14.0 vs. v0.13.0"
+description: "Matched replay and top-eight recall, with intermittent slow calls under load."
+sidebar:
+  label: "v0.14.0 vs. v0.13.0"
+  order: -8
+---
+
+On the Apple M3 Pro, both releases applied all 330 replay calls with identical outcomes.
+The first eight recall hits matched on all 200 paired queries. A ninth hit with a notice
+changed the full-response overlap on some queries.
+
+## Metal results
+
+The tests used a 2,743-concept SQLite session with a shared `general` layer.
+
+| Measurement | v0.13.0 | v0.14.0 |
+| --- | --- | --- |
+| Sequential recall p50 / p99, client | 2.65 / 23.87 ms | 2.65 / 24.66 ms |
+| Sequential stats p50, client | 0.52 ms | 0.40 ms |
+| 16-agent slow calls across six runs, server | 94 | 222 |
+
+Both releases completed all 14 concurrent runs with zero failed writes. In paired tests,
+slow seconds often coincided across both servers. The tests showed a larger tail on
+v0.14.0 overall and left its cause unresolved.
+
+## Source data
+
+For more information, refer to the [Metal report and captures](https://github.com/nrynss/lambo/blob/main/evidence/0.14.0-vs-0.13.0-metal/README.md).
+
+See [Lambo v0.14.0 release notes](/lambo/release-notes/v0-14-0/) to check upgrade steps.

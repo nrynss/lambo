@@ -1,0 +1,44 @@
+---
+title: "Lambo 0.8.0"
+description: "Warns on stale citations, suggests possible replacements, and adds recall tuning options."
+sidebar:
+  label: "0.8.0"
+  order: -10
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-10-28.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.8.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.8.0/CHANGELOG.md#080-2026-10-28)
+
+For benchmark results, see [v0.8.0, v0.7.0, and v0.6.0](/lambo/benchmarks/v0-8-vs-v0-6/).
+
+## Back up before writing new supersession edges
+
+<Badge text="Breaking change" variant="danger" />
+
+Once v0.8.0 writes a `SuspectedSupersedes` edge, v0.7.0 and earlier refuse to load that
+session. Keep a pre-upgrade backup if you might roll back.
+
+## Find stale citations and possible replacements
+
+<Badge text="New" variant="success" />
+
+Recall shows contradictions on ordinary memory and warns when a result depends on
+contradicted knowledge. Use `lambo_stale` to list dependents. Writes can also produce
+suggested replacement candidates that an agent can review and cite in `against`.
+
+## Tune recall fusion and redundant results
+
+<Badge text="New" variant="success" />
+
+Set `[fusion] kind = "rrf"` to combine ranks across retrieval legs, or enable
+`[selection] skip_redundant` to omit near-duplicate hits.
+
+## Review EmbeddingGemma 2 thresholds
+
+<Badge text="Behavior change" variant="caution" />
+
+The calibrated contract tightens the merge threshold and the default layer similarity floor.
+Set `[embedder] calibration = "off"` to restore the v0.7.0 values.

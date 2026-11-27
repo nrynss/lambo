@@ -1,0 +1,55 @@
+---
+title: "Lambo 0.15.0"
+description: "Holds writes in order during embedder outages, adds store-wide portal discovery, and repairs embedding drift under the same contract."
+sidebar:
+  label: "0.15.0"
+  order: -20
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-11-22.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.15.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.15.0/CHANGELOG.md#0150-2026-11-22)
+
+For benchmark results, see [v0.15.0 vs. v0.14.0 on Metal](/lambo/benchmarks/v0-15-vs-v0-14/) and [v0.15.0 vs. v0.12.0 on CUDA](/lambo/benchmarks/v0-15-vs-v0-12/).
+
+## Provision each store
+
+<Badge text="Breaking change" variant="danger" />
+
+Run `lambo provision` on each store before restarting its writers. The first run scans for
+canonical keys that contain an empty stem and re-keys those concepts. A durable name with an
+invalid key can prevent a session from opening. The error identifies the affected row, and
+the changelog gives the repair procedure.
+
+## Handle pending writes during embedder outages
+
+<Badge text="Breaking change" variant="danger" />
+
+In-session writes held due to an outage now answer `pending_replay`. Later writes from the
+same agent wait behind them while the writer retries. Update clients and monitoring that
+counted these outages as `failed`. See [MCP receipt states](/lambo/mcp/#lambo_stats).
+
+## Discover sessions from the web portal
+
+<Badge text="New" variant="success" />
+
+`--discover-sessions` or `[web] discover_sessions = true` lets callers whose scope covers
+every served session read live sessions created after startup. Leave the new key out of a
+configuration you also use with v0.14.0.
+
+## Repair drifted text vectors
+
+<Badge text="New" variant="success" />
+
+`lambo re-embed --rewrite-same-contract` rewrites text vectors under the existing contract
+when a canary detects drift. A full re-embed requires `--repin-canary` if the live embedder
+cannot reproduce the current pin.
+
+## Open sessions with mixed hierarchy and citation cycles
+
+<Badge text="Enhancement" variant="note" />
+
+Sessions that v0.14.0 rejected because a child cited its own parent can load without a data
+repair.

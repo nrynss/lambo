@@ -1,0 +1,46 @@
+---
+title: "Lambo 0.7.0"
+description: "Speeds up SQLite recall and writes, adds an embedding canary, and suggests near-duplicate aliases."
+sidebar:
+  label: "0.7.0"
+  order: -9
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-10-19.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.7.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.7.0/CHANGELOG.md#070-2026-10-19)
+
+For benchmark results, see [v0.8.0, v0.7.0, and v0.6.0](/lambo/benchmarks/v0-8-vs-v0-6/).
+
+## Provision every existing store
+
+<Badge text="Breaking change" variant="danger" />
+
+Stop all session holders on the store, back it up, and run `lambo provision`. SQLite
+provisioning transcodes vectors to packed `f32`. A v0.6.0 binary cannot read those vectors.
+PostgreSQL and CockroachDB provisioning creates `store_meta`, and all three stores re-key
+canonical keys affected by identifier handling.
+
+## Detect embedding drift at attach
+
+<Badge text="New" variant="success" />
+
+The writer pins embeddings of fixed phrases to detect model changes behind the same
+embedding contract. `[embedder] canary = "verify"` can refuse attach on drift. The default
+is `warn`.
+
+## Preview near-duplicate aliases
+
+<Badge text="New" variant="success" />
+
+`lambo canon alias-preview --similar` suggests pairs for review and leaves the store
+untouched.
+
+## Recall and write faster on SQLite
+
+<Badge text="Enhancement" variant="note" />
+
+On the synthetic SQLite benchmark, median keyword recall fell from 18.7 ms to 7.5 ms, and
+back-to-back write acknowledgement fell from 24.8 ms to 0.8 ms.

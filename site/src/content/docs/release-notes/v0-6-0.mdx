@@ -1,0 +1,46 @@
+---
+title: "Lambo 0.6.0"
+description: "Adds shared memory layers and repo-scoped paths, and makes concept citations count toward canonization."
+sidebar:
+  label: "0.6.0"
+  order: -8
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-10-13.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.6.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.6.0/CHANGELOG.md#060-2026-10-13)
+
+For benchmark results, see [v0.6.0 session cutover](/lambo/benchmarks/v0-6-cutover/) and [v0.6.0 vs. v0.5.0](/lambo/benchmarks/v0-6-vs-v0-5/).
+
+## Check rollback before sharing a store across versions
+
+<Badge text="Breaking change" variant="danger" />
+
+A v0.5.0 binary refuses sessions that contain `Contradicts` edges or unconsumed intents it
+cannot decode. Drain the v0.6.0 writer and read the tagged changelog before rolling back.
+Keep a pre-upgrade backup.
+
+## Layer shared memory under project sessions
+
+<Badge text="New" variant="success" />
+
+Serve one session per project and layer a shared session beneath them through
+`[serve] layers`. `lambo session classify`, `split`, and `verify` help move a mixed session
+into a new SQLite store and compare recall.
+
+## Record contradictions and scope file paths
+
+<Badge text="New" variant="success" />
+
+Use `against` to cite a ruling that a new write refutes. Use `repo_scope` to give the same
+path in different repositories distinct identities.
+
+## Review canonization and layer eligibility
+
+<Badge text="Behavior change" variant="caution" />
+
+Canonization bases support on concept citations from distinct interactions. Preview the
+effects with `lambo canon dry-run` on a backup. Ordinary layer results need vector evidence
+at the configured similarity floor, which defaults to 0.50 in this release.

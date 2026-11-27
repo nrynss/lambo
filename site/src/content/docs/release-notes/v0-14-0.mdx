@@ -1,0 +1,38 @@
+---
+title: "Lambo 0.14.0"
+description: "Adds lease-free store health, vector export, and diagnostics for missing vectors."
+sidebar:
+  label: "0.14.0"
+  order: -19
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-11-20.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.14.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.14.0/CHANGELOG.md#0140-2026-11-20)
+
+For benchmark results, see [v0.14.0 vs. v0.13.0](/lambo/benchmarks/v0-14-vs-v0-13/).
+
+## Inspect store health without a writer
+
+<Badge text="New" variant="success" />
+
+`lambo stats --store` reports concept and edge counts, vector coverage, current writer
+leases, and last-write times across the store. Add `--json` for scripts. Use
+`lambo stats --missing-vectors` to list missing vectors for a session.
+
+## Export query and document vectors
+
+<Badge text="New" variant="success" />
+
+`lambo embed` prints vectors and their embedding contract without opening a store. Export a
+query vector and use `lambo recall --query-vector-as-text` with the original query text to
+replay text recall.
+
+## Explain how inspect matched its focus
+
+<Badge text="Enhancement" variant="note" />
+
+`lambo_inspect` adds `concept_type` and `resolution` to its structured focus, so clients can
+tell whether a durable name, ID, exact text, or fuzzy match found the concept.

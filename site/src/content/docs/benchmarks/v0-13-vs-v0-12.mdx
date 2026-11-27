@@ -1,0 +1,33 @@
+---
+title: "Lambo v0.13.0 vs. v0.12.0"
+description: "Matched writes in a corrected replay and recorded one recall query difference."
+sidebar:
+  label: "v0.13.0 vs. v0.12.0"
+  order: -7
+---
+
+On the Apple M3 Pro, the corrected replay compared 330 calls and found matching outcomes
+and semantic edges. The initial harness treated the same merge as different when its
+node IDs sorted differently. The corrected run compared the merge targets directly.
+
+## Metal results
+
+The tests used a 2,665-concept SQLite session with a shared `general` layer. One A/B run
+measured client latency for each release.
+
+| Measurement | v0.12.0 | v0.13.0 |
+| --- | --- | --- |
+| Sequential recall p50 / p99 | 2.02 / 21.69 ms | 2.02 / 21.66 ms |
+| Derive to applied receipt p50 | 25.94 ms | 25.92 ms |
+| Eight-agent failed / attempted writes | 0 / 543 | 0 / 543 |
+| 16-agent failed / attempted writes | 0 / 2,128 | 0 / 2,128 |
+
+The captured recall sets matched on 19 of 20 queries. A later manual check suggested
+that the remaining difference came from a ninth notice hit that depended on startup time.
+The archived run records only aggregate overlap, so the cause remains unconfirmed.
+
+## Source data
+
+For more information, refer to the [Metal report and captures](https://github.com/nrynss/lambo/blob/main/evidence/0.13.0-vs-0.12.0-metal/README.md).
+
+See [Lambo v0.13.0 release notes](/lambo/release-notes/v0-13-0/) to check upgrade steps.

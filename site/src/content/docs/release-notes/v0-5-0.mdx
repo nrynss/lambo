@@ -1,0 +1,38 @@
+---
+title: "Lambo 0.5.0"
+description: "Improves concurrent writes, avoids loading Candle in proxying servers, and adds a shutdown receipt state."
+sidebar:
+  label: "0.5.0"
+  order: -7
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-10-12.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.5.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.5.0/CHANGELOG.md#050-2026-10-12)
+
+For benchmark results, see [v0.5.0 vs. v0.4.0](/lambo/benchmarks/v0-5-vs-v0-4/).
+
+## Handle the new shutdown receipt
+
+<Badge text="Breaking change" variant="danger" />
+
+Update receipt consumers for `close_unflushed`. It means the closing writer could not
+confirm that it saved the intent. Recall before submitting the same concept again. Rust
+callers must also add a wildcard arm when matching the now non-exhaustive `ReceiptAnswer`.
+
+## Reduce contention between writes
+
+<Badge text="Enhancement" variant="note" />
+
+Concurrent derives spend less time holding the graph lock. The release’s 16-agent run
+applied all 1,999 writes. Derives and actions that would close an acyclic relationship now
+report the kind of cycle they would create.
+
+## Load Candle only when a writer attaches
+
+<Badge text="Enhancement" variant="note" />
+
+A serve that proxies to the lease holder skips loading the model. The local identity cache
+also avoids re-hashing unchanged model weights on subsequent starts.

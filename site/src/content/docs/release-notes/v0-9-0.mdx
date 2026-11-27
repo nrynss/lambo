@@ -1,0 +1,36 @@
+---
+title: "Lambo 0.9.0"
+description: "Calibrates both Qwen3 Embedding 4B widths, warns on uncalibrated contracts, and explains how to initialize fresh stores."
+sidebar:
+  label: "0.9.0"
+  order: -11
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-11-04.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.9.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.9.0/CHANGELOG.md#090-2026-11-04)
+
+## Check rankings on calibrated Qwen stores
+
+<Badge text="Behavior change" variant="caution" />
+
+Qwen3 Embedding 4B gets measured constants at 1024 and 2560 dimensions. The constants affect
+recall scoring, layer admission, and merge thresholds. For this release, setting
+`[embedder] calibration = "off"` restores the previous constants.
+
+## Request a specific output width
+
+<Badge text="New" variant="success" />
+
+Set `[embedder] dimensions` to send the OpenAI-compatible `dimensions` field. Its value must
+equal the configured `dim`.
+
+## Diagnose a fresh store or an uncalibrated contract
+
+<Badge text="Enhancement" variant="note" />
+
+Attach tells you to run `lambo provision` when a SQL store has no schema. `lambo serve`
+warns on an uncalibrated embedding contract and `lambo stats` displays its calibration
+status.

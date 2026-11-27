@@ -1,0 +1,37 @@
+---
+title: "Lambo 0.13.0"
+description: "Reports the strength of each recall leg and restores vector search when a planned dependency traversal falls through."
+sidebar:
+  label: "0.13.0"
+  order: -18
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-11-19.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.13.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.13.0/CHANGELOG.md#0130-2026-11-19)
+
+For benchmark results, see [v0.13.0 vs. v0.12.0](/lambo/benchmarks/v0-13-vs-v0-12/).
+
+## Update Rust struct literals
+
+<Badge text="Breaking change" variant="danger" />
+
+Code that constructs `RecallResult` or `ContractCalibration` with a struct literal must
+supply the new fields. See the tagged changelog for the field list.
+
+## Read recall strength scores
+
+<Badge text="New" variant="success" />
+
+`top_legs` reports the best score from each first-phase leg, and `confidence` combines the
+scores where the chosen basis supports it. Treat `confidence` as a provisional diagnostic.
+Its scale depends on the basis, embedding contract, and store size.
+
+## Recover vector search after traversal falls through
+
+<Badge text="Enhancement" variant="note" />
+
+When a graph write invalidates a planned dependency traversal and recall falls back to
+blended results, recall can run the vector search that it skipped.

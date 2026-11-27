@@ -1,0 +1,40 @@
+---
+title: "Lambo 0.12.0"
+description: "Adds durable names for concepts, reviewed alias repair, and a migration guide."
+sidebar:
+  label: "0.12.0"
+  order: -17
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-11-16.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.12.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.12.0/CHANGELOG.md#0120-2026-11-16)
+
+For benchmark results, see [v0.12.0 vs. v0.8.0](/lambo/benchmarks/v0-12-vs-v0-8/).
+
+## Provision SQL stores and keep a rollback backup
+
+<Badge text="Breaking change" variant="danger" />
+
+Drain accepted writes, stop the writers, and take a consistent backup before running
+`lambo provision` on existing SQL stores. The release adds two tables. To roll back after
+using names or alias repair, restore the pre-upgrade backup. Follow
+[Migration and memory repair](/lambo/migration/) for the full procedure.
+
+## Update Rust names and snapshot code
+
+<Badge text="Breaking change" variant="danger" />
+
+`Memory::declare_synonym` requires an existing target. Supply the new `name` field in
+`ConceptCitations` literals and preserve `GraphSnapshot.names` and
+`GraphSnapshot.retired_aliases` in custom adapters and import or export tools.
+
+## Cite concepts by durable name
+
+<Badge text="New" variant="success" />
+
+A normalized name stays bound to a concept ID and works in citations, contradictions,
+inspection, and recall. Use `lambo names assign` for existing concepts and
+`lambo names migrate` to preview legacy names and reviewed alias repairs.
