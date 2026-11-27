@@ -2757,7 +2757,16 @@ mod tests {
         // its worker: it takes the three requests off the queue as
         // `coalesce_loop` does, then dies holding them.
         let worker = std::thread::spawn(move || {
+            // Bounded, so a regression that answers a caller without queueing
+            // its request fails the test instead of hanging it: the stand-in
+            // drops what was queued, which answers those callers at once,
+            // and dies with a payload the assertion below rejects.
+            let give_up = std::time::Instant::now() + Duration::from_secs(10);
             while shared.queue.len() < 3 {
+                if std::time::Instant::now() >= give_up {
+                    drop(shared.queue.drain_all());
+                    std::panic::resume_unwind(Box::new("fewer than three requests were queued"));
+                }
                 std::thread::sleep(Duration::from_millis(1));
             }
             let held = shared.queue.wait_for_batch(MAX_BATCH).expect("a take");
@@ -2767,16 +2776,23 @@ mod tests {
             std::panic::resume_unwind(Box::new("worker killed mid-batch"));
         });
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        let (single, bulk) = tokio::join!(
-            e.embed("recall query"),
-            e.embed_batch(&["write text one", "write text two"], deadline)
-        );
+        // Bounded too: a request queued after the stand-in gave up would
+        // otherwise hold `embed` for `EMBED_WAIT`.
+        let answered = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(
+                e.embed("recall query"),
+                e.embed_batch(&["write text one", "write text two"], deadline)
+            )
+        })
+        .await;
+        // The stand-in ends within its own bound whatever the callers did.
         let death = worker.join().expect_err("the worker died");
         assert_eq!(
             death.downcast_ref::<&str>(),
             Some(&"worker killed mid-batch"),
             "the worker died holding the take, not before it"
         );
+        let (single, bulk) = answered.expect("a worker death answers its callers at once");
         assert_eq!(bulk.len(), 2);
         for result in std::iter::once(single).chain(bulk) {
             let err = result.unwrap_err();
