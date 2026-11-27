@@ -10,23 +10,25 @@ coalescer tests in `src/embed/candle.rs` (`test_take_singles_first`,
 `test_gave_up_not_forwarded`, `test_spawn_failure_wedges`), and the runs that
 show what the Rust does.
 
-Results about the Rust: a worker death answers the requests in its hands
-`Backend` ("worker exited mid-batch"), permanent, though nothing was learned
-about their texts, where `forward_isolated` would class that failure
-`Unavailable`; a write caught in it is refused and its intent consumed
-`failed` (`worker_death_permanent`; the path is defensive). The supervisor
-restarts the worker and the queue is served (`restart_serves_queue`), but not
-after shutdown, when only the drop of `Shared` answers the queue
+Results about the Rust: a worker death answers the requests in its hands at
+once by dropping their senders, which the model's class table marks
+transient, as `recv_bounded` and `embed_batch` report it since #309
+(`worker_exited()`, `Unavailable`; `worker_death_transient`, whose Rust test
+pins the class; the path is defensive). The supervisor restarts the worker
+and the queue is served (`restart_serves_queue`), but not after shutdown,
+when only the drop of `Shared` answers the queue
 (`death_after_shutdown_abandons_queue`, harmless: no caller can be waiting);
 after a failed spawn only timeouts answer (`wedged_stays`). With `MAX_BATCH`
 singles queued at every take a queued bulk text is never taken
-(`queued_bulk_starves`). A recall can wait for the whole rest of its take,
-breaking `serve_take`'s "waits for at most the one forward in flight" and
-`MAX_SINGLE_STREAK`'s "a recall waits at most one bulk forward more": singles
-are length-chunked shortest first and pulled before every forward while bulk
-texts remain, so shorter singles keep overtaking a long recall
+(`queued_bulk_starves`). A recall can wait for the whole rest of its take:
+singles are length-chunked shortest first and pulled before every chunk
+while bulk texts remain, so shorter singles keep overtaking a long recall
 (`long_recall_waits_out_the_take`: a 200-byte recall runs at forward 10, after
-all three bulk forwards); the take still ends (`take_ends`).
+all three bulk forwards); the take still ends (`take_ends`). Since #311 the
+docs of `take_prioritized`, `serve_take` and `MAX_SINGLE_STREAK` state both.
+Before, they said a write's batch was never starved, that a recall "waits for
+at most the one forward in flight", and that it "waits at most one bulk
+forward more".
 
 Boundary: each run is one interleaving with the Rust's constants or a small
 configuration (`cfg2`); the general statements are `Worker.lean`'s and
@@ -77,9 +79,9 @@ theorem test_top_up :
 
 def bulk24 : List Req := (List.range 24).map fun i => bReq i 11
 
-/-- `a_single_embed_queued_during_a_take_waits_for_one_forward_only`: a take
-of 24 bulk texts; a recall arrives while the first forward runs; the next
-forward is the recall's. -/
+/-- `a_lone_single_embed_queued_during_a_bulk_forward_with_bulk_left_runs_next`:
+a take of 24 bulk texts; a lone recall arrives while the first forward runs,
+with two bulk forwards left; the next forward is the recall's. -/
 theorem test_recall_next_forward :
     let s := run Cfg.rust okFwd 4 { St.init with pc := .serving (split bulk24), issued := bulk24 }
       ([.work, .enqueue (sReq 100 12)] ++ List.replicate 40 .work)
@@ -99,12 +101,11 @@ def streamEvs : List Ev :=
   [.work, .work, .work]
 
 /-- The bulk chunks run at forwards 0 and `1 + MAX_SINGLE_STREAK`, and the
-take ends after six forwards. Shown about the docs: the recall that
-arrives during the third single forward (`sReq 103`) waits for that forward
-and then for a bulk forward before its own, more than `serve_take`'s "waits
-for at most the one forward in flight". This is the mild case; a long recall
-overtaken by shorter later singles waits out the whole take, beyond
-`MAX_SINGLE_STREAK`'s "at most one bulk forward more" too
+take ends after six forwards. The recall that arrives during the third single
+forward (`sReq 103`) waits for that forward and then for a bulk forward
+before its own, the wait `MAX_SINGLE_STREAK`'s doc gives a recall that is
+waiting when the streak ends. This is the mild case; a long recall overtaken
+by shorter later singles waits out the whole take
 (`long_recall_waits_out_the_take`). -/
 theorem test_stream_of_singles :
     let s := run Cfg.rust okFwd 4 { St.init with pc := .serving (split bulk16), issued := bulk16 } streamEvs
@@ -129,19 +130,19 @@ theorem test_gave_up_not_forwarded :
 
 /-! ## What the model shows about the Rust -/
 
-/-- A worker death answers the requests in its hands with a dropped sender,
-which `recv_bounded` and `embed_batch` report as
-`Backend("candle coalescer dropped the request (worker exited mid-batch)")`:
-permanent, so a write's text is refused as `LamboError::Embed` and its
-durable intent is consumed `failed`, although nothing was learned about the
-text (here a text that embeds). `forward_isolated` classes a failure that is
-not the text's as `Unavailable`; the death path does not. The supervisor's
-own doc says a worker exit "should be impossible", so this is a latent
-mismatch on a defensive path. -/
-theorem worker_death_permanent :
-    let s := run Cfg.rust okFwd 4 St.init [.supervise true, .enqueue (sReq 1 7), .work, .die]
-    s.obs = [(sReq 1 7, .dropped)] ∧ Obs.transient .dropped = some false ∧
-      soloRes (fun t => some ⟨4, t.len % 4⟩) 4 (sReq 1 7).txt = .vec ⟨4, 3⟩ := by decide
+/-- `a_worker_death_answers_the_requests_it_held_as_transient` (#309): a
+worker that dies holding a take of a single embed and a write's two bulk
+texts answers each of their callers by dropping its sender unsent, with no
+forward run, and each caller's observation is in the class `Obs.transient`
+gives a dropped sender, transient. That class is the model's table of what
+`recv_bounded` and `embed_batch` report (`worker_exited()`, `Unavailable`,
+since #309); nothing in the model derives it, and the Rust test is what
+pins it to the Rust. -/
+theorem worker_death_transient :
+    let s := run Cfg.rust okFwd 4 St.init
+      [.supervise true, .enqueue (sReq 1 7), .enqueueMany [bReq 2 5, bReq 3 5], .work, .die]
+    s.obs = [(sReq 1 7, .dropped), (bReq 2 5, .dropped), (bReq 3 5, .dropped)] ∧ s.fwds = [] ∧
+      s.obs.all (fun p => p.2.transient == some true) = true := by decide
 
 /-- The queue survives a worker death: the supervisor restarts the worker
 and the queued request is served. -/
@@ -235,7 +236,6 @@ theorem queued_bulk_starves :
     let s := run cfg2 okFwd 4 St.init starveEvs
     s.queue = [bReq 0 9] ∧ s.fwds.length = 3 ∧ (bReq 0 9).txt ∉ s.fwds.flatten := by decide
 
-
 /-- The reviewer's scenario: a take of 24 bulk texts of 11 bytes; a 200-byte
 recall (`longR`) arrives during the first bulk forward; then a 5-byte single
 arrives every two worker steps. -/
@@ -249,9 +249,9 @@ def overtakeEvs : List Ev :=
 set_option maxRecDepth 20000 in
 /-- Shown about the Rust: a long recall waits out the take. Shorter singles
 that arrive later keep overtaking it (length chunks, shortest first, pulled
-before every forward while bulk remains), so it runs at forward 10, after
-all three bulk forwards, not after "the one forward in flight" nor "at most
-one bulk forward more". -/
+before every chunk while bulk remains), so it runs at forward 10, after
+all three bulk forwards. `serve_take`'s doc cites this run for a recall's
+wait (#311). -/
 theorem long_recall_waits_out_the_take :
     let s := run Cfg.rust okFwd 4 { St.init with pc := .serving (split bulk24), issued := bulk24 }
       overtakeEvs

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Fixed
+
+- The in-process candle embedder answers a request its coalescer worker died
+  holding as a transient `Unavailable` error. The write is refused and can be
+  retried, where it was refused as if its text had been rejected (#309).
+- The in-process candle embedder reruns a text that was forwarded alone when
+  its forward fails and the canary forward then succeeds, as it already did
+  for two or more texts. A device fault that has passed by the canary (a
+  Metal command buffer error, a CUDA out-of-memory) no longer refuses the
+  write of a text forwarded alone as if that text had been rejected. A lone
+  text that fails now costs three forwards instead of two (#310).
+
 ## 0.16.0 (2026-11-27)
 
 ### Highlights

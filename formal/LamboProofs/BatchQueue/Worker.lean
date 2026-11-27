@@ -18,9 +18,9 @@ queued, the callers that gave up, what each observed, the forwards run).
 deadline (`giveUp`), the last handle's drop (`shutdown`), one worker step
 (`work`, deterministic), the worker's death (`die`), the supervisor's
 reaction (`supervise`, with a spawn that may fail) and the drop of `Shared`
-(`dropShared`). Each `work` step is one lock hold, one forward with the pull
-before it, or one `send`; `enqueue` needs no shutdown, since an awaiting
-`embed()` borrows the embedder.
+(`dropShared`). Each `work` step is one lock hold, one chunk's forwards
+(`forward_isolated`) with the pull before them, or one `send`; `enqueue` needs
+no shutdown, since an awaiting `embed()` borrows the embedder.
 
 Results: in every run no caller observes twice (`answered_at_most_once`); the
 invariant keeps every request in exactly one place, across deaths and
@@ -61,9 +61,10 @@ open Lambo.Lib (eraseIdx_perm map_eq_pointwise)
 
 /-- What a caller observes, once: the answer its oneshot carried (`res`), the
 `RecvError` of a sender dropped unsent (`dropped`: `recv_bounded` and
-`embed_batch` turn it into `Backend("candle coalescer dropped the request
-(worker exited mid-batch)")`), or its own deadline (`timedOut`: `Unavailable`
-from `recv_bounded`, `deadline_passed()` from `embed_batch`). -/
+`embed_batch` turn it into `worker_exited()`, `Unavailable("candle coalescer
+dropped the request (worker exited mid-batch)")`, since #309), or its own
+deadline (`timedOut`: `Unavailable` from `recv_bounded`, `deadline_passed()`
+from `embed_batch`). -/
 inductive Obs where
   | res (r : Res)
   | dropped
@@ -76,7 +77,7 @@ def Obs.transient : Obs → Option Bool
   | .res (.vec _) => none
   | .res .backend => some false
   | .res .unavailable => some true
-  | .dropped => some false
+  | .dropped => some true
   | .timedOut => some true
 
 /-- Where the worker thread is. `down`: no worker running (before the
@@ -573,8 +574,8 @@ theorem good_work_serving (hw : 1 ≤ c.width) (hg : Good c f dim s) (t : Take)
         calls := hg.calls
         wired := by simp }
     · next haw =>
-      have hne : (items.filter (fun r => r ∉ s.gaveUp)).map (·.txt) ≠ [] := by simpa using haw
-      have hlen := forwardIsolated_length f dim s.calls _ hne
+      have hlen := forwardIsolated_length f dim s.calls
+        ((items.filter (fun r => r ∉ s.gaveUp)).map (·.txt))
       simp only [List.length_map] at hlen
       have hfst : ((items.filter (fun r => r ∉ s.gaveUp)).zip
           (forwardIsolated f dim s.calls ((items.filter (fun r => r ∉ s.gaveUp)).map (·.txt))).1).map
@@ -945,8 +946,8 @@ theorem work_progress {c : Cfg} {f : Fwd} {dim : Nat} {s : St} (hm : 0 < c.maxBa
         simp only [Pc.hand, Pc.rank, hti, ite_false, haw, List.length_nil] at hsp ⊢
         split <;> omega
       · next haw =>
-        have hne' : (items.filter (fun r => r ∉ s.gaveUp)).map (·.txt) ≠ [] := by simpa using haw
-        have hlen := forwardIsolated_length f dim s.calls _ hne'
+        have hlen := forwardIsolated_length f dim s.calls
+          ((items.filter (fun r => r ∉ s.gaveUp)).map (·.txt))
         simp only [List.length_map] at hlen
         have hfst := List.map_fst_zip (l₁ := items.filter (fun r => r ∉ s.gaveUp))
           (l₂ := (forwardIsolated f dim s.calls ((items.filter (fun r => r ∉ s.gaveUp)).map (·.txt))).1)

@@ -703,8 +703,8 @@ open Lambo
 #print axioms Lambo.BatchQueue.lengthChunks_perm
 #print axioms Lambo.BatchQueue.chunksOf_eq_lit
 #print axioms Lambo.BatchQueue.removeDesc_eq
-#print axioms Lambo.BatchQueue.worker_death_permanent
-#print axioms Lambo.BatchQueue.lone_transient_fault_permanent
+#print axioms Lambo.BatchQueue.worker_death_transient
+#print axioms Lambo.BatchQueue.transient_fault_recovers
 #print axioms Lambo.BatchQueue.queued_bulk_starves
 #print axioms Lambo.BatchQueue.test_stream_of_singles
 #print axioms Lambo.BatchQueue.long_recall_waits_out_the_take
@@ -732,6 +732,7 @@ open Lambo
 #print axioms Lambo.BatchQueue.test_panic
 #print axioms Lambo.BatchQueue.test_device_down
 #print axioms Lambo.BatchQueue.test_lone_bad
+#print axioms Lambo.BatchQueue.test_lone_rerun
 #print axioms Lambo.BatchQueue.test_width_mismatch
 #print axioms Lambo.BatchQueue.test_take_singles_first
 #print axioms Lambo.BatchQueue.test_initial_take

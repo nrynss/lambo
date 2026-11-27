@@ -128,7 +128,8 @@ struct Pending {
     tx: tokio::sync::oneshot::Sender<Result<Vec<f32>, EmbedError>>,
     /// Queued by [`Embedder::embed_batch`] (#125 review M1). A take serves
     /// single embeds (a recall's query, a lone write text) before bulk
-    /// ones, so a recall never waits behind a write's gathered texts.
+    /// ones, so a recall is taken ahead of a write's gathered texts.
+    /// [`serve_take`] says how long it can still wait.
     bulk: bool,
 }
 
@@ -212,8 +213,14 @@ impl BatchQueue {
     }
 
     /// Take up to `n` queued single embeds, leaving bulk ones queued in
-    /// order (#125): checked before every forward of a take, so a recall
-    /// does not wait for the rest of a write's batch.
+    /// order (#125). [`serve_take`] calls it before it forwards each chunk
+    /// while its take still has bulk texts, so a recall queued before one of
+    /// those calls joins the take in progress instead of waiting for the next
+    /// one. A chunk whose forward fails runs its recovery forwards before the
+    /// next call ([`forward_isolated`]). A recall queued after the call made
+    /// before the take's last bulk chunk (in practice, while that chunk is
+    /// forwarded or later) is not taken here: it waits for the single chunks
+    /// still left in the take and then for a later take.
     fn take_singles(&self, n: usize) -> Vec<Pending> {
         let mut q = self.lock_queue();
         if !q.iter().any(|p| !p.bulk) {
@@ -251,6 +258,18 @@ impl BatchQueue {
 /// Take up to `n` requests off `q` (#125 review M1): single embeds first,
 /// then bulk ones, each in arrival order. What is not taken stays queued in
 /// its order (K2-R1-2).
+///
+/// Bulk requests get only the room the singles leave (#311). With `n` or
+/// more single embeds queued, the take holds no bulk request and every
+/// queued bulk request stays queued (`takePrioritized_no_bulk` in
+/// `formal/LamboProofs/BatchQueue/Pure.lean`). Queued bulk work is therefore
+/// not protected from one take to the next: while at least [`MAX_BATCH`]
+/// single embeds are queued at every take, a write's queued texts are never
+/// taken (`queued_bulk_starves` in `BatchQueue/Runs.lean`, a run with a
+/// `MAX_BATCH` of 2). That takes single embeds arriving about as fast as the
+/// device embeds them, which is overload. A bulk text starved this way fails
+/// `Unavailable` (transient) at its caller's deadline, so its write is
+/// refused retryably and nothing is lost.
 fn take_prioritized(q: &mut Vec<Pending>, n: usize) -> Vec<Pending> {
     let mut taken = Vec::with_capacity(n.min(q.len()));
     for bulk in [false, true] {
@@ -1441,17 +1460,46 @@ fn coalesce_loop(shared: Arc<Shared>) {
 /// is done.
 ///
 /// Single embeds (a recall's query, a lone text) go before bulk ones, and
-/// the queue is checked for new single embeds **before every forward**
-/// (review M1, Sonnet review), not only when the take is made: a recall
-/// that arrives while a write's batch is being forwarded waits for at most
-/// the one forward in flight, never for the rest of the take.
+/// while the take has bulk texts the queue is checked for new single embeds
+/// **before each chunk is forwarded** (review M1, Sonnet review), not only
+/// when the take is made. A chunk is forwarded by one [`forward_isolated`]
+/// call, which runs more than one forward when the chunk's forward fails: the
+/// canary, and each text alone if the canary passes. Those recovery forwards
+/// run before the queue is checked again, so a recall's wait includes them. A
+/// recall that arrives while a chunk is forwarded, with bulk texts left in the
+/// take after that chunk, joins the take in progress, and when it is the only
+/// single embed waiting after such a bulk chunk, the next chunk is its own. A
+/// recall that arrives while the take's last bulk chunk is forwarded, or
+/// after, is not pulled into the take, since nothing is pulled once the bulk
+/// group is empty: it waits for the single chunks still left in the take
+/// (singles that waited while [`MAX_SINGLE_STREAK`] forced that last bulk
+/// chunk) and then for a later take: the next one, unless [`MAX_BATCH`]
+/// single embeds queued before it fill that one.
 ///
-/// Two bounds keep that preference from starving the take's bulk texts:
-/// after [`MAX_SINGLE_STREAK`] single forwards in a row, one bulk chunk runs
-/// even with singles waiting; and new singles are pulled from the queue only
-/// while the take still has bulk texts to protect, so a steady stream of
-/// recalls cannot keep the take from ending (the outer loop then takes
-/// them, singles first, alongside the queued bulk work).
+/// None of that is a bound on a recall's wait (#311). The single group is
+/// chunked by length, shortest first, each time a chunk is chosen, so a
+/// shorter single embed that arrives later runs before a longer one that is
+/// already waiting, and after [`MAX_SINGLE_STREAK`] single chunks in a row a
+/// bulk chunk runs before the next single. A long recall can therefore
+/// wait for the whole rest of the take. In the model's run of a take of 24
+/// bulk texts, a 200-byte recall that arrives during the first bulk forward,
+/// with 5-byte single embeds arriving steadily after it, runs as the take's
+/// eleventh forward, after all three bulk forwards
+/// (`long_recall_waits_out_the_take` in
+/// `formal/LamboProofs/BatchQueue/Runs.lean`). Once a recall has joined a
+/// take, what bounds its wait is the end of that take; one that missed the
+/// take waits for its end and then for a later take.
+///
+/// Two rules protect the bulk texts of **this take**, and only those. After
+/// [`MAX_SINGLE_STREAK`] single chunks in a row, one bulk chunk runs even
+/// with singles waiting (`pick_progress` in `BatchQueue/Pure.lean`). And new
+/// singles are pulled from the queue only while the take still has bulk
+/// texts, so a steady stream of recalls cannot keep the take from ending:
+/// with at most [`MAX_BATCH`] singles pulled before each chunk, a take of
+/// `s` single and `b` bulk requests returns within `s + 132 * b + 1` passes
+/// of its loop (`take_ends`, `phi_rust`). The outer loop then makes its next
+/// take singles first ([`take_prioritized`]), so bulk requests that are
+/// still queued, unlike this take's, can starve behind queued singles.
 ///
 /// Once shutdown is requested no new singles are pulled: the take finishes
 /// and the outer loop drains what is queued before it exits (K2-R1-7).
@@ -1501,10 +1549,18 @@ where
     }
 }
 
-/// Single forwards a take runs in a row before it runs one bulk chunk even
-/// with singles waiting (#125 focused check): a recall waits at most one
-/// bulk forward more, and a write's batch is never starved by a stream of
-/// recalls.
+/// Single chunks a take runs in a row before it runs one bulk chunk even
+/// with singles waiting (#125 focused check), so a stream of recalls cannot
+/// starve the bulk texts of the take in progress (`pick_progress` in
+/// `formal/LamboProofs/BatchQueue/Pure.lean`). It counts chunks, not
+/// forwards: a chunk whose forward fails also runs its recovery forwards
+/// ([`forward_isolated`]). It protects that take only (#311): a write's
+/// texts that are still queued can starve behind [`MAX_BATCH`] queued
+/// singles ([`take_prioritized`]). A recall waiting when the streak ends
+/// waits for that bulk chunk too, its recovery forwards included, one that
+/// shorter single embeds keep overtaking can wait for the rest of the take,
+/// and one that arrives during the take's last bulk chunk does not join the
+/// take at all ([`serve_take`]).
 const MAX_SINGLE_STREAK: usize = 3;
 
 /// Most texts one forward runs (#125). Measured on Metal (M3 Pro, f16,
@@ -1546,20 +1602,40 @@ fn length_chunks(lens: &[usize]) -> Vec<Vec<usize>> {
 /// One forward over `texts`, with each caller's failure kept to that
 /// caller (#125).
 ///
-/// When a forward over several texts fails or panics, a one-word canary
-/// forward decides whose failure it is (review M3):
+/// When the forward fails or panics, a one-word canary forward decides
+/// whose failure it is (review M3):
 ///
 /// * **The canary fails too:** the device or model is failing, not a text.
 ///   Every caller gets [`EmbedError::Unavailable`] (transient: nothing was
 ///   learned about any input), and nothing is retried, so a broken device
 ///   costs two forwards per chunk instead of one per text.
-/// * **The canary succeeds:** a text is at fault. Each text is run alone,
-///   and only a text that fails alone gets [`EmbedError::Backend`]. Before
-///   this, the coalescer failed every caller in the batch with the batch's
-///   error, so a write coalesced with a bad text by timing alone failed as a
-///   permanent refusal and its durable intent was settled `failed`.
+/// * **The canary succeeds:** a text is at fault, or the device's fault has
+///   passed. Each text is run alone, once, and only a text that fails alone
+///   gets [`EmbedError::Backend`]. Before this, the coalescer failed every
+///   caller in the batch with the batch's error, so a write coalesced with a
+///   bad text by timing alone failed as a permanent refusal and its durable
+///   intent was settled `failed`.
 ///
-/// A lone text that fails is judged the same way, by the canary.
+/// A lone text is rerun like any other (#310), so a failed chunk of one text
+/// costs three forwards: the text, the canary and the text again. Before
+/// that the canary alone judged a lone text, and a device fault that had
+/// passed by the canary (a Metal command buffer error, a CUDA out-of-memory)
+/// was charged to the text as a permanent refusal, while two texts in the
+/// same position were rerun and embedded. A text whose rerun fails gets
+/// `Backend` whatever the cause, so a device fault that spares the canary and
+/// returns for the rerun is still charged to the text.
+///
+/// The recovery has costs, and #310 extends them to lone texts. A text that
+/// fails deterministically costs its chunk's forward, the canary and its own
+/// rerun, so a text that panics runs the panic hook twice (the default hook
+/// prints each panic to stderr); before #310 a lone text's panic ran it
+/// once. A write's text that is alone in its bulk chunk and fails this way
+/// costs six forwards where it cost four: three here, and three more when
+/// `embed_gathered` (`src/graph/hybrid.rs`) leaves it out and the write
+/// embeds it alone through `embed()`, if it is alone in that chunk too.
+/// And whether the callers still wait is checked once, by [`still_awaited`]
+/// before the chunk's first forward: the canary and the reruns run even for
+/// a caller that has dropped its receiver since, and its answer goes unread.
 ///
 /// A width mismatch is not retried: it is a fact about the loaded model, not
 /// about a text, so every caller gets it (K2-R1-4).
@@ -1615,9 +1691,8 @@ where
             .map(|_| Err(EmbedError::Unavailable(msg.clone())))
             .collect();
     }
-    if texts.len() <= 1 {
-        return vec![Err(EmbedError::Backend(msg))];
-    }
+    // The canary passed: every text gets one run alone, a lone text too
+    // (#310), and its own result.
     texts
         .iter()
         .map(|text| match once(std::slice::from_ref(text)) {
@@ -1671,8 +1746,17 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic".to_string())
 }
 
+/// The answer for a request whose sender was dropped unsent: the worker died
+/// with the request in its hands (#309). [`EmbedError::Unavailable`],
+/// transient, like every failure [`forward_isolated`] finds is not the
+/// text's own: nothing was learned about the text, so a write is refused
+/// retryably instead of being settled `failed` for good.
+fn worker_exited() -> EmbedError {
+    EmbedError::Unavailable("candle coalescer dropped the request (worker exited mid-batch)".into())
+}
+
 /// Bounded wait on the coalescer oneshot (K2-R1-5): a dead worker produces a
-/// named error, never an indefinite hang.
+/// named error ([`worker_exited`]), never an indefinite hang.
 async fn recv_bounded(
     rx: tokio::sync::oneshot::Receiver<Result<Vec<f32>, EmbedError>>,
     limit: Duration,
@@ -1680,9 +1764,7 @@ async fn recv_bounded(
     match tokio::time::timeout(limit, rx).await {
         Ok(Ok(result)) => result,
         // Sender dropped without sending: the batch died with a dead worker.
-        Ok(Err(_)) => Err(EmbedError::Backend(
-            "candle coalescer dropped the request (worker exited mid-batch)".into(),
-        )),
+        Ok(Err(_)) => Err(worker_exited()),
         Err(_) => Err(EmbedError::Unavailable(format!(
             "candle embed did not complete within {} s — the coalescer appears wedged; \
              retry or restart",
@@ -1751,7 +1833,8 @@ impl Embedder for CandleEmbedder {
     /// shares one deadline, the caller's or [`EMBED_WAIT`] if sooner (review
     /// L2): a slot not answered by then fails `Unavailable` while the
     /// answered ones keep their vectors, and dropping its receiver tells
-    /// the coalescer not to forward it.
+    /// the coalescer not to forward it. A slot whose request the worker died
+    /// holding fails `Unavailable` too ([`worker_exited`], #309).
     async fn embed_batch(
         &self,
         texts: &[&str],
@@ -1803,9 +1886,7 @@ impl Embedder for CandleEmbedder {
                 Err(e) => Err(e),
                 Ok(rx) => match tokio::time::timeout_at(deadline, rx).await {
                     Ok(Ok(result)) => result,
-                    Ok(Err(_)) => Err(EmbedError::Backend(
-                        "candle coalescer dropped the request (worker exited mid-batch)".into(),
-                    )),
+                    Ok(Err(_)) => Err(worker_exited()),
                     Err(_) => Err(super::deadline_passed()),
                 },
             });
@@ -2063,11 +2144,47 @@ mod tests {
     fn a_lone_bad_text_is_permanent_when_the_canary_passes() {
         let forwards = AtomicUsize::new(0);
         let out = forward_isolated(&["bad"], 4, fake_forward(&forwards, 4));
-        assert_eq!(forwards.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            forwards.load(Ordering::SeqCst),
+            3,
+            "the text, the canary, then the text again (#310)"
+        );
+        assert_eq!(out.len(), 1);
         assert!(
             matches!(out[0], Err(EmbedError::Backend(_))),
             "{:?}",
             out[0]
+        );
+    }
+
+    #[test]
+    fn a_lone_text_is_rerun_after_a_fault_that_has_passed_by_the_canary() {
+        // #310: the device fails one forward and has recovered by the canary
+        // (a Metal command buffer error, a CUDA out-of-memory that clears).
+        // Two or more texts were each rerun alone and embedded, but a lone
+        // text, the usual chunk under low load, was answered `Backend`
+        // without a rerun, so its write was refused for good.
+        let forwards = AtomicUsize::new(0);
+        let fails_once = |texts: &[&str]| -> Result<Vec<Vec<f32>>, EmbedError> {
+            if forwards.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(EmbedError::Backend("metal command buffer error".into()));
+            }
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut v = vec![0.0; 4];
+                    v[t.len() % 4] = 1.0;
+                    v
+                })
+                .collect())
+        };
+        let out = forward_isolated(&["a"], 4, fails_once);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].as_ref().expect("the rerun embeds")[1], 1.0);
+        assert_eq!(
+            forwards.load(Ordering::SeqCst),
+            3,
+            "the text, the canary, then the text again"
         );
     }
 
@@ -2100,10 +2217,20 @@ mod tests {
     }
 
     #[test]
-    fn a_single_embed_queued_during_a_take_waits_for_one_forward_only() {
+    fn a_lone_single_embed_queued_during_a_bulk_forward_with_bulk_left_runs_next() {
         // Sonnet review of #125: priority was per take, so a recall arriving
-        // during a write's batch waited for the whole take. Now the queue is
-        // checked before every forward.
+        // during a write's batch was never pulled into it. Now the queue is
+        // checked before each chunk is forwarded while the take has bulk
+        // texts, and a lone recall that arrives while a bulk chunk is
+        // forwarded, with bulk texts left to run, is the next chunk; every
+        // forward here succeeds, so it is also the next forward (a failed
+        // chunk would run its canary and reruns first). This pins that
+        // scenario only, not a bound on a recall's wait (#311): shorter
+        // singles can overtake a long recall until the take ends
+        // (`long_recall_waits_out_the_take` in
+        // `formal/LamboProofs/BatchQueue/Runs.lean`), and one that arrives
+        // while the take's last bulk chunk is forwarded is not pulled into
+        // the take.
         let q = BatchQueue::new();
         let mut rxs = Vec::new();
         let mut take = Vec::new();
@@ -2379,8 +2506,10 @@ mod tests {
 
     /// A `CandleEmbedder` whose model is a tiny zero-weighted XLM-RoBERTa and
     /// whose tokenizer is an empty WordPiece — never touching the network or
-    /// the real artifact. `embed()` is never called on it; it exists solely so
-    /// the identity plumbing can be exercised through a real trait object.
+    /// the real artifact. No coalescer runs for it, so nothing it is asked to
+    /// embed is ever forwarded; it exists so the identity plumbing can be
+    /// exercised through a real trait object, and so a test can stand in for
+    /// its worker (#309).
     #[cfg(test)]
     fn weightless_embedder() -> CandleEmbedder {
         let device = Device::Cpu;
@@ -2616,11 +2745,75 @@ mod tests {
     #[tokio::test]
     async fn bounded_wait_reports_a_dropped_sender_as_a_named_error() {
         // K2-R1-5: a dead worker drops the sender; embed() surfaces a named
-        // Backend error instead of hanging on rx.await forever.
+        // error instead of hanging on rx.await forever. #309: the error is
+        // transient, since the worker's death says nothing about the text.
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<f32>, EmbedError>>();
         drop(tx);
         let err = recv_bounded(rx, Duration::from_secs(1)).await.unwrap_err();
         assert!(err.to_string().contains("dropped the request"), "{err}");
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        assert!(err.is_transient());
+    }
+
+    #[tokio::test]
+    async fn a_worker_death_answers_the_requests_it_held_as_transient() {
+        // #309: the worker dies with a take in its hands, a single embed and
+        // a write's two bulk texts. Before the fix each caller was answered
+        // `Backend`, permanent, so a write was refused for good and its
+        // durable intent settled `failed`, although nothing was learned
+        // about any text.
+        let e = weightless_embedder();
+        let shared = Arc::clone(&e.slot.handle.get().expect("built loaded").shared);
+        // No coalescer runs for this embedder. This thread stands in for
+        // its worker: it takes the three requests off the queue as
+        // `coalesce_loop` does, then dies holding them.
+        let worker = std::thread::spawn(move || {
+            // Bounded, so a regression that answers a caller without queueing
+            // its request fails the test instead of hanging it: the stand-in
+            // drops what was queued, which answers those callers at once,
+            // and dies with a payload the assertion below rejects.
+            let give_up = std::time::Instant::now() + Duration::from_secs(10);
+            while shared.queue.len() < 3 {
+                if std::time::Instant::now() >= give_up {
+                    drop(shared.queue.drain_all());
+                    std::panic::resume_unwind(Box::new("fewer than three requests were queued"));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let held = shared.queue.wait_for_batch(MAX_BATCH).expect("a take");
+            assert_eq!(held.len(), 3, "the worker holds every request");
+            // Unwinds this thread, dropping `held`, without the panic hook's
+            // stderr report.
+            std::panic::resume_unwind(Box::new("worker killed mid-batch"));
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        // Bounded too: a request queued after the stand-in gave up would
+        // otherwise hold `embed` for `EMBED_WAIT`.
+        let answered = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(
+                e.embed("recall query"),
+                e.embed_batch(&["write text one", "write text two"], deadline)
+            )
+        })
+        .await;
+        // The stand-in ends within its own bound whatever the callers did.
+        let death = worker.join().expect_err("the worker died");
+        assert_eq!(
+            death.downcast_ref::<&str>(),
+            Some(&"worker killed mid-batch"),
+            "the worker died holding the take, not before it"
+        );
+        let (single, bulk) = answered.expect("a worker death answers its callers at once");
+        assert_eq!(bulk.len(), 2);
+        for result in std::iter::once(single).chain(bulk) {
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, EmbedError::Unavailable(_)),
+                "a worker death is not the text's failure: {err:?}"
+            );
+            assert!(err.is_transient());
+            assert!(err.to_string().contains("worker exited mid-batch"), "{err}");
+        }
     }
 
     #[tokio::test]

@@ -1,18 +1,22 @@
-# Theorems deleted from the models on purpose, in three groups. First, those
+# Theorems deleted from the models on purpose, in four groups. First, those
 # the audit in formal/audit/unreferenced-theorems.md found nothing referencing
 # (no proof in the dump's `uses`, no other declaration naming them, no example,
 # docs anchor, claims ledger row, Rust comment, oracle or README mention, and
 # no Audit.lean line except `Drain.orderInv_nil`'s, removed with it). Second,
-# the rows marked "purpose review", which failed the review recorded in
-# reviewed-theorems.tsv (header mentions went with them). Third, the #280
-# rows: that unimplemented design model, removed at the owner's request with
-# its six Audit.lean lines, its README and header mentions, and the
-# definitions only it used (a definition is listed only when nothing left
-# mentions it). Fourth, the #316 rows: runs of the Rust before that fix,
-# which the fixed model makes false; their Audit.lean lines, README, claims
-# ledger and header mentions went with them, and the reason names the
-# theorem that states the fixed behaviour. Tab-separated: name, reason, the
-# kept theorem that states the
+# the rows marked "purpose review" or "re-review", which failed a review of
+# their purpose (recorded in reviewed-theorems.tsv, or in the reason itself);
+# header mentions, and the one Audit.lean line the reason names, went with
+# them. Third, the #280 rows: that unimplemented design model, removed at the
+# owner's request with its six Audit.lean lines, its README and header
+# mentions, and the definitions only it used (a definition is listed only
+# when nothing left mentions it). Fourth, the rows whose reason starts "#N
+# fixed" (#316, #309, #310): theorems a fix of the Rust made false or
+# redundant, namely runs of the Rust before the fix, which the fixed model
+# makes false, statements about a branch the fix removed, and a special case
+# that a theorem of the fixed model now states in general (named in the third
+# column); their Audit.lean lines, README, claims ledger and header mentions
+# went with them, and the reason names the theorem that states the fixed
+# behaviour. Tab-separated: name, reason, the kept theorem that states the
 # same thing or more (`-` when there is none). Read by
 # scripts/formal/check-decl-equivalence.py --deletions and by
 # scripts/formal/audit-theorems.py.
@@ -108,3 +112,8 @@ Lambo.Fit.rjEst_mono	re-review: arithmetic about the model's own counterexample 
 Lambo.Confidence.noisyOr_ge_keyword	re-review: states exactly what keywordOnly_le_noisyOr states (the same statement; that one's proof now inlines this one's); its Audit.lean line removed	Lambo.Confidence.keywordOnly_le_noisyOr
 Lambo.Resolve.bind_refused_after_build	#316 fixed: a run of the pre-fix Rust (a non-loopback HTTP bind without a credential refused by authorize_bind after the backends were built, exit 1), false in the fixed model; the fixed behaviour is exposed_bind_refused_before_build (exit 2, nothing built) and preflight_ok_start_allowed	-
 Lambo.Resolve.heartbeat_without_ledger_after_build	#316 fixed: a run of the pre-fix Rust (--ledger-heartbeat without --ledger refused by authorize_ledger after the backends were built, exit 1), false in the fixed model; the fixed behaviour is heartbeat_without_ledger_refused_before_build (exit 2, nothing built) and preflight_ok_start_allowed	-
+Lambo.BatchQueue.worker_death_permanent	#309 fixed: a run of the pre-fix Rust (a worker death answered the requests the worker held Backend, permanent), false in the fixed model; the fixed behaviour is worker_death_transient (Unavailable, transient)	-
+Lambo.BatchQueue.lone_transient_fault_permanent	#310 fixed: a run of the pre-fix Rust (forward_isolated answered a lone text Backend after a device fault that had passed by the canary, without rerunning it), false in the fixed model; the fixed behaviour is transient_fault_recovers	-
+Lambo.BatchQueue.paired_transient_fault_recovers	#310 fixed: the two-text case of the recovery, which transient_fault_recovers now states for every chunk, a lone text included	Lambo.BatchQueue.transient_fault_recovers
+Lambo.BatchQueue.test_lone_vs_pair	#310 fixed: its lone half ran the pre-fix Rust (a lone text answered Backend under a passing fault), false in the fixed model; the fixed behaviour is test_lone_rerun and transient_fault_recovers	-
+Lambo.BatchQueue.forwardIsolated_empty_quirk	#310 fixed: the texts.len() <= 1 branch it ran is gone, so forward_isolated answers no slot for no texts and the statement is false in the fixed model; forwardIsolated_length now covers the empty chunk	-

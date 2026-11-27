@@ -11,9 +11,6 @@
 # comment if needed, and add a row. Tab-separated: name, verdict, reason.
 Lambo.BatchQueue.takePrioritized_snd_sublist	keep	the doc states what `take_prioritized` does, no more broadly than the statement
 Lambo.BatchQueue.takePrioritized_no_bulk	keep	`take_prioritized` with MAX_BATCH singles queued takes no bulk request (fairness is per take)
-Lambo.BatchQueue.paired_transient_fault_recovers	narrowed	the doc claimed both texts embed; the statement gives each its solo answer when the canary embeds, which the doc now says
-Lambo.BatchQueue.test_lone_vs_pair	keep	`forward_isolated` on concrete texts: a lone text fails under a passing fault, a pair recovers
-Lambo.BatchQueue.forwardIsolated_empty_quirk	keep	`forward_isolated`'s `texts.len() <= 1` guard on an empty batch, a finding (unreachable from `serve_take`)
 Lambo.BatchQueue.pick_some	keep	`serve_take`'s pick always yields a batch while anything is left to serve
 Lambo.BatchQueue.test_spawn_failure_wedges	keep	`supervise` after a failed spawn: only timeouts answer (the test of that name)
 Lambo.Canon.legal_irrefl	keep	mirrors the Rust test `legal_canonization_transition`; the doc states the case the statement checks
