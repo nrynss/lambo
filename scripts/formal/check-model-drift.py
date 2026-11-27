@@ -80,7 +80,9 @@ The manifest itself is checked on every run, and a broken manifest fails
 (exit 3) even without `--strict`: every `.lean` file under
 `formal/LamboProofs/` (subdirectories included) other than the top-level
 `Audit.lean`, the history layers and concrete cases (`Drain/History.lean`,
-`Drain/Examples.lean`, `Tiered/History.lean`) and the shared lemma libraries
+`Drain/Examples.lean`, `Tiered/History.lean`), the proofs layer of a model in
+Spec and Proofs form (`<Model>/Proofs.lean`, or the files under a `Proofs/`
+directory: its `Spec` files carry the entries) and the shared lemma libraries
 under `Lib/` must have exactly one entry, every Lean file and Rust path an
 entry names must exist, every `#item` must be found, `read_digest` must be
 `v<N>:sha256:` and 64 lowercase hex digits (a bare `sha256:` is scheme 1) with
@@ -127,9 +129,18 @@ SKIP_MODELS = {"Audit.lean", "Drain/History.lean", "Drain/Examples.lean", "Tiere
 SKIP_DIRS = ("Lib/",)
 
 
+def is_proofs_layer(rel):
+    """Whether `rel` is a proofs file of a model in Spec and Proofs form:
+    `<Model>/Proofs.lean` or a file under a `Proofs/` directory. It proves the
+    propositions its `Spec` file states and reads no Rust of its own: the
+    entry, and the reading of the Rust it records, belong to the `Spec` file."""
+    parts = rel.split("/")
+    return "Proofs" in parts[:-1] or parts[-1] == "Proofs.lean"
+
+
 def is_model(rel):
     """Whether `rel`, a `.lean` path relative to MODEL_DIR, needs an entry."""
-    return rel not in SKIP_MODELS and not rel.startswith(SKIP_DIRS)
+    return rel not in SKIP_MODELS and not rel.startswith(SKIP_DIRS) and not is_proofs_layer(rel)
 ENTRY_KEYS = {"lean", "rust", "read_against", "read_digest"}
 ITEM_KINDS = r"(?:fn|struct|enum|trait|type|const|static|mod|union)"
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -1797,11 +1808,19 @@ def self_test():
         git("rm", "-q", "-r", "formal/LamboProofs/Sub")
         write("formal/LamboProofs/Lib/L.lean", "-- shared lemmas, no entry\n")
         write("formal/LamboProofs/Drain/History.lean", "-- history layer, no entry\n")
-        commit("add Lib/L and Drain/History")
+        write("formal/LamboProofs/Drain/Proofs/Base.lean", "-- proofs layer, no entry\n")
+        write("formal/LamboProofs/Score/Proofs.lean", "-- proofs layer, no entry\n")
+        commit("add Lib/L, Drain/History and two proofs layers")
         code, out = run()
-        expect("a shared library and the history layer need no entry",
+        expect("a shared library, the history layer and a proofs layer need no entry",
                code == 0 and "no entry" not in out, out)
-        git("rm", "-q", "-r", "formal/LamboProofs/Lib", "formal/LamboProofs/Drain")
+        write("formal/LamboProofs/Drain/Spec/Base.lean", "-- spec layer, needs an entry\n")
+        commit("add Drain/Spec/Base")
+        code, out = run()
+        expect("a Spec file without an entry: exit 3",
+               code == 3 and "no entry for formal/LamboProofs/Drain/Spec/Base.lean" in out, out)
+        git("rm", "-q", "-r", "formal/LamboProofs/Lib", "formal/LamboProofs/Drain",
+            "formal/LamboProofs/Score")
         manifest(c4, c11, a_rust=A2, b_rust='"src/b.rs#keep", "src/gone.rs"')
         commit("missing path")
         code, out = run()

@@ -239,5 +239,139 @@ class Audit(unittest.TestCase):
         self.assertIn("dead helper", row)
 
 
+SPEC = """\
+/-
+# Model L, specification
+
+## Results
+
+* `listed`: the result.
+
+A line of prose that starts with the word
+namespace is not where the header ends.
+-/
+
+namespace Lambo.L
+
+def g (n : Nat) : Nat := n
+
+/-- `g` is the identity, as the Rust's `g` is. -/
+abbrev Spec.g_id : Prop := ∀ n, g n = n
+
+abbrev Spec.listed : Prop := g 0 = 0
+
+end Lambo.L
+"""
+
+PROOFS = """\
+namespace Lambo.L
+
+theorem g_id : Spec.g_id := fun _ => rfl
+
+theorem listed : Spec.listed := rfl
+
+end Lambo.L
+"""
+
+
+def ldecl(name, line, type_, module, kind="theorem", span=None, **more):
+    return dict({"name": f"Lambo.L.{name}", "private": False, "module": module, "kind": kind, "user": True,
+                 "line": line, "span": span or [line, line], "levels": [], "type": type_, "shape": type_,
+                 "value": None, "uses": [], "axioms": [] if kind == "theorem" else None}, **more)
+
+
+LDECLS = [
+    ldecl("g", 14, "Nat -> Nat", "LamboProofs.L.Spec", kind="def"),
+    ldecl("Spec.g_id", 17, "Prop", "LamboProofs.L.Spec", kind="def", span=[16, 17]),
+    ldecl("Spec.listed", 19, "Prop", "LamboProofs.L.Spec", kind="def"),
+    ldecl("g_id", 3, "Lambo.L.Spec.g_id", "LamboProofs.L.Proofs", spec="Lambo.L.Spec.g_id"),
+    ldecl("listed", 5, "Lambo.L.Spec.listed", "LamboProofs.L.Proofs", spec="Lambo.L.Spec.listed"),
+]
+
+
+class SpecForm(unittest.TestCase):
+    """A model in Spec and Proofs form: `L/Spec.lean` states, `L/Proofs.lean` proves."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = self.root = Path(self.tmp.name)
+        (root / "formal" / "LamboProofs" / "L").mkdir(parents=True)
+        for d in ("claims", "audit"):
+            (root / "formal" / d).mkdir()
+        (root / "docs" / "reference").mkdir(parents=True)
+        (root / "formal" / "LamboProofs" / "L" / "Spec.lean").write_text(SPEC, encoding="utf-8")
+        (root / "formal" / "LamboProofs" / "L" / "Proofs.lean").write_text(PROOFS, encoding="utf-8")
+        (root / "formal" / "LamboProofs" / "Audit.lean").write_text("", encoding="utf-8")
+        (root / "formal" / "README.md").write_text("# Proofs\n", encoding="utf-8")
+        (root / "formal" / "audit" / "reviewed-theorems.tsv").write_text(
+            "Lambo.L.g_id\tkeep\tits proposition's doc names the Rust\n"
+            "Lambo.L.listed\tkeep\tthe header's result\n", encoding="utf-8")
+        self.dump = root / "dump.jsonl"
+        self.write_dump(LDECLS)
+
+    def write_dump(self, decls):
+        records = [{"record": "module", "module": f"LamboProofs.L.{f}",
+                    "fnv1a64": at.fnv1a64((self.root / "formal" / "LamboProofs" / "L" / f"{f}.lean").read_bytes())}
+                   for f in ("Spec", "Proofs")]
+        self.dump.write_text("".join(json.dumps(d) + "\n" for d in decls + records), encoding="utf-8")
+
+    def check(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+            code = at.main(["--repo", str(self.root), "--dump", str(self.dump), "--check"])
+        return code, err.getvalue() + out.getvalue()
+
+    def test_a_theorems_doc_comment_is_its_propositions(self):
+        m = at.Models(self.root, self.dump)
+        self.assertIn("as the Rust's `g` is", m.doc("Lambo.L.g_id"))
+        self.assertEqual(m.doc("Lambo.L.listed"), "")
+        # `listed` has no doc comment anywhere and no proof uses it.
+        code, out = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("L/Proofs.lean:5: listed is used by no proof and has no doc comment", out)
+        self.assertNotIn("g_id is used by no proof", out)
+
+    def test_the_results_listed_in_the_spec_header_count(self):
+        m = at.Models(self.root, self.dump)
+        self.assertIn("`listed`: the result", m.headers("Lambo.L.listed"))
+        self.assertNotIn("def g", m.headers("Lambo.L.listed"))  # the header ends at the command
+
+    def test_a_citation_of_the_proposition_is_a_citation_of_the_theorem(self):
+        (self.root / "docs" / "reference" / "page.mdx").write_text(
+            "It is the identity. {/* lean: L.Spec.g_id */}\n", encoding="utf-8")
+        (self.root / "formal" / "claims" / "page.md").write_text(
+            "| C-1 | PROVEN | `Spec.listed` in `L/Spec.lean` |\n", encoding="utf-8")
+        m = at.Models(self.root, self.dump)
+        self.assertIn("Lambo.L.g_id", at.anchor_refs(m))
+        self.assertIn("Lambo.L.listed", at.ledger_refs(m))
+        self.assertEqual(at.models_named("`x` in `L/Spec/Base.lean` and formal/LamboProofs/M/Proofs/A.lean"),
+                         {"L", "M"})
+
+    def test_a_proposition_nothing_proves_fails(self):
+        self.write_dump(LDECLS + [ldecl("Spec.unproved", 19, "Prop", "LamboProofs.L.Spec", kind="def")])
+        code, out = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("L/Spec.lean:19: Spec.unproved is stated and not proved: no `theorem unproved : "
+                      "Spec.unproved`", out)
+
+    def test_a_theorem_stated_as_another_names_proposition_fails(self):
+        decls = [dict(d, type="Lambo.L.Spec.g_id", spec="Lambo.L.Spec.g_id") if d["name"] == "Lambo.L.listed"
+                 else d for d in LDECLS]
+        self.write_dump(decls)
+        code, out = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("listed is stated as Spec.g_id, not as its own proposition Spec.listed", out)
+        self.assertIn("Spec.listed is stated and not proved", out)
+
+    def test_a_theorem_in_a_spec_file_fails(self):
+        spec = SPEC.replace("abbrev Spec.listed : Prop := g 0 = 0", "theorem stray : g 0 = 0 := rfl -- no")
+        (self.root / "formal" / "LamboProofs" / "L" / "Spec.lean").write_text(spec, encoding="utf-8")
+        decls = [d for d in LDECLS if not d["name"].endswith("listed")]
+        self.write_dump(decls + [ldecl("stray", 19, "Eq (g 0) 0", "LamboProofs.L.Spec")])
+        code, out = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("L/Spec.lean:19: stray is a theorem in a Spec file", out)
+
+
 if __name__ == "__main__":
     unittest.main()

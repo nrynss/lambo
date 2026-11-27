@@ -25,12 +25,18 @@ The rules:
   must equal the declared name exactly once the `Lambo.` and `<Model>.`
   namespace prefixes are dropped: `Canon.Status.rank` matches `def
   Status.rank` inside `namespace Lambo.Canon`, and `Canon.rank` does not.
-  A model split into a directory (`formal/LamboProofs/Drain/*.lean`, one
-  namespace `Lambo.Drain`) resolves across its files, except a
-  `History.lean` or `Examples.lean` in it (`Drain/`, `Tiered/`): a history
+  A model split into a directory (`formal/LamboProofs/Flush/*.lean`, one
+  namespace `Lambo.Flush`) resolves across its files, except a
+  `History.lean` or `Examples.lean` in it (`Tiered/`): a history
   layer describes no current Rust, and every theorem in an examples file is
   a finding about the Rust before a fix, so a page citing either would
-  present superseded behaviour as current.
+  present superseded behaviour as current. A model in Spec and Proofs form
+  (`formal/LamboProofs/<Model>/Spec.lean` or `<Model>/Spec/*.lean`, with its
+  proofs in `<Model>/Proofs.lean` or `<Model>/Proofs/*.lean`) resolves in its
+  Spec files only: a page cites a definition as before and a result as its
+  proposition, `Drain.Spec.runW_ord` for `abbrev Spec.runW_ord`, never the
+  theorem that proves it or a lemma of the proofs, which states nothing the
+  specification does not.
 * `const:` a comma-separated list of names, each pinned by
   `src/formal_constants_tests.rs`: every identifier in the name (split at
   `::`, `.` and `()`) must appear there as a whole word in code, not in a
@@ -128,6 +134,10 @@ LEAN_DIR = "formal/LamboProofs"
 # the history layer, and the worked examples, whose theorems are all findings
 # about the Rust before a fix.
 LEAN_NOT_CITABLE = ("History.lean", "Examples.lean")
+# In a model in Spec and Proofs form, the layer a docs anchor cites and the
+# one it may not: `<Model>/Spec.lean` or `<Model>/Spec/*.lean`, and the same
+# for `Proofs`.
+LEAN_SPEC, LEAN_PROOFS = "Spec", "Proofs"
 
 LEAN_DECL = re.compile(
     r"^\s*(?:@\[[^\]]*\]\s*)*"
@@ -238,7 +248,29 @@ class Sources:
     def __init__(self, root: Path):
         self.root = root
         self._lean: dict[str, set[str] | None] = {}
+        self._proofs: dict[str, set[str]] = {}
         self._text: dict[str, str | None] = {}
+
+    def layer(self, model: str, layer: str) -> set[str] | None:
+        """The names a model's `Spec` or `Proofs` layer declares (`<Model>/
+        <layer>.lean` and `<Model>/<layer>/*.lean`); None if it has none."""
+        folder = self.root / LEAN_DIR / model
+        rels = [f"{LEAN_DIR}/{model}/{layer}.lean"] if (folder / f"{layer}.lean").is_file() else []
+        rels += [f"{LEAN_DIR}/{model}/{layer}/{p.name}" for p in sorted((folder / layer).glob("*.lean"))]
+        if not rels:
+            return None
+        names: set[str] = set()
+        for rel in rels:
+            names |= lean_names(self.text(rel) or "")
+        return names
+
+    def proofs(self, model: str) -> set[str]:
+        """The names the proofs layer of a model in Spec and Proofs form
+        declares; empty for any other model."""
+        if model not in self._proofs:
+            spec = self.layer(model, LEAN_SPEC)
+            self._proofs[model] = (self.layer(model, LEAN_PROOFS) or set()) if spec is not None else set()
+        return self._proofs[model]
 
     def text(self, rel: str) -> str | None:
         if rel not in self._text:
@@ -248,13 +280,15 @@ class Sources:
 
     def lean(self, model: str) -> set[str] | None:
         """The names `<Model>.lean` declares or, for a model split into a
-        directory, its files other than the history layer; None if neither
-        exists."""
+        directory, its files other than the history layer, or, for a model in
+        Spec and Proofs form, its Spec files; None if none exists."""
         if model not in self._lean:
             text = self.text(f"{LEAN_DIR}/{model}.lean")
             folder = self.root / LEAN_DIR / model
             if text is not None:
                 self._lean[model] = lean_names(text)
+            elif folder.is_dir() and (spec := self.layer(model, LEAN_SPEC)) is not None:
+                self._lean[model] = spec
             elif folder.is_dir():
                 names: set[str] = set()
                 for path in sorted(folder.glob("*.lean")):
@@ -365,8 +399,17 @@ def check_lean(body: str, sources: Sources) -> list[str]:
         names = sources.lean(model)
         if names is None:
             errors.append(f"lean: {ref}: no file {LEAN_DIR}/{model}.lean")
-        elif name not in {lean_short(n, model) for n in names}:
+        elif name not in (short := {lean_short(n, model) for n in names}):
+            if name in {lean_short(n, model) for n in sources.proofs(model)}:
+                # Proved, not specified: the page cites the proposition.
+                errors.append(
+                    f"lean: {ref}: a theorem of the proofs layer; cite its proposition "
+                    f"{model}.{LEAN_SPEC}.{name}" if f"{LEAN_SPEC}.{name}" in short else
+                    f"lean: {ref}: a lemma of the proofs layer, which the specification "
+                    f"({LEAN_DIR}/{model}/{LEAN_SPEC}) does not state")
+                continue
             where = (f"{LEAN_DIR}/{model}.lean" if (sources.root / LEAN_DIR / f"{model}.lean").is_file()
+                     else f"{LEAN_DIR}/{model}/{LEAN_SPEC}" if sources.proofs(model) or sources.layer(model, LEAN_SPEC) is not None
                      else f"{LEAN_DIR}/{model}/ (outside {' and '.join(LEAN_NOT_CITABLE)})")
             errors.append(f"lean: {ref}: {where} declares no {name}")
     return errors
