@@ -8,7 +8,8 @@
 # rows: that unimplemented design model, removed at the owner's request with
 # its six Audit.lean lines, its README and header mentions, and the
 # definitions only it used (a definition is listed only when nothing left
-# mentions it). Fourth, the #316 rows: runs of the Rust before that fix,
+# mentions it). Fourth, the rows whose reason starts "#N fixed" (#316, #309):
+# runs of the Rust before that fix,
 # which the fixed model makes false; their Audit.lean lines, README, claims
 # ledger and header mentions went with them, and the reason names the
 # theorem that states the fixed behaviour. Tab-separated: name, reason, the
@@ -108,3 +109,4 @@ Lambo.Fit.rjEst_mono	re-review: arithmetic about the model's own counterexample 
 Lambo.Confidence.noisyOr_ge_keyword	re-review: states exactly what keywordOnly_le_noisyOr states (the same statement; that one's proof now inlines this one's); its Audit.lean line removed	Lambo.Confidence.keywordOnly_le_noisyOr
 Lambo.Resolve.bind_refused_after_build	#316 fixed: a run of the pre-fix Rust (a non-loopback HTTP bind without a credential refused by authorize_bind after the backends were built, exit 1), false in the fixed model; the fixed behaviour is exposed_bind_refused_before_build (exit 2, nothing built) and preflight_ok_start_allowed	-
 Lambo.Resolve.heartbeat_without_ledger_after_build	#316 fixed: a run of the pre-fix Rust (--ledger-heartbeat without --ledger refused by authorize_ledger after the backends were built, exit 1), false in the fixed model; the fixed behaviour is heartbeat_without_ledger_refused_before_build (exit 2, nothing built) and preflight_ok_start_allowed	-
+Lambo.BatchQueue.worker_death_permanent	#309 fixed: a run of the pre-fix Rust (a worker death answered the requests the worker held Backend, permanent), false in the fixed model; the fixed behaviour is worker_death_transient (Unavailable, transient)	-

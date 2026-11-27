@@ -11,10 +11,9 @@ coalescer tests in `src/embed/candle.rs` (`test_take_singles_first`,
 show what the Rust does.
 
 Results about the Rust: a worker death answers the requests in its hands
-`Backend` ("worker exited mid-batch"), permanent, though nothing was learned
-about their texts, where `forward_isolated` would class that failure
-`Unavailable`; a write caught in it is refused and its intent consumed
-`failed` (`worker_death_permanent`; the path is defensive). The supervisor
+`Unavailable` ("worker exited mid-batch"), transient, as `forward_isolated`
+classes a failure that is not the text's (`worker_death_transient`, since
+#309; the path is defensive). The supervisor
 restarts the worker and the queue is served (`restart_serves_queue`), but not
 after shutdown, when only the drop of `Shared` answers the queue
 (`death_after_shutdown_abandons_queue`, harmless: no caller can be waiting);
@@ -129,19 +128,14 @@ theorem test_gave_up_not_forwarded :
 
 /-! ## What the model shows about the Rust -/
 
-/-- A worker death answers the requests in its hands with a dropped sender,
-which `recv_bounded` and `embed_batch` report as
-`Backend("candle coalescer dropped the request (worker exited mid-batch)")`:
-permanent, so a write's text is refused as `LamboError::Embed` and its
-durable intent is consumed `failed`, although nothing was learned about the
-text (here a text that embeds). `forward_isolated` classes a failure that is
-not the text's as `Unavailable`; the death path does not. The supervisor's
-own doc says a worker exit "should be impossible", so this is a latent
-mismatch on a defensive path. -/
-theorem worker_death_permanent :
+/-- Since #309 a worker death is transient for the requests the worker held:
+each caller sees a dropped sender, which `recv_bounded` and `embed_batch`
+report as `worker_exited()`, `Unavailable`, so a write's text is refused
+retryably (`LamboError::EmbedUnavailable`) and not as a refusal of the text.
+The Rust test is `a_worker_death_answers_the_requests_it_held_as_transient`. -/
+theorem worker_death_transient :
     let s := run Cfg.rust okFwd 4 St.init [.supervise true, .enqueue (sReq 1 7), .work, .die]
-    s.obs = [(sReq 1 7, .dropped)] ∧ Obs.transient .dropped = some false ∧
-      soloRes (fun t => some ⟨4, t.len % 4⟩) 4 (sReq 1 7).txt = .vec ⟨4, 3⟩ := by decide
+    s.obs = [(sReq 1 7, .dropped)] ∧ Obs.transient .dropped = some true := by decide
 
 /-- The queue survives a worker death: the supervisor restarts the worker
 and the queued request is served. -/

@@ -1671,8 +1671,17 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic".to_string())
 }
 
+/// The answer for a request whose sender was dropped unsent: the worker died
+/// with the request in its hands (#309). [`EmbedError::Unavailable`],
+/// transient, like every failure [`forward_isolated`] finds is not the
+/// text's own: nothing was learned about the text, so a write is refused
+/// retryably instead of being settled `failed` for good.
+fn worker_exited() -> EmbedError {
+    EmbedError::Unavailable("candle coalescer dropped the request (worker exited mid-batch)".into())
+}
+
 /// Bounded wait on the coalescer oneshot (K2-R1-5): a dead worker produces a
-/// named error, never an indefinite hang.
+/// named error ([`worker_exited`]), never an indefinite hang.
 async fn recv_bounded(
     rx: tokio::sync::oneshot::Receiver<Result<Vec<f32>, EmbedError>>,
     limit: Duration,
@@ -1680,9 +1689,7 @@ async fn recv_bounded(
     match tokio::time::timeout(limit, rx).await {
         Ok(Ok(result)) => result,
         // Sender dropped without sending: the batch died with a dead worker.
-        Ok(Err(_)) => Err(EmbedError::Backend(
-            "candle coalescer dropped the request (worker exited mid-batch)".into(),
-        )),
+        Ok(Err(_)) => Err(worker_exited()),
         Err(_) => Err(EmbedError::Unavailable(format!(
             "candle embed did not complete within {} s — the coalescer appears wedged; \
              retry or restart",
@@ -1751,7 +1758,8 @@ impl Embedder for CandleEmbedder {
     /// shares one deadline, the caller's or [`EMBED_WAIT`] if sooner (review
     /// L2): a slot not answered by then fails `Unavailable` while the
     /// answered ones keep their vectors, and dropping its receiver tells
-    /// the coalescer not to forward it.
+    /// the coalescer not to forward it. A slot whose request the worker died
+    /// holding fails `Unavailable` too ([`worker_exited`], #309).
     async fn embed_batch(
         &self,
         texts: &[&str],
@@ -1803,9 +1811,7 @@ impl Embedder for CandleEmbedder {
                 Err(e) => Err(e),
                 Ok(rx) => match tokio::time::timeout_at(deadline, rx).await {
                     Ok(Ok(result)) => result,
-                    Ok(Err(_)) => Err(EmbedError::Backend(
-                        "candle coalescer dropped the request (worker exited mid-batch)".into(),
-                    )),
+                    Ok(Err(_)) => Err(worker_exited()),
                     Err(_) => Err(super::deadline_passed()),
                 },
             });
@@ -2379,8 +2385,10 @@ mod tests {
 
     /// A `CandleEmbedder` whose model is a tiny zero-weighted XLM-RoBERTa and
     /// whose tokenizer is an empty WordPiece — never touching the network or
-    /// the real artifact. `embed()` is never called on it; it exists solely so
-    /// the identity plumbing can be exercised through a real trait object.
+    /// the real artifact. No coalescer runs for it, so nothing it is asked to
+    /// embed is ever forwarded; it exists so the identity plumbing can be
+    /// exercised through a real trait object, and so a test can stand in for
+    /// its worker (#309).
     #[cfg(test)]
     fn weightless_embedder() -> CandleEmbedder {
         let device = Device::Cpu;
@@ -2616,11 +2624,59 @@ mod tests {
     #[tokio::test]
     async fn bounded_wait_reports_a_dropped_sender_as_a_named_error() {
         // K2-R1-5: a dead worker drops the sender; embed() surfaces a named
-        // Backend error instead of hanging on rx.await forever.
+        // error instead of hanging on rx.await forever. #309: the error is
+        // transient, since the worker's death says nothing about the text.
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<f32>, EmbedError>>();
         drop(tx);
         let err = recv_bounded(rx, Duration::from_secs(1)).await.unwrap_err();
         assert!(err.to_string().contains("dropped the request"), "{err}");
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        assert!(err.is_transient());
+    }
+
+    #[tokio::test]
+    async fn a_worker_death_answers_the_requests_it_held_as_transient() {
+        // #309: the worker dies with a take in its hands, a single embed and
+        // a write's two bulk texts. Before the fix each caller was answered
+        // `Backend`, permanent, so a write was refused for good and its
+        // durable intent settled `failed`, although nothing was learned
+        // about any text.
+        let e = weightless_embedder();
+        let shared = Arc::clone(&e.slot.handle.get().expect("built loaded").shared);
+        // No coalescer runs for this embedder. This thread stands in for
+        // its worker: it takes the three requests off the queue as
+        // `coalesce_loop` does, then dies holding them.
+        let worker = std::thread::spawn(move || {
+            while shared.queue.len() < 3 {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let held = shared.queue.wait_for_batch(MAX_BATCH).expect("a take");
+            assert_eq!(held.len(), 3, "the worker holds every request");
+            // Unwinds this thread, dropping `held`, without the panic hook's
+            // stderr report.
+            std::panic::resume_unwind(Box::new("worker killed mid-batch"));
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let (single, bulk) = tokio::join!(
+            e.embed("recall query"),
+            e.embed_batch(&["write text one", "write text two"], deadline)
+        );
+        let death = worker.join().expect_err("the worker died");
+        assert_eq!(
+            death.downcast_ref::<&str>(),
+            Some(&"worker killed mid-batch"),
+            "the worker died holding the take, not before it"
+        );
+        assert_eq!(bulk.len(), 2);
+        for result in std::iter::once(single).chain(bulk) {
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, EmbedError::Unavailable(_)),
+                "a worker death is not the text's failure: {err:?}"
+            );
+            assert!(err.is_transient());
+            assert!(err.to_string().contains("worker exited mid-batch"), "{err}");
+        }
     }
 
     #[tokio::test]

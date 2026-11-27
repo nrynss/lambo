@@ -625,7 +625,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/BatchQueue/Worker.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:66f4a92159999ac3a2b3bb3882a44dc83afc2866b26552a931b9a674d3184101"
+read_digest = "v2:sha256:870dd49eac5266757b55b30eb4e171355eabbd0d29226ff710c3f87bb6eb6135"
 rust = [
   "src/embed/candle.rs",
 ]
@@ -634,7 +634,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/BatchQueue/Runs.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:66f4a92159999ac3a2b3bb3882a44dc83afc2866b26552a931b9a674d3184101"
+read_digest = "v2:sha256:870dd49eac5266757b55b30eb4e171355eabbd0d29226ff710c3f87bb6eb6135"
 rust = [
   "src/embed/candle.rs",
 ]

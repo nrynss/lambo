@@ -61,9 +61,10 @@ open Lambo.Lib (eraseIdx_perm map_eq_pointwise)
 
 /-- What a caller observes, once: the answer its oneshot carried (`res`), the
 `RecvError` of a sender dropped unsent (`dropped`: `recv_bounded` and
-`embed_batch` turn it into `Backend("candle coalescer dropped the request
-(worker exited mid-batch)")`), or its own deadline (`timedOut`: `Unavailable`
-from `recv_bounded`, `deadline_passed()` from `embed_batch`). -/
+`embed_batch` turn it into `worker_exited()`, `Unavailable("candle coalescer
+dropped the request (worker exited mid-batch)")`, since #309), or its own
+deadline (`timedOut`: `Unavailable` from `recv_bounded`, `deadline_passed()`
+from `embed_batch`). -/
 inductive Obs where
   | res (r : Res)
   | dropped
@@ -76,7 +77,7 @@ def Obs.transient : Obs → Option Bool
   | .res (.vec _) => none
   | .res .backend => some false
   | .res .unavailable => some true
-  | .dropped => some false
+  | .dropped => some true
   | .timedOut => some true
 
 /-- Where the worker thread is. `down`: no worker running (before the

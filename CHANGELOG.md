@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- The in-process candle embedder answers a request its coalescer worker died
+  holding as a transient `Unavailable` error. The write is refused and can be
+  retried, where it was refused as if its text had been rejected (#309).
+
 ## 0.16.0 (2026-11-27)
 
 ### Highlights

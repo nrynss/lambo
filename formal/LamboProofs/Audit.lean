@@ -703,7 +703,7 @@ open Lambo
 #print axioms Lambo.BatchQueue.lengthChunks_perm
 #print axioms Lambo.BatchQueue.chunksOf_eq_lit
 #print axioms Lambo.BatchQueue.removeDesc_eq
-#print axioms Lambo.BatchQueue.worker_death_permanent
+#print axioms Lambo.BatchQueue.worker_death_transient
 #print axioms Lambo.BatchQueue.lone_transient_fault_permanent
 #print axioms Lambo.BatchQueue.queued_bulk_starves
 #print axioms Lambo.BatchQueue.test_stream_of_singles
