@@ -1618,6 +1618,18 @@ fn length_chunks(lens: &[usize]) -> Vec<Vec<usize>> {
 /// `Backend` whatever the cause, so a device fault that spares the canary and
 /// returns for the rerun is still charged to the text.
 ///
+/// The recovery has costs, and #310 extends them to lone texts. A text that
+/// fails deterministically costs its chunk's forward, the canary and its own
+/// rerun, so a text that panics runs the panic hook twice (the default hook
+/// prints each panic to stderr); before #310 a lone text's panic ran it
+/// once. A write's text that is alone in its bulk chunk and fails this way
+/// costs six forwards where it cost four: three here, and three more when
+/// `embed_gathered` (`src/graph/hybrid.rs`) leaves it out and the write
+/// embeds it alone through `embed()`, if it is alone in that chunk too.
+/// And whether the callers still wait is checked once, by [`still_awaited`]
+/// before the chunk's first forward: the canary and the reruns run even for
+/// a caller that has dropped its receiver since, and its answer goes unread.
+///
 /// A width mismatch is not retried: it is a fact about the loaded model, not
 /// about a text, so every caller gets it (K2-R1-4).
 fn forward_isolated<F>(texts: &[&str], dim: usize, forward: F) -> Vec<Result<Vec<f32>, EmbedError>>
