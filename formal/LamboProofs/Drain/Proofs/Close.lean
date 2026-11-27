@@ -1152,7 +1152,7 @@ theorem closeD_setAside {c : Caps} {sz : Job → Nat} {now : Int} {all : List Jo
   rw [ansOf_closeD]
   exact (ansOf_closeW_unsettled h1 h2).2
 
-/-! ### The current rule is wrong -/
+/-! ### The rule before #345 is wrong -/
 
 theorem closeW_vouches_dead_letteredW : Spec.closeW_vouches_dead_letteredW := by
   intro c sz now all evs st hst hnd hall hkeys hist now' j hj hd

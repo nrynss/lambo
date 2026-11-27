@@ -540,7 +540,7 @@ close's answer against it.
   history (`CloseFlush::Incomplete`, `Memory::close`, `close_fenced`).
 * **"Durable" means committed** (`committedPuts`): the write's put is in a
   batch the store committed, not merely one a flush drained.
-* **The current rule is wrong** (`closeW_vouches_dead_lettered`, a concrete
+* **The rule before #345 is wrong** (`closeW_vouches_dead_lettered`, a concrete
   case in `Examples.lean`, and `closeW_vouches_dead_letteredW`, every
   reachable session): a
   set-aside write whose put a dead letter dropped answers `intent_durable` at
@@ -620,13 +620,14 @@ abbrev Spec.closeD_agrees : Prop :=
   ∀ (flush : CloseFlush) (now : Int) (st : WS) (k : Key),
     ansOf (closeD flush [] now st) k = ansOf (closeW flush now st) k
 
-/-! ### The current rule is wrong -/
+/-! ### The rule before #345 is wrong -/
 
-/-- **#345, in general: the current close vouches for a dead-lettered put.**
-In every reachable session, a set-aside write (running, held or queued when
-the close began) whose put the history dead-lettered answers
-`intent_durable` at a close whose flush completed, though its put is not
-committed. -/
+/-- **#345, in general: the close before the fix (`closeW`) vouches for a
+dead-lettered put.** In every reachable session, a set-aside write (running,
+held or queued when the close began) whose put the history dead-lettered
+answers `intent_durable` at a `closeW` whose flush completed, though its put
+is not committed. The current close is `closeD`, which does not
+(`closeD_never_vouches_dropped`). -/
 abbrev Spec.closeW_vouches_dead_letteredW : Prop :=
   ∀ {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job} {evs : List Ev} {st : WS},
     st = runW c sz now (WS.init (admitStore all)) evs →

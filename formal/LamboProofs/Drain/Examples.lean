@@ -588,13 +588,13 @@ example :
 The concrete cases of `Close.lean`'s section "Dead-lettered batches at close
 (#345)". -/
 
-/-- **#345, the concrete case: the current close vouches for a dead-lettered
-put.** `j1` meets an embedder outage and is held (`pending_replay`); the
+/-- **#345, the concrete case: the close before the fix vouches for a
+dead-lettered put.** `j1` meets an embedder outage and is held (`pending_replay`); the
 background flush that drained its put dead-letters the batch, so every batch
-of the log has landed and the close's tail is empty. The current close
+of the log has landed and the close's tail is empty. The close before #345
 (`closeW .durable`, the empty-tail branch's `CloseFlush::Durable`) answers it
-`intent_durable`, though its put is not committed; the fixed close answers it
-`close_unflushed`. Rust test
+`intent_durable`, though its put is not committed; the current close
+(`closeD`) answers it `close_unflushed`. Rust test
 `a_close_with_an_empty_tail_does_not_vouch_for_a_dead_lettered_intent`. -/
 theorem closeW_vouches_dead_lettered :
     let st := runW capsT one 0 (WS.init (admitStore [j1]))
@@ -611,7 +611,7 @@ theorem closeW_vouches_dead_lettered :
 dead-lettered, then `j2` is held behind it and its put rides the tail. The
 first close's final flush fails (`close_unflushed` for both); the retry's
 lands the tail, so `j2` is upgraded to `intent_durable` and `j1` stays
-`close_unflushed`, where the current close upgraded both. Rust test
+`close_unflushed`, where the close before #345 upgraded both. Rust test
 `a_retried_close_upgrades_only_the_intents_it_can_vouch_for`. -/
 example :
     let st := runW capsT one 0 (WS.init (admitStore [j1, j2]))
