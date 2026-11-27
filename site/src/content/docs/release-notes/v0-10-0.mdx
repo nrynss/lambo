@@ -1,0 +1,35 @@
+---
+title: "Lambo 0.10.0"
+description: "Adds embeddings through Elasticsearch Inference and tightens transport rules for the Elasticsearch recall tier."
+sidebar:
+  label: "0.10.0"
+  order: -14
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-11-09.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.10.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.10.0/CHANGELOG.md#0100-2026-11-09)
+
+## Update authenticated Elasticsearch recall URLs
+
+<Badge text="Breaking change" variant="danger" />
+
+If a remote `[recall]` endpoint uses an API key, set `recall.url` to HTTPS. Point it at the
+final address if it currently redirects. Plain HTTP with an API key is allowed only on
+loopback.
+
+## Use Elasticsearch as an embedder
+
+<Badge text="New" variant="success" />
+
+Set `[embedder] kind = "elastic"` to embed through an Elasticsearch Inference endpoint. You
+can use that embedder with or without the optional Elasticsearch recall index.
+
+## Keep pending writes after interrupted responses
+
+<Badge text="Enhancement" variant="note" />
+
+When an embedding response is cut off mid-body, hybrid writes retain their durable intent
+for a retry on restart. HTTP response size limits also bound memory use.

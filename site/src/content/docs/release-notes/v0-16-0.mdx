@@ -1,0 +1,69 @@
+---
+title: "Lambo 0.16.0"
+description: "PostgreSQL accepts long canonical keys, startup replay isolates rejected writes, and the web portal loads its embedder on demand."
+sidebar:
+  label: "0.16.0"
+  order: -21
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-11-27.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.16.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.16.0/CHANGELOG.md#0160-2026-11-27)
+
+For more information, see [Lambo v0.16.0 vs. v0.15.0 benchmarks](/lambo/benchmarks/v0-16-vs-v0-15/).
+
+## Provision PostgreSQL before restarting the writer
+
+<Badge text="Breaking change" variant="danger" />
+
+Stop the writer. With the v0.16.0 binary and your existing store configuration, run
+`lambo --config lambo.toml provision`. Restart the writer after provisioning succeeds.
+Provisioning replaces the canonical-key index with one that indexes a fixed-width digest.
+Matching still uses the full keys. The writer refuses to attach while the legacy index
+remains.
+
+## Update configuration and source builds
+
+<Badge text="Breaking change" variant="danger" />
+
+Remove `canonization_min_peer_count` if your configuration sets it. If it selects `bedrock`
+or `titan`, choose a [supported embedder](/lambo/config/#embedder) and see
+[how to re-embed stored concepts](/lambo/cli/#re-embed-stored-concepts) if you are changing
+an existing session’s embedding contract. Building from source requires Rust 1.100 or later.
+
+## Guides for operators and contributors
+
+<Badge text="New" variant="success" />
+
+Learn how to [choose an MCP transport](/lambo/mcp-transports/),
+[operate an HTTP writer](/lambo/operate-http-writer/),
+[troubleshoot missing memory](/lambo/troubleshoot-missing-memory/), and
+[check the Lean models against Rust](/lambo/formal-verification/).
+
+## Recover queued writes after a rejected replay
+
+<Badge text="Enhancement" variant="note" />
+
+Startup replay isolates a rejected write and reports `failed` once the store confirms that
+outcome. Later intents stay `pending_replay` and can apply on a subsequent restart. Lambo
+refuses new writes while replay is active, while outcomes await confirmation, or while
+recovery requires a restart. See
+[Troubleshoot missing memory](/lambo/troubleshoot-missing-memory/).
+
+## Preserve the latest Elasticsearch mirror
+
+<Badge text="Enhancement" variant="note" />
+
+Recall repairs rebuild from the snapshot used to check the sync marker and preserve the
+latest writer’s mirror state. Large flushes send vector changes in bounded bulk requests.
+
+## Load the portal embedder on the first vector recall
+
+<Badge text="Behavior change" variant="caution" />
+
+`lambo serve-web` opens the portal before loading model weights. The first recall that needs
+a query vector loads the embedder and concurrent recalls share that load. Use
+`--no-embedder` or `[web] embedder = false` to run the portal with keyword and recent recall
+only.

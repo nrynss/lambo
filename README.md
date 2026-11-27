@@ -18,6 +18,7 @@ them important.
 [Formal verification with Lean](https://nrynss.github.io/lambo/formal-verification/) ·
 [Migration](https://nrynss.github.io/lambo/migration/) ·
 [Library API](https://nrynss.github.io/lambo/api/) ·
+[Benchmarks](https://nrynss.github.io/lambo/benchmarks/) ·
 [Evidence](https://nrynss.github.io/lambo/evidence/)
 
 ## Why Lambo
@@ -358,6 +359,7 @@ calibration benchmarks, and negative research results are summarized on the
 |---|---|
 | [Quickstart](https://nrynss.github.io/lambo/quickstart/) | Install Lambo and recall a concept from a local SQLite session |
 | [Installation](https://nrynss.github.io/lambo/installation/) | Prebuilt binaries, Apple Silicon Metal build, MCP client setup, and Cargo features |
+| [Release notes](https://nrynss.github.io/lambo/release-notes/) | Changes and upgrade steps for each release |
 | [macOS multi-session setup](https://nrynss.github.io/lambo/macos/) | One LaunchAgent-supervised writer shared by every agent and project on an Apple Silicon Mac, with a single-prompt setup |
 | [MCP tools](https://nrynss.github.io/lambo/mcp/) | All nine MCP tools (eight always-on plus `lambo_derive_image`), arguments, receipts, and limits |
 | [Command line](https://nrynss.github.io/lambo/cli/) | Deterministic one-shot CLI verbs, multi-session serving, `names`, `embed`, and `stats --store` |
@@ -366,6 +368,7 @@ calibration benchmarks, and negative research results are summarized on the
 | [Migration and memory repair](https://nrynss.github.io/lambo/migration/) | Schema upgrades, durable name assignment, reviewed alias repairs, and rollback |
 | [Library API](https://nrynss.github.io/lambo/api/) | Embedding Lambo in Rust via `Memory`, `GraphStore`, and `Embedder` |
 | [End to end](https://nrynss.github.io/lambo/end-to-end/) | Single-writer leases, readers vs writers, recall legs, and multi-agent workflows |
+| [Benchmarks](https://nrynss.github.io/lambo/benchmarks/) | Release comparisons, recall quality, and reproduction methods |
 | [Evidence and evaluation](https://nrynss.github.io/lambo/evidence/) | Release gates, calibration tables, cross-store parity, durability proofs, and negative results |
 | [Demo](https://nrynss.github.io/lambo/demo/) | Scripted two-agent REST API scenario ([operator notes](https://github.com/nrynss/lambo/blob/main/docs/demo.md)) |
 

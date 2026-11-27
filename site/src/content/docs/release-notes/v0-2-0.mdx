@@ -1,0 +1,33 @@
+---
+title: "Lambo 0.2.0"
+description: "Publishes the crate to crates.io and adds graph and concept inspection to the web reader."
+sidebar:
+  label: "0.2.0"
+  order: -2
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-08-17.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.2.0) · [Compare with v0.1.0](https://github.com/nrynss/lambo/compare/v0.1.0...v0.2.0)
+
+## Inspect the graph and promotion progress
+
+<Badge text="New" variant="success" />
+
+The read-only portal exposes graph and concept inspection through `/api/graph` and
+`/api/inspect`. Inspect includes progress toward the applicable promotion gates.
+
+## Recognize dependency questions
+
+<Badge text="Enhancement" variant="note" />
+
+Recall routes recognized questions about dependents to graph traversal.
+
+## Install from crates.io
+
+<Badge text="New" variant="success" />
+
+The release workflow publishes the `lambo` crate to crates.io. GitHub Releases also provides
+prebuilt binaries.

@@ -1,0 +1,35 @@
+---
+title: "Lambo v0.15.0 vs. v0.12.0"
+description: "Tested the direct upgrade across v0.13.0 and v0.14.0."
+sidebar:
+  label: "v0.15.0 vs. v0.12.0"
+  order: -9
+---
+
+The Linux RTX 4070 SUPER rig tested a direct upgrade from v0.12.0 to v0.15.0 on
+an 11,270-concept SQLite session. All 330 replay outcomes and the ordered top eight on
+all 200 paired recall queries matched. No writes failed across 16 load runs.
+
+## CUDA results
+
+The recall time in this table comes from the server logs. The offline rows report
+wall-clock means.
+
+| Measurement | v0.12.0 | v0.15.0 |
+| --- | --- | --- |
+| Sequential recall p50 / p99 | 11.05 / 49.72 ms | 11.09 / 47.35 ms |
+| Session load mean | 826.4 ms | 832.9 ms |
+| Canonization dry run mean | 27.15 s | 26.97 s |
+
+Across four paired 16-agent tests, the ratio of v0.15.0 recall p99 to v0.12.0 ranged from
+0.97 to 1.03. The sequential derive acknowledgement sample had a different split between
+fast and slow calls. The experiment left the cause unresolved.
+
+Swarm dry-run reports matched. Under Solo, 498 concepts reached Candidate on v0.12.0
+and 496 on v0.15.0.
+
+## Source data
+
+For more information, refer to the [CUDA report and captures](https://github.com/nrynss/lambo/blob/main/evidence/0.15.0-vs-0.12.0-cuda/README.md).
+
+See [Lambo v0.15.0 release notes](/lambo/release-notes/v0-15-0/) to check upgrade steps.

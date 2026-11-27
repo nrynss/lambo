@@ -1,0 +1,47 @@
+---
+title: "Release notes"
+description: "What changed in each Lambo release and what to check before upgrading."
+sidebar:
+  label: "All releases"
+  hidden: true
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Start with the latest release, or read every release after the version you run today. Check
+the breaking changes before replacing a writer, updating a store, or rebuilding a client.
+
+[Full changelog](https://github.com/nrynss/lambo/blob/main/CHANGELOG.md) · [GitHub releases and downloads](https://github.com/nrynss/lambo/releases)
+
+## Read the badges
+
+- <Badge text="Breaking change" variant="danger" /> Check whether you need to provision a store, update configuration, or change client code.
+- <Badge text="New" variant="success" /> A command, setting, or capability is available.
+- <Badge text="Enhancement" variant="note" /> An existing feature works better or handles more cases.
+- <Badge text="Behavior change" variant="caution" /> An existing feature behaves differently. Check whether it affects your setup.
+
+## All releases
+
+| Release | Date | Summary |
+|---|---|---|
+| [0.16.0](/lambo/release-notes/v0-16-0/) | 2026-11-27 | PostgreSQL accepts long canonical keys, startup replay isolates rejected writes, and the web portal loads its embedder on demand. |
+| [0.15.0](/lambo/release-notes/v0-15-0/) | 2026-11-22 | Holds writes in order during embedder outages, adds store-wide portal discovery, and repairs embedding drift under the same contract. |
+| [0.14.0](/lambo/release-notes/v0-14-0/) | 2026-11-20 | Adds lease-free store health, vector export, and diagnostics for missing vectors. |
+| [0.13.0](/lambo/release-notes/v0-13-0/) | 2026-11-19 | Reports the strength of each recall leg and restores vector search when a planned dependency traversal falls through. |
+| [0.12.0](/lambo/release-notes/v0-12-0/) | 2026-11-16 | Adds durable names for concepts, reviewed alias repair, and a migration guide. |
+| [0.11.0](/lambo/release-notes/v0-11-0/) | 2026-11-11 | Lets web credentials with an explicit session prefix read new sessions without restarting the reader. |
+| [0.10.1](/lambo/release-notes/v0-10-1/) | 2026-11-10 | Calibrates the 1024-wide Elastic Jina v3 contract and adds configurable embedder request timeouts. |
+| [0.10.0](/lambo/release-notes/v0-10-0/) | 2026-11-09 | Adds embeddings through Elasticsearch Inference and tightens transport rules for the Elasticsearch recall tier. |
+| [0.9.2](/lambo/release-notes/v0-9-2/) | 2026-11-04 | Shows contradiction warnings in the web portal and adds warning details to inspect ledger entries. |
+| [0.9.1](/lambo/release-notes/v0-9-1/) | 2026-11-04 | Uses reciprocal rank fusion by default for calibrated Qwen recall and adds contradiction warnings to MCP and CLI inspect. |
+| [0.9.0](/lambo/release-notes/v0-9-0/) | 2026-11-04 | Calibrates both Qwen3 Embedding 4B widths, warns on uncalibrated contracts, and explains how to initialize fresh stores. |
+| [0.8.0](/lambo/release-notes/v0-8-0/) | 2026-10-28 | Warns on stale citations, suggests possible replacements, and adds recall tuning options. |
+| [0.7.0](/lambo/release-notes/v0-7-0/) | 2026-10-19 | Speeds up SQLite recall and writes, adds an embedding canary, and suggests near-duplicate aliases. |
+| [0.6.0](/lambo/release-notes/v0-6-0/) | 2026-10-13 | Adds shared memory layers and repo-scoped paths, and makes concept citations count toward canonization. |
+| [0.5.0](/lambo/release-notes/v0-5-0/) | 2026-10-12 | Improves concurrent writes, avoids loading Candle in proxying servers, and adds a shutdown receipt state. |
+| [0.4.0](/lambo/release-notes/v0-4-0/) | 2026-10-11 | Adds image memory, multi-session HTTP, a multi-session web portal, and an optional Elasticsearch recall index. |
+| [0.3.0](/lambo/release-notes/v0-3-0/) | 2026-10-07 | Adds a local endpoint for sharing a session writer, durable garbage-collection counters, and configurable promotion policy. |
+| [0.2.2](/lambo/release-notes/v0-2-2/) | 2026-08-17 | Enforces session embedding contracts and adds structured recall to the portal. Last release with a Windows binary. |
+| [0.2.1](/lambo/release-notes/v0-2-1/) | 2026-08-17 | Rebuilds the read-only portal around session state, recall, and graph structure. |
+| [0.2.0](/lambo/release-notes/v0-2-0/) | 2026-08-17 | Publishes the crate to crates.io and adds graph and concept inspection to the web reader. |
+| [0.1.0](/lambo/release-notes/v0-1-0/) | 2026-08-16 | First release of the MCP writer, CLI, graph recall, and evidence-based canonization. |

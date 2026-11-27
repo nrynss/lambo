@@ -1,0 +1,79 @@
+---
+title: "Benchmarks"
+description: "Compare release performance, check recall quality, and reproduce the measurements."
+sidebar:
+  hidden: true
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Use these benchmarks to check how a release changes recall latency and write completion,
+or to see how retrieval ranks relevant concepts on a labeled corpus.
+
+<CardGrid>
+  <LinkCard
+    title="Release comparisons"
+    href="/lambo/benchmarks/#release-comparisons"
+    description="Recall latency, write replay, and concurrent load across releases."
+  />
+  <LinkCard
+    title="Recall quality"
+    href="/lambo/benchmarks/recall-quality/"
+    description="Vector retrieval and rank fusion on a public evaluation set."
+  />
+</CardGrid>
+
+## Release comparisons
+
+Each report identifies the release binaries, machine, and workload for its results.
+
+| Comparison | Test environment | Results |
+|---|---|---|
+| [v0.16.0 vs. v0.15.0](/lambo/benchmarks/v0-16-vs-v0-15/) | Metal and CUDA | Matched replay and ranked recall on both machines. Metal dry runs took 30% to 31% less time. |
+| [v0.15.0 vs. v0.14.0](/lambo/benchmarks/v0-15-vs-v0-14/) | Metal | Matched ranked recall and replay, with a higher recall tail in some v0.15.0 runs. |
+| [v0.15.0 vs. v0.12.0](/lambo/benchmarks/v0-15-vs-v0-12/) | CUDA | Tested the direct upgrade across v0.13.0 and v0.14.0. |
+| [v0.14.0 vs. v0.13.0](/lambo/benchmarks/v0-14-vs-v0-13/) | Metal | Matched replay and top-eight recall, with intermittent slow calls under load. |
+| [v0.13.0 vs. v0.12.0](/lambo/benchmarks/v0-13-vs-v0-12/) | Metal | Matched writes in a corrected replay and recorded one recall query difference. |
+| [v0.12.0 vs. v0.8.0](/lambo/benchmarks/v0-12-vs-v0-8/) | Metal and CUDA | Checked the durable-name upgrade and measured sequential write latency. |
+| [v0.8.0, v0.7.0, and v0.6.0](/lambo/benchmarks/v0-8-vs-v0-6/) | CUDA and synthetic SQLite | Measured the recall improvements across three releases and the write-latency trade-off. |
+| [v0.6.0 session cutover](/lambo/benchmarks/v0-6-cutover/) | Metal | Compared one mixed session with per-project sessions on the same release. |
+| [v0.6.0 vs. v0.5.0](/lambo/benchmarks/v0-6-vs-v0-5/) | CUDA | Caught a tail-latency regression on structural recall queries. |
+| [v0.5.0 vs. v0.4.0](/lambo/benchmarks/v0-5-vs-v0-4/) | Metal | Verified that concurrent writes stopped failing in the tested workloads. |
+| [v0.4.0 vs. v0.3.0](/lambo/benchmarks/v0-4-vs-v0-3/) | Metal, with a separate CUDA baseline | Measured faster recall and found concurrent write failures. |
+
+## Release comparison method
+
+Version tests start each build from an independent copy of the same store backup. Compare
+results within each test. Hardware, store snapshots, and layer configuration vary across
+reports. The v0.6.0 cutover measures two session layouts on one binary.
+
+| Measurement | Method | What to compare |
+|---|---|---|
+| Write replay | Reconstruct historical writes, add reworded variants, and submit them through stdio. | Receipt outcomes, created concepts, and semantic edges. |
+| Sequential latency | Alternate the same recall queries between two HTTP servers. Time derive calls through acknowledgement and receipt. | Client latency percentiles and ranked recall results. |
+| Concurrent load | Run eight or 16 independent MCP clients with a seeded mix of recalls, derives, actions, and stats. | Tail latency, failed writes, and receipt outcomes after the queue drains. |
+| Offline commands | Time session load and canonization dry runs with Hyperfine. Reverse release order for the second batch. | Wall-clock time and agreement between dry-run reports. |
+
+## Read the measurements
+
+The 50th percentile (p50) is the median. The 99th percentile (p99) describes the slow end
+of the sample. Client latency includes the call through HTTP. Server latency comes from
+the serving process's log.
+
+A derive acknowledgement means the server admitted the write into its queue. Use the
+applied receipt to measure completion. Server-side apply lag starts at acknowledgement
+and ends when the write completes.
+
+## Run a release comparison
+
+Use two scratch writers on loopback ports. Provision each copy of the backup with the
+release binary that will serve it. Use matching embedder settings and the same query set
+for both versions. The benchmark drivers write to the scratch databases.
+
+For more information, refer to the [load test harnesses](https://github.com/nrynss/lambo/blob/main/scripts/loadtest/README.md)
+and the [Metal commands and run settings](https://github.com/nrynss/lambo/blob/main/evidence/0.16.0-vs-0.15.0-metal/README.md#reproduce-the-measurements).
+The published reports include sanitized measurements. Run the same method with your own
+store backup and queries.
+
+See [Evidence and evaluation](/lambo/evidence/) to find cross-store tests, durability tests,
+and the multi-agent usage audit.

@@ -1,0 +1,29 @@
+---
+title: "Lambo 0.10.1"
+description: "Calibrates the 1024-wide Elastic Jina v3 contract and adds configurable embedder request timeouts."
+sidebar:
+  label: "0.10.1"
+  order: -15
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-11-10.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.10.1) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.10.1/CHANGELOG.md#0101-2026-11-10)
+
+## Expect different scoring for the calibrated Elastic contract
+
+<Badge text="Behavior change" variant="caution" />
+
+The new calibration applies to `.jina-embeddings-v3` at 1024 dimensions with
+`send_input_type` enabled. It changes the recent score, the default layer floor, and the
+threshold for future merges. Existing merges stay in place.
+
+## Configure HTTP embedder timeouts
+
+<Badge text="New" variant="success" />
+
+`connect_timeout_ms` and `timeout_ms` bound requests from `bge_m3`, `embeddinggemma2`, and
+`elastic`. Set them under `[embedder]`, or use their environment overrides. Remove these
+optional keys from a configuration before using it with v0.10.0.

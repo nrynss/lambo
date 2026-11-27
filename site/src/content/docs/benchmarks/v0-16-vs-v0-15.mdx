@@ -1,0 +1,72 @@
+---
+title: "Lambo v0.16.0 vs. v0.15.0"
+description: "Compare matched SQLite runs on Apple M3 Pro Metal and NVIDIA RTX 4070 SUPER CUDA."
+sidebar:
+  label: "v0.16.0 vs. v0.15.0"
+  order: -11
+---
+
+On each machine, both releases applied all 330 replay calls and returned the same ranked
+top-eight concepts on 200 paired recall queries.
+
+The Metal canonization dry run took 30% to 31% less time on v0.16.0 in two run orders.
+CUDA dry-run times varied by about 0.3% in opposite directions.
+
+## Test setup
+
+The comparisons ran on November 27, 2026. Both used SQLite and Candle BGE-M3 at 1,024
+dimensions. Each run started from a fresh copy of its machine's backup.
+
+| Machine | Release binaries | Tested session |
+|---|---|---|
+| Apple M3 Pro, 18 GiB, macOS 26.7.3 | Published Apple silicon Metal assets | 2,907 concepts, with a 41-concept `general` layer |
+| NVIDIA RTX 4070 SUPER, 12 GB, CUDA 13.5 | CUDA builds from the release commits | 11,347 concepts, with no shared layer |
+
+## Sequential calls
+
+The HTTP harness alternated 20 queries for 10 rounds and then timed 30 derives per release.
+The times in the table are measured by the client.
+
+| Machine | Measurement | v0.15.0 | v0.16.0 |
+|---|---|---|---|
+| Metal | Recall p50 / p99 | 2.17 / 25.30 ms | 2.19 / 26.27 ms |
+| Metal | Derive acknowledgement p50 | 0.52 ms | 0.51 ms |
+| Metal | Derive to applied receipt p50 | 25.94 ms | 25.99 ms |
+| CUDA | Recall p50 / p99 | 18.97 / 96.83 ms | 19.27 / 101.76 ms |
+| CUDA | Derive acknowledgement p50 | 17.23 ms | 13.06 ms |
+| CUDA | Derive to applied receipt p50 | 84.41 ms | 83.76 ms |
+
+## Concurrent load
+
+Each machine ran 12 load tests across the two releases, with eight or 16 agents per server.
+On Metal, all 22,388 writes applied. In the two pairs with both 16-agent servers active,
+server-side recall p99 differed by 0.15 ms in opposite directions.
+
+On CUDA, both releases reported zero failed writes. Server-side recall p99 rose from
+186.04 ms to 280.82 ms in the single eight-agent comparison. It also rose in both
+simultaneous 16-agent comparisons. Separately run 16-agent tests had overlapping p99
+ranges across releases.
+
+## Canonization dry run
+
+Each release ran eight times in each order, with a fixed evaluation clock for each
+backup. Both releases reached the same policy results on each machine.
+
+| Machine | Release order | Mean v0.15.0 | Mean v0.16.0 |
+|---|---|---|---|
+| Metal | v0.15.0 first | 2.441 s | 1.686 s |
+| Metal | v0.16.0 first | 2.406 s | 1.687 s |
+| CUDA | v0.15.0 first | 31.38 s | 31.47 s |
+| CUDA | v0.16.0 first | 31.49 s | 31.40 s |
+
+## Scope and source data
+
+These runs cover routine SQLite operation. Both backups contained only settled intents.
+Startup replay with outstanding writes and changes specific to PostgreSQL and Elasticsearch
+require separate tests.
+
+For more information, refer to the [Metal run report and reproduction commands](https://github.com/nrynss/lambo/blob/main/evidence/0.16.0-vs-0.15.0-metal/README.md)
+and the [CUDA run report and build settings](https://github.com/nrynss/lambo/blob/main/evidence/0.16.0-vs-0.15.0-cuda/README.md).
+The reports link to timing samples, release commits, and workload settings.
+
+See [Lambo 0.16.0 release notes](/lambo/release-notes/v0-16-0/) to check upgrade steps.

@@ -1,0 +1,27 @@
+---
+title: "Lambo 0.9.1"
+description: "Uses reciprocal rank fusion by default for calibrated Qwen recall and adds contradiction warnings to MCP and CLI inspect."
+sidebar:
+  label: "0.9.1"
+  order: -12
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-11-04.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.9.1) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.9.1/CHANGELOG.md#091-2026-11-04)
+
+## Check recall order on Qwen
+
+<Badge text="Behavior change" variant="caution" />
+
+When calibration is `builtin` and `[fusion]` is unset, Qwen contracts use reciprocal rank
+fusion. Set the fusion kind explicitly to keep max fusion.
+
+## See contradiction warnings in inspect
+
+<Badge text="Enhancement" variant="note" />
+
+`lambo_inspect` and `lambo inspect` warn when the focus is contradicted, using the same
+ruling as recall.

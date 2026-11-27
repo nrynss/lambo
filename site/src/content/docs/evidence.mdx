@@ -10,6 +10,8 @@ Use these results to inspect the workloads, hardware, and versions tested. The r
 
 ## Release re-pin gates and performance
 
+See [Benchmarks](https://nrynss.github.io/lambo/benchmarks/#release-comparisons) to browse the release comparisons and session cutover by version.
+
 Before re-pinning the daily dogfood writers (Apple Silicon M3 Pro Metal and Linux RTX 4070 SUPER CUDA), each release runs an interleaved latency A/B (`scripts/loadtest/mcp_ab.py`), a 330-call real-write replay parity check (`scripts/loadtest/replay_parity.py`), and 8- and 16-agent concurrent load tests (`scripts/loadtest/mcp_concurrent.py`) on copies of real multi-session stores.
 
 | Release / gate | Hardware & store | Headline measurements | Raw capture |

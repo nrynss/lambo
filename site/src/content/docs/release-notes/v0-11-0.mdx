@@ -1,0 +1,30 @@
+---
+title: "Lambo 0.11.0"
+description: "Lets web credentials with an explicit session prefix read new sessions without restarting the reader."
+sidebar:
+  label: "0.11.0"
+  order: -16
+---
+
+import { Badge } from '@astrojs/starlight/components';
+
+Released 2026-11-11.
+
+[GitHub release and downloads](https://github.com/nrynss/lambo/releases/tag/v0.11.0) · [Changelog entry](https://github.com/nrynss/lambo/blob/v0.11.0/CHANGELOG.md#0110-2026-11-11)
+
+## Review web credential prefixes
+
+<Badge text="Behavior change" variant="caution" />
+
+A credential with an explicit `session_prefix`, including one inherited from serve, can read
+matching sessions created after the web reader starts. Review each prefix before upgrading.
+Exact names, wildcard credentials, and opt-in session listing keep their startup allowlist
+scope.
+
+## Support on-demand reads in custom stores
+
+<Badge text="New" variant="success" />
+
+Implement `GraphStore::session_readable` if your adapter should support dynamic prefix
+reads. Bundled stores implement the read-only existence probe. Existing startup-served
+sessions keep working with the default method.

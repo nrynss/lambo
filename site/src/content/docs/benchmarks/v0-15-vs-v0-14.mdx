@@ -1,0 +1,35 @@
+---
+title: "Lambo v0.15.0 vs. v0.14.0"
+description: "Matched ranked recall and replay, with a higher recall tail in some v0.15.0 runs."
+sidebar:
+  label: "v0.15.0 vs. v0.14.0"
+  order: -10
+---
+
+Both releases applied all 330 replay calls with identical outcomes and returned the same
+first eight hits on all 200 paired recall queries. Concurrent tests completed with zero
+failed writes across 12 runs.
+
+## Metal results
+
+The Apple M3 Pro setup used a SQLite session with 2,743 concepts and a shared `general`
+layer. The recall and derive timings come from the HTTP client.
+
+| Measurement | v0.14.0 | v0.15.0 |
+| --- | --- | --- |
+| Recall p50 / p99 | 2.13 / 24.53 ms | 2.09 / 23.33 ms |
+| Derive to applied receipt p50 | 25.59 ms | 25.62 ms |
+| Session load mean | 149.3 ms | 145.2 ms |
+| Canonization dry run mean | 2.123 s | 2.142 s |
+
+At 16 agents, v0.15.0 had higher server-side recall p99 in both paired runs. Across five
+runs per release, the p99 ranges overlapped. The experiment left the cause unresolved.
+
+Swarm dry-run reports matched. Under Solo, 149 concepts reached Candidate on v0.14.0
+and 146 on v0.15.0.
+
+## Source data
+
+For more information, refer to the [Metal report and captures](https://github.com/nrynss/lambo/blob/main/evidence/0.15.0-vs-0.14.0-metal/README.md).
+
+See [Lambo v0.15.0 release notes](/lambo/release-notes/v0-15-0/) to check upgrade steps.
