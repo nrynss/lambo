@@ -366,9 +366,10 @@ def audit_refs(m):
 
 
 def header_of(src):
-    """A model file's header: its comments before `namespace`."""
-    cut = src.find("\nnamespace ")
-    return src if cut < 0 else src[:cut]
+    """A model file's header: its comments before the `namespace` command (a
+    line that is one, not a line of prose that starts with the word)."""
+    cut = re.search(r"^namespace [\w.]+[ \t]*$", src, re.M)
+    return src[:cut.start()] if cut else src
 
 
 def doc_comment(src_lines, d):
