@@ -1,19 +1,22 @@
-# Theorems deleted from the models on purpose, in three groups. First, those
+# Theorems deleted from the models on purpose, in four groups. First, those
 # the audit in formal/audit/unreferenced-theorems.md found nothing referencing
 # (no proof in the dump's `uses`, no other declaration naming them, no example,
 # docs anchor, claims ledger row, Rust comment, oracle or README mention, and
 # no Audit.lean line except `Drain.orderInv_nil`'s, removed with it). Second,
-# the rows marked "purpose review", which failed the review recorded in
-# reviewed-theorems.tsv (header mentions went with them). Third, the #280
-# rows: that unimplemented design model, removed at the owner's request with
-# its six Audit.lean lines, its README and header mentions, and the
-# definitions only it used (a definition is listed only when nothing left
-# mentions it). Fourth, the rows whose reason starts "#N fixed" (#316, #309, #310):
-# runs of the Rust before that fix,
-# which the fixed model makes false; their Audit.lean lines, README, claims
-# ledger and header mentions went with them, and the reason names the
-# theorem that states the fixed behaviour. Tab-separated: name, reason, the
-# kept theorem that states the
+# the rows marked "purpose review" or "re-review", which failed a review of
+# their purpose (recorded in reviewed-theorems.tsv, or in the reason itself);
+# header mentions, and the one Audit.lean line the reason names, went with
+# them. Third, the #280 rows: that unimplemented design model, removed at the
+# owner's request with its six Audit.lean lines, its README and header
+# mentions, and the definitions only it used (a definition is listed only
+# when nothing left mentions it). Fourth, the rows whose reason starts "#N
+# fixed" (#316, #309, #310): theorems a fix of the Rust made false or
+# redundant, namely runs of the Rust before the fix, which the fixed model
+# makes false, statements about a branch the fix removed, and a special case
+# that a theorem of the fixed model now states in general (named in the third
+# column); their Audit.lean lines, README, claims ledger and header mentions
+# went with them, and the reason names the theorem that states the fixed
+# behaviour. Tab-separated: name, reason, the kept theorem that states the
 # same thing or more (`-` when there is none). Read by
 # scripts/formal/check-decl-equivalence.py --deletions and by
 # scripts/formal/audit-theorems.py.
