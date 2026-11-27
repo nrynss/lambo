@@ -78,9 +78,9 @@ theorem test_top_up :
 
 def bulk24 : List Req := (List.range 24).map fun i => bReq i 11
 
-/-- `a_single_embed_queued_during_a_take_waits_for_one_forward_only`: a take
-of 24 bulk texts; a recall arrives while the first forward runs; the next
-forward is the recall's. -/
+/-- `a_lone_single_embed_queued_during_a_bulk_forward_with_bulk_left_runs_next`:
+a take of 24 bulk texts; a lone recall arrives while the first forward runs,
+with two bulk forwards left; the next forward is the recall's. -/
 theorem test_recall_next_forward :
     let s := run Cfg.rust okFwd 4 { St.init with pc := .serving (split bulk24), issued := bulk24 }
       ([.work, .enqueue (sReq 100 12)] ++ List.replicate 40 .work)

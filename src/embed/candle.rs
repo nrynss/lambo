@@ -128,7 +128,7 @@ struct Pending {
     tx: tokio::sync::oneshot::Sender<Result<Vec<f32>, EmbedError>>,
     /// Queued by [`Embedder::embed_batch`] (#125 review M1). A take serves
     /// single embeds (a recall's query, a lone write text) before bulk
-    /// ones, so a recall is not queued behind a write's gathered texts.
+    /// ones, so a recall is taken ahead of a write's gathered texts.
     /// [`serve_take`] says how long it can still wait.
     bulk: bool,
 }
@@ -213,9 +213,13 @@ impl BatchQueue {
     }
 
     /// Take up to `n` queued single embeds, leaving bulk ones queued in
-    /// order (#125): checked before every forward of a take that still has
-    /// bulk texts, so a recall joins the take in progress and does not wait
-    /// for the next one.
+    /// order (#125). [`serve_take`] calls it before every forward while its
+    /// take still has bulk texts, so a recall queued before one of those
+    /// calls joins the take in progress instead of waiting for the next one.
+    /// A recall queued after the call made before the take's last bulk
+    /// forward (in practice, during that forward or later) is not taken here:
+    /// it waits for the single forwards still left in the take and then for
+    /// a later take.
     fn take_singles(&self, n: usize) -> Vec<Pending> {
         let mut q = self.lock_queue();
         if !q.iter().any(|p| !p.bulk) {
@@ -1457,11 +1461,17 @@ fn coalesce_loop(shared: Arc<Shared>) {
 /// Single embeds (a recall's query, a lone text) go before bulk ones, and
 /// while the take has bulk texts the queue is checked for new single embeds
 /// **before every forward** (review M1, Sonnet review), not only when the
-/// take is made. A recall that arrives while a write's batch is being
-/// forwarded joins the take in progress, and when it is the only single
-/// embed waiting after a bulk forward, the next forward is its own.
+/// take is made. A recall that arrives during a forward after which the take
+/// still has bulk texts joins the take in progress, and when it is the only
+/// single embed waiting after such a bulk forward, the next forward is its
+/// own. A recall that arrives during the take's last bulk forward, or after
+/// it, is not pulled into the take, since nothing is pulled once the bulk
+/// group is empty: it waits for the single forwards still left in the take
+/// (singles that waited while [`MAX_SINGLE_STREAK`] forced that last bulk
+/// chunk) and then for a later take: the next one, unless [`MAX_BATCH`]
+/// single embeds queued before it fill that one.
 ///
-/// That is not a bound on a recall's wait (#311). The single group is
+/// None of that is a bound on a recall's wait (#311). The single group is
 /// chunked by length, shortest first, each time a forward is chosen, so a
 /// shorter single embed that arrives later runs before a longer one that is
 /// already waiting, and after [`MAX_SINGLE_STREAK`] single forwards in a row
@@ -1472,7 +1482,8 @@ fn coalesce_loop(shared: Arc<Shared>) {
 /// eleventh forward, after all three bulk forwards
 /// (`long_recall_waits_out_the_take` in
 /// `formal/LamboProofs/BatchQueue/Runs.lean`). Once a recall has joined a
-/// take, what bounds its wait is the end of that take.
+/// take, what bounds its wait is the end of that take; one that missed the
+/// take waits for its end and then for a later take.
 ///
 /// Two rules protect the bulk texts of **this take**, and only those. After
 /// [`MAX_SINGLE_STREAK`] single forwards in a row, one bulk chunk runs even
@@ -1539,8 +1550,9 @@ where
 /// `formal/LamboProofs/BatchQueue/Pure.lean`). It protects that take only
 /// (#311): a write's texts that are still queued can starve behind
 /// [`MAX_BATCH`] queued singles ([`take_prioritized`]). A recall waiting when
-/// the streak ends waits for that bulk chunk too, and one that shorter
-/// single embeds keep overtaking can wait for the rest of the take
+/// the streak ends waits for that bulk chunk too, one that shorter single
+/// embeds keep overtaking can wait for the rest of the take, and one that
+/// arrives during the take's last bulk chunk does not join the take at all
 /// ([`serve_take`]).
 const MAX_SINGLE_STREAK: usize = 3;
 
@@ -2186,10 +2198,16 @@ mod tests {
     }
 
     #[test]
-    fn a_single_embed_queued_during_a_take_waits_for_one_forward_only() {
+    fn a_lone_single_embed_queued_during_a_bulk_forward_with_bulk_left_runs_next() {
         // Sonnet review of #125: priority was per take, so a recall arriving
-        // during a write's batch waited for the whole take. Now the queue is
-        // checked before every forward.
+        // during a write's batch was never pulled into it. Now the queue is
+        // checked before every forward while the take has bulk texts, and a
+        // lone recall that arrives during a bulk forward with bulk texts left
+        // to run is the next forward. This pins that scenario only, not a
+        // bound on a recall's wait (#311): shorter singles can overtake a
+        // long recall until the take ends (`long_recall_waits_out_the_take`
+        // in `formal/LamboProofs/BatchQueue/Runs.lean`), and one that arrives
+        // during the take's last bulk forward is not pulled into the take.
         let q = BatchQueue::new();
         let mut rxs = Vec::new();
         let mut take = Vec::new();
