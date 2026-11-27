@@ -1,0 +1,7 @@
+session 'lambo-dev' (reader snapshot)
+nodes=15276 edges=27440 concepts=11347 canonical=5
+embedded=11347/11347
+epoch=929790
+calibration=calibrated (layer floor measured on 12 concepts)
+flush_lag=n/a log_depth=n/a daemon_cycles=n/a canonization_cycles=n/a
+note: flush_lag / log_depth / daemon_cycles / canonization_cycles are writer-only; this is a reader process
