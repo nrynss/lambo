@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Changes
+
+- Formal models: the drain model is in Spec and Proofs form (#350). Each
+  subsystem file under `formal/LamboProofs/Drain/` is now two:
+  `Drain/Spec/<File>.lean` holds the definitions and each result as a named
+  proposition `Spec.<name>` with no proof, and `Drain/Proofs/<File>.lean`
+  proves it as `theorem <name> : Spec.<name>`, beside the lemmas the proofs
+  need. No theorem is added, deleted or restated:
+  `scripts/formal/check-decl-equivalence.py --spec-form` checks that each of
+  the 93 propositions unfolds to the statement its theorem had, and
+  `--only-form-changes` runs that comparison alone on any change.
+  `scripts/formal/audit-theorems.py --check` now also fails on a `Spec`
+  proposition that the theorem of its name does not prove. Docs anchors cite
+  the propositions (`lean: Drain.Spec.<name>`), and the anchor check refuses
+  a theorem or lemma of the proofs layer. `formal/README.md`, "Reading a Spec
+  file", describes the form; the other models are not in it yet. Earlier
+  entries below name the drain files as they were.
+
 ### Fixed
 
 - The in-process candle embedder answers a request its coalescer worker died

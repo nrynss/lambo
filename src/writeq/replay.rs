@@ -103,7 +103,7 @@ pub const REPLAY_LOOKUP_TIMEOUT_LIMIT: usize = EMBEDDER_SICK_THRESHOLD;
 /// adapter gets it from the same code; the rows carry no epoch column, so an
 /// adapter's `ORDER BY` could not express it.
 ///
-/// Modelled by `fixedLoad` in `formal/LamboProofs/Drain/Replay.lean`
+/// Modelled by `fixedLoad` in `formal/LamboProofs/Drain/Spec/Replay.lean`
 /// (`fixedLoad_sorted`, `fixedLoad_epochs`, `fixedLoad_agrees`).
 pub(crate) fn replay_order(intents: Vec<WriteIntent>) -> Vec<WriteIntent> {
     let epochs: Vec<Option<u64>> = intents
