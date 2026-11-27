@@ -9,8 +9,8 @@ fixes on the issues' scenarios.
 (#294, #295, #345); the current behaviour on the same scenarios is in its
 `example`s. So a docs page may not cite this file: the anchor check
 (`scripts/docs/check-doc-anchors.py`) refuses it, as it refuses
-`History.lean`, and a page cites the current theorems in the other drain
-files instead.
+`History.lean`, and a page cites the propositions of the specification
+(`Drain/Spec/`) instead.
 
 ## Results
 
@@ -30,7 +30,7 @@ Boundary: each case is one concrete run over the earlier layers; the general
 statements are in the other drain files.
 -/
 
-import LamboProofs.Drain.Close
+import LamboProofs.Drain.Proofs.Close
 import LamboProofs.Drain.History
 
 namespace Lambo.Drain

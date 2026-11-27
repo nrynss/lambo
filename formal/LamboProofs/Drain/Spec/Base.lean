@@ -1,31 +1,46 @@
 /-
-# Write-queue drain and durable-intent replay: the base model
+# Write-queue drain and durable-intent replay: the base model (specification)
 
 Model of how the asynchronous write queue's admitted writes end: drained by
 the lane workers, set aside and settled at `close()`, or replayed from their
-durable intents by a later serve. The model is in six files, all in the
-namespace `Lambo.Drain`, so a theorem's name does not say which file holds
-it:
+durable intents by a later serve.
 
-* `Drain/Base.lean` (this file): writes, run results and the mutation log;
+The model is in two layers. `Drain/Spec/` is the specification: the
+definitions, which are the algorithm as the Rust runs it, and each result
+stated as a proposition `Spec.<name>`, with no proof. `Drain/Proofs/` proves
+them: `theorem <name> : Spec.<name>`, beside the lemmas the proofs need,
+which state nothing about the Rust that a `Spec` proposition does not. Read
+this layer to learn what the model says; a proposition here holds because
+the theorem of its name in `Drain/Proofs/` is checked by `lake build`, and
+`scripts/formal/audit-theorems.py --check` fails on one that has no such
+theorem. Each layer has one file per subsystem, with the same names, and
+everything is in the namespace `Lambo.Drain`, so a name does not say which
+file holds it. Below and in the other files, `Base.lean`, `Replay.lean`,
+`Worker.lean` and `Close.lean` name the subsystem: its `Spec/` file for a
+definition or a statement, its `Proofs/` file for a proof.
+
+* `Base.lean` (this file): writes, run results and the mutation log;
   the lane worker's batches (`workerStep`), the receipt store and the lane
   drain (`drain`); `settle_deferred`'s set-aside (`CloseFlush`, `deferEntry`,
   `settleDeferred`) and the `Drop` path (`abortAllSync`); durable intents,
   the intent table and the load order; the replay's step, its arms,
   streaks and constants (`replayStep`, `sickThreshold`,
   `lookupTimeoutLimit`) and the restart map's seed (`seed`).
-* `Drain/Replay.lean`: the replay fixes (#294, #295), the order invariant
+* `Replay.lean`: the replay fixes (#294, #295), the order invariant
   across passes, the in-session hold (`workH`) and the replay's retry pass.
-* `Drain/Worker.lean`: the current lane worker (`stepW`, `runW`), with
+* `Worker.lean`: the current lane worker (`stepW`, `runW`), with
   admission, the caps, retries and the fence.
-* `Drain/Close.lean`: the close, crash and shutdown over the current worker
+* `Close.lean`: the close, crash and shutdown over the current worker
   (`closeW`), dead-lettered batches at close (#345), worker panics and the
   dead-lettered set, and where the lookup-timeout streak resets (#346).
-* `Drain/Examples.lean`: worked examples and the findings about the Rust.
-* `Drain/History.lean`: the lane worker loop before #295 (`work`, `close`)
-  and the replay loop before #294 (`replay`'s theorems), kept as the evidence for the
-  findings they show. It describes no current Rust: it is not checked against
-  the Rust for drift, and the docs do not cite it.
+
+Two files are in neither layer and are not specification. `Drain/Examples.lean`
+holds worked examples and the findings about the Rust before a fix.
+`Drain/History.lean` holds the lane worker loop before #295 (`work`, `close`)
+and the replay loop before #294 (`replay`'s theorems), kept as the evidence
+for the findings they show. It describes no current Rust: it is not checked
+against the Rust for drift, and the docs do not cite it. Both state their
+theorems in full, with the proofs.
 
 Rust items modelled across the files:
 
@@ -491,87 +506,22 @@ def applyLog (intents : List Intent) (log : List Batch) : List Intent :=
 
 /-! ## The receipt store -/
 
-theorem update_cons (k : Key) (e : Entry) (s : RStore) (r : Key) (f : Entry → Entry) :
-    update ((k, e) :: s) r f = (if k = r then (k, f e) else (k, e)) :: update s r f := by
-  simp only [update, List.map_cons]
-
-theorem lookup_update (s : RStore) (r q : Key) (f : Entry → Entry) :
-    lookup (update s r f) q = if q = r then (lookup s q).map f else lookup s q := by
-  induction s with
-  | nil => simp [lookup, update]
-  | cons p s ih =>
-    obtain ⟨k, e⟩ := p
-    rw [update_cons]
-    by_cases hkr : k = r
-    · by_cases hkq : k = q
-      · subst hkr; subst hkq; simp [lookup]
-      · have hqk : q ≠ k := fun h => hkq h.symm
-        subst hkr
-        simp [lookup, hkq, hqk, ih]
-    · by_cases hkq : k = q
-      · subst hkq; simp [lookup, hkr]
-      · simp [lookup, hkr, hkq, ih]
-
-theorem lookup_update_ne (s : RStore) {r q : Key} (f : Entry → Entry) (h : q ≠ r) :
-    lookup (update s r f) q = lookup s q := by
-  rw [lookup_update, ite_eq_right h]
-
-theorem mem_update {s : RStore} {r : Key} {f : Entry → Entry} {p : Key × Entry}
-    (hp : p ∈ update s r f) :
-    ∃ q ∈ s, p = (if q.1 = r then (q.1, f q.2) else q) := by
-  unfold update at hp
-  obtain ⟨q, hq, he⟩ := List.mem_map.mp hp
-  exact ⟨q, hq, he.symm⟩
-
-/-- Admission's entries are all `Pending`. -/
-theorem lookup_admit {js : List Job} {j : Job} (hj : j ∈ js) :
-    ∃ e, lookup (admitStore js) j.key = some e ∧ e.answer = .pending := by
-  induction js with
-  | nil => simp at hj
-  | cons k js ih =>
-    show ∃ e, lookup ((k.key, ⟨.pending, none⟩) :: admitStore js) j.key = some e ∧ _
-    by_cases hk : k.key = j.key
-    · exact ⟨⟨.pending, none⟩, by simp [lookup, hk], rfl⟩
-    · have hj' : j ∈ js := by
-        cases List.mem_cons.mp hj with
-        | inl h => subst h; exact absurd rfl hk
-        | inr h => exact h
-      obtain ⟨e, he, ha⟩ := ih hj'
-      exact ⟨e, by simp [lookup, hk, he], ha⟩
-
 /-- A worker batch mentions only its own job. Stated over `workerStep` (the
 worker before #295); it holds of the current worker's batches through
 `runW_log_refines`. -/
-theorem workerStep_keys {f : Bool} {j : Job} {r : RunResult} {m : Mut}
-    (hm : m ∈ (workerStep f j r).2) : m = .write j.key ∨ ∃ t, m = .consume j.key t := by
-  unfold workerStep at hm
-  cases f with
-  | true => simp at hm
-  | false =>
-    cases r with
-    | ok =>
-      simp at hm
-      cases hm with
-      | inl h => exact Or.inl h
-      | inr h => exact Or.inr ⟨_, h⟩
-    | err e => cases e <;> simp [Err.transient] at hm <;> exact Or.inr ⟨_, hm⟩
+abbrev Spec.workerStep_keys : Prop :=
+  ∀ {f : Bool} {j : Job} {r : RunResult} {m : Mut},
+    m ∈ (workerStep f j r).2 →
+    m = .write j.key ∨ ∃ t, m = .consume j.key t
 
 /-- **The commit carries its consume.** A worker batch that writes also
 consumes the intent as `applied`, in the same batch, so the same flush. Stated
 over `workerStep` (the worker before #295); it holds of the current worker's
 batches through `runW_log_refines`, which `crash_never_reappliesW` uses. -/
-theorem workerStep_atomic {f : Bool} {j : Job} {r : RunResult} {q : Key}
-    (hm : Mut.write q ∈ (workerStep f j r).2) : Mut.consume q .applied ∈ (workerStep f j r).2 := by
-  unfold workerStep at hm ⊢
-  cases f with
-  | true => simp at hm
-  | false =>
-    cases r with
-    | ok =>
-      simp at hm
-      subst hm
-      simp
-    | err e => cases e <;> simp [Err.transient] at hm
+abbrev Spec.workerStep_atomic : Prop :=
+  ∀ {f : Bool} {j : Job} {r : RunResult} {q : Key},
+    Mut.write q ∈ (workerStep f j r).2 →
+    Mut.consume q .applied ∈ (workerStep f j r).2
 
 /-! ## `settle_deferred`: deferred, or answered `close_unflushed`
 
@@ -582,330 +532,32 @@ are over the worker **before #295**, in `History.lean`; their current
 counterparts are `shutdown_no_silent_lossW`, `held_at_closeW` and
 `closeW_retry_upgradesW`. -/
 
-theorem deferEntry_durable (now : Int) (e : Entry) :
-    deferEntry .durable now e =
-      if e.answer = .closeUnflushed then { answer := .intentRecorded, settledAt := some now }
-      else (settle e .intentRecorded now).1 := rfl
-
-theorem deferEntry_incomplete (now : Int) (e : Entry) :
-    deferEntry .incomplete now e = (settle e .closeUnflushed now).1 := rfl
-
-theorem lookup_mem : ∀ (s : RStore) (q : Key) (x : Entry), lookup s q = some x → (q, x) ∈ s := by
-  intro s
-  induction s with
-  | nil => intro q x h; simp [lookup] at h
-  | cons p s ih =>
-    intro q x h
-    obtain ⟨k, y⟩ := p
-    by_cases hk : k = q
-    · subst hk; simp [lookup] at h; subst h; exact List.mem_cons_self
-    · simp [lookup, hk] at h; exact List.mem_cons_of_mem _ (ih q x h)
-
-theorem deferEntry_settled (flush : CloseFlush) (now : Int) (e : Entry) :
-    (deferEntry flush now e).answer.isSettled = true := by
-  cases flush with
-  | durable =>
-    unfold deferEntry
-    by_cases h : e.answer = .closeUnflushed
-    · rw [ite_eq_left h]; rfl
-    · rw [ite_eq_right h]; exact Lambo.Receipts.settle_isSettled e _ now rfl
-  | incomplete => exact Lambo.Receipts.settle_isSettled e _ now rfl
-
-/-- On a settled answer other than `close_unflushed`, `settle_deferred` does
-nothing: a write the drain applied or failed keeps its answer. -/
-theorem deferEntry_of_settled (flush : CloseFlush) (now : Int) (e : Entry)
-    (hs : e.answer.isSettled = true) (hc : e.answer ≠ .closeUnflushed) :
-    deferEntry flush now e = e := by
-  cases flush with
-  | durable =>
-    unfold deferEntry
-    rw [ite_eq_right hc]
-    exact congrArg Prod.fst (Lambo.Receipts.settle_settled e _ now hs)
-  | incomplete => exact congrArg Prod.fst (Lambo.Receipts.settle_settled e _ now hs)
-
-theorem deferEntry_ne_closeUnflushed (now : Int) (e : Entry) :
-    (deferEntry .durable now e).answer ≠ .closeUnflushed := by
-  show (if e.answer = .closeUnflushed then { answer := .intentRecorded, settledAt := some now }
-    else (settle e .intentRecorded now).1 : Entry).answer ≠ _
-  by_cases h : e.answer = .closeUnflushed
-  · rw [ite_eq_left h]
-    show Answer.intentRecorded ≠ Answer.closeUnflushed
-    decide
-  · rw [ite_eq_right h]
-    by_cases hs : e.answer.isSettled = true
-    · rw [Lambo.Receipts.settle_settled e _ now hs]; exact h
-    · rw [Lambo.Receipts.settle_unsettled e _ now hs]
-      show Answer.intentRecorded ≠ Answer.closeUnflushed
-      decide
-
-theorem deferEntry_idem (flush : CloseFlush) (now : Int) (e : Entry) :
-    deferEntry flush now (deferEntry flush now e) = deferEntry flush now e := by
-  cases flush with
-  | durable =>
-    exact deferEntry_of_settled _ now _ (deferEntry_settled _ now e)
-      (deferEntry_ne_closeUnflushed now e)
-  | incomplete =>
-    show (settle (deferEntry .incomplete now e) .closeUnflushed now).1 = _
-    rw [Lambo.Receipts.settle_settled _ _ now (deferEntry_settled .incomplete now e)]
-
-theorem lookup_settleDeferred (flush : CloseFlush) (now : Int) :
-    ∀ (ids : List Key) (s : RStore) (q : Key),
-      lookup (settleDeferred flush now ids s) q =
-        if q ∈ ids then (lookup s q).map (deferEntry flush now) else lookup s q := by
-  intro ids
-  induction ids with
-  | nil => intro s q; simp [settleDeferred]
-  | cons r ids ih =>
-    intro s q
-    show lookup (settleDeferred flush now ids (update s r (deferEntry flush now))) q = _
-    rw [ih, lookup_update]
-    by_cases hr : q = r
-    · subst hr
-      by_cases hq : q ∈ ids
-      · cases h : lookup s q with
-        | none => simp
-        | some e => simp [hq, deferEntry_idem]
-      · simp [hq]
-    · by_cases hq : q ∈ ids
-      · simp [hq, hr]
-      · simp [hq, hr]
-
-theorem mem_pendingIds {s : RStore} {p : Key × Entry} (hp : p ∈ s)
-    (hu : p.2.answer.isSettled = false) : p.1 ∈ pendingIds s := by
-  unfold pendingIds
-  exact List.mem_map_of_mem (List.mem_filter.mpr ⟨hp, by simp [hu]⟩)
-
-/-- Two jobs with the same receipt id in a list whose ids are
-distinct are the same job. -/
-theorem eq_of_key {js : List Job} (hnd : (js.map (·.key)).Nodup) {a b : Job} (ha : a ∈ js)
-    (hb : b ∈ js) (h : a.key = b.key) : a = b := by
-  induction js with
-  | nil => simp at ha
-  | cons k js ih =>
-    rw [List.map_cons, List.nodup_cons] at hnd
-    cases List.mem_cons.mp ha with
-    | inl ha' =>
-      cases List.mem_cons.mp hb with
-      | inl hb' => rw [ha', hb']
-      | inr hb' =>
-        subst ha'
-        exact absurd (h ▸ List.mem_map_of_mem hb') hnd.1
-    | inr ha' =>
-      cases List.mem_cons.mp hb with
-      | inl hb' =>
-        subst hb'
-        exact absurd (h.symm ▸ List.mem_map_of_mem ha') hnd.1
-      | inr hb' => exact ih hnd.2 ha' hb'
-
 /-- A retried close upgrades `close_unflushed` to `intent_durable` once its
 flush lands: the one settled-to-settled change, made by `settle_deferred`
 outside `Entry::settle` (#117). About one entry and `deferEntry`, which is
 `settle_deferred` as it is today, so it describes the current close as well;
 `closeW_retry_upgradesW` states it over `closeW` and a session of the current
 worker. -/
-theorem retry_upgrades (now now' : Int) (e : Entry) (h : e.answer.isSettled = false) :
-    (deferEntry .durable now' (deferEntry .incomplete now e)).answer = .intentRecorded := by
-  have h' : ¬ e.answer.isSettled = true := by rw [h]; decide
-  rw [deferEntry_incomplete, Lambo.Receipts.settle_unsettled e _ now h', deferEntry_durable,
-    ite_eq_left rfl]
+abbrev Spec.retry_upgrades : Prop :=
+  ∀ (now now' : Int) (e : Entry),
+    e.answer.isSettled = false →
+    (deferEntry .durable now' (deferEntry .incomplete now e)).answer = .intentRecorded
 
 /-! ## The intent table -/
 
 /-- No `PutWriteIntent` in a mutation sequence. -/
 def NoPut (ms : List Mut) : Prop := ∀ m ∈ ms, ∀ j, m ≠ .put j
 
-theorem admitLog_flatten : ∀ (js : List Job), (admitLog js).flatten = js.map Mut.put := by
-  intro js
-  induction js with
-  | nil => rfl
-  | cons j js ih =>
-    show [Mut.put j] ++ (admitLog js).flatten = _
-    rw [ih]
-    rfl
-
-theorem foldl_put : ∀ (js : List Job) (acc : List Intent),
-    (js.map Mut.put).foldl applyMut acc = acc ++ js.map (fun j => ⟨j, none⟩) := by
-  intro js
-  induction js with
-  | nil => intro acc; simp
-  | cons j js ih =>
-    intro acc
-    show (js.map Mut.put).foldl applyMut (acc ++ [⟨j, none⟩]) = _
-    rw [ih]
-    simp
-
-/-- Admission's puts leave one unconsumed row per admitted job. -/
-theorem intentsOf_admit (js : List Job) :
-    intentsOf (admitLog js).flatten = js.map (fun j => ⟨j, none⟩) := by
-  unfold intentsOf
-  rw [admitLog_flatten, foldl_put]
-  rfl
-
-theorem applyMut_keeps_owed {acc : List Intent} {j : Job} {m : Mut} (h : ⟨j, none⟩ ∈ acc)
-    (hm : ∀ t, m ≠ .consume j.key t) : ⟨j, none⟩ ∈ applyMut acc m := by
-  cases m with
-  | put k => exact List.mem_append_left _ h
-  | write _ => exact h
-  | consume r t =>
-    have hr : j.key ≠ r := fun e => hm t (e ▸ rfl)
-    exact List.mem_map.mpr ⟨⟨j, none⟩, h, by simp [hr]⟩
-
-theorem foldl_keeps_owed {j : Job} : ∀ (ms : List Mut) (acc : List Intent),
-    ⟨j, none⟩ ∈ acc → (∀ t, Mut.consume j.key t ∉ ms) → ⟨j, none⟩ ∈ ms.foldl applyMut acc := by
-  intro ms
-  induction ms with
-  | nil => intro acc h _; exact h
-  | cons m ms ih =>
-    intro acc h hc
-    apply ih
-    · exact applyMut_keeps_owed h (fun t e => hc t (e ▸ List.mem_cons_self))
-    · exact fun t ht => hc t (List.mem_cons_of_mem _ ht)
-
-theorem applyMut_consumed {acc : List Intent} {r : Key} {m : Mut} (hm : ∀ j, m ≠ .put j)
-    (h : ∀ i ∈ acc, i.job.key = r → i.outcome ≠ none) :
-    ∀ i ∈ applyMut acc m, i.job.key = r → i.outcome ≠ none := by
-  cases m with
-  | put k => exact absurd rfl (hm k)
-  | write _ => exact h
-  | consume q t =>
-    intro i hi hr
-    obtain ⟨i0, h0, rfl⟩ := List.mem_map.mp hi
-    by_cases hq : i0.job.key = q
-    · simp [hq]
-    · simp only [hq, ite_false] at hr ⊢
-      exact h i0 h0 hr
-
-theorem applyMut_consume_self (acc : List Intent) (r : Key) (t : Tag) :
-    ∀ i ∈ applyMut acc (.consume r t), i.job.key = r → i.outcome ≠ none := by
-  intro i hi hr
-  obtain ⟨i0, _, rfl⟩ := List.mem_map.mp hi
-  by_cases hq : i0.job.key = r
-  · simp [hq]
-  · simp only [hq, ite_false] at hr
-
 /-- **A consume is never undone.** Once a mutation sequence with no puts
 carries a consume of `r`, or every row of `r` is already consumed, every row
 of `r` is consumed afterwards. -/
-theorem foldl_consumed {r : Key} : ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
-    ((∃ t, Mut.consume r t ∈ ms) ∨ ∀ i ∈ acc, i.job.key = r → i.outcome ≠ none) →
-    ∀ i ∈ ms.foldl applyMut acc, i.job.key = r → i.outcome ≠ none := by
-  intro ms
-  induction ms with
-  | nil =>
-    intro acc _ h
-    cases h with
-    | inl h => obtain ⟨t, ht⟩ := h; simp at ht
-    | inr h => exact h
-  | cons m ms ih =>
-    intro acc hnp h
-    have hnp' : NoPut ms := fun x hx => hnp x (List.mem_cons_of_mem _ hx)
-    have hm : ∀ j, m ≠ .put j := hnp m List.mem_cons_self
-    apply ih (applyMut acc m) hnp'
-    cases h with
-    | inl h =>
-      obtain ⟨t, ht⟩ := h
-      cases List.mem_cons.mp ht with
-      | inl he => subst he; exact Or.inr (applyMut_consume_self acc r t)
-      | inr ht' => exact Or.inl ⟨t, ht'⟩
-    | inr h => exact Or.inr (applyMut_consumed hm h)
-
-theorem foldl_rows {i' : Intent} : ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
-    i' ∈ ms.foldl applyMut acc → ∃ i ∈ acc, i'.job = i.job := by
-  intro ms
-  induction ms with
-  | nil => intro acc _ h; exact ⟨i', h, rfl⟩
-  | cons m ms ih =>
-    intro acc hnp h
-    obtain ⟨i1, h1, he⟩ := ih (applyMut acc m) (fun x hx => hnp x (List.mem_cons_of_mem _ hx)) h
-    cases m with
-    | put k => exact absurd rfl (hnp _ List.mem_cons_self k)
-    | write _ => exact ⟨i1, h1, he⟩
-    | consume q t =>
-      obtain ⟨i0, h0, rfl⟩ := List.mem_map.mp h1
-      refine ⟨i0, h0, ?_⟩
-      rw [he]
-      by_cases hq : i0.job.key = q <;> simp [hq]
+abbrev Spec.foldl_consumed : Prop :=
+  ∀ {r : Key},
+    ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
+      ((∃ t, Mut.consume r t ∈ ms) ∨ ∀ i ∈ acc, i.job.key = r → i.outcome ≠ none) →
+      ∀ i ∈ ms.foldl applyMut acc, i.job.key = r → i.outcome ≠ none
 
 /-! ## Load order -/
-
-theorem keyLe_iff (a b : Intent) :
-    keyLe a b = true ↔ a.job.ms < b.job.ms ∨ (a.job.ms = b.job.ms ∧ a.job.rid ≤ b.job.rid) := by
-  simp [keyLe]
-
-theorem keyLe_total (a b : Intent) : keyLe a b = true ∨ keyLe b a = true := by
-  rw [keyLe_iff, keyLe_iff]
-  omega
-
-theorem keyLe_trans {a b c : Intent} (h1 : keyLe a b = true) (h2 : keyLe b c = true) :
-    keyLe a c = true := by
-  rw [keyLe_iff] at h1 h2 ⊢
-  omega
-
-theorem mem_insertK {x y : Intent} : ∀ {l : List Intent}, y ∈ insertK x l ↔ y = x ∨ y ∈ l := by
-  intro l
-  induction l with
-  | nil => simp [insertK]
-  | cons z zs ih =>
-    unfold insertK
-    by_cases h : keyLe x z = true
-    · simp [h]
-    · simp only [h]
-      simp only [Bool.false_eq_true, ite_false, List.mem_cons, ih]
-      constructor
-      · intro h'
-        rcases h' with h' | h' | h'
-        · exact Or.inr (Or.inl h')
-        · exact Or.inl h'
-        · exact Or.inr (Or.inr h')
-      · intro h'
-        rcases h' with h' | h' | h'
-        · exact Or.inr (Or.inl h')
-        · exact Or.inl h'
-        · exact Or.inr (Or.inr h')
-
-theorem mem_loadOrder {y : Intent} : ∀ {l : List Intent}, y ∈ loadOrder l ↔ y ∈ l := by
-  intro l
-  induction l with
-  | nil => simp [loadOrder]
-  | cons x xs ih =>
-    show y ∈ insertK x (loadOrder xs) ↔ _
-    rw [mem_insertK, ih, List.mem_cons]
-
-theorem pairwise_insertK (x : Intent) : ∀ (l : List Intent),
-    l.Pairwise (fun a b => keyLe a b = true) →
-      (insertK x l).Pairwise (fun a b => keyLe a b = true) := by
-  intro l
-  induction l with
-  | nil => intro _; simp [insertK]
-  | cons z zs ih =>
-    intro h
-    rw [List.pairwise_cons] at h
-    unfold insertK
-    by_cases hxz : keyLe x z = true
-    · simp only [hxz, ite_true]
-      refine List.pairwise_cons.mpr ⟨?_, List.pairwise_cons.mpr h⟩
-      intro w hw
-      cases List.mem_cons.mp hw with
-      | inl e => rw [e]; exact hxz
-      | inr hw' => exact keyLe_trans hxz (h.1 w hw')
-    · simp only [hxz, Bool.false_eq_true, ite_false]
-      refine List.pairwise_cons.mpr ⟨?_, ih h.2⟩
-      intro w hw
-      cases mem_insertK.mp hw with
-      | inl e =>
-        rw [e]
-        cases keyLe_total x z with
-        | inl h' => exact absurd h' hxz
-        | inr h' => exact h'
-      | inr hw' => exact h.1 w hw'
-
-/-- The load is sorted by (`issued_ms`, `lane_seq`). -/
-theorem loadOrder_sorted : ∀ (l : List Intent),
-    (loadOrder l).Pairwise (fun a b => keyLe a b = true) := by
-  intro l
-  induction l with
-  | nil => exact List.Pairwise.nil
-  | cons x xs ih => exact pairwise_insertK x _ ih
 
 /-- **With issue times in sequence order, the load is sequence order.** If,
 among the rows, a higher sequence number never has an earlier issue time, the
@@ -915,40 +567,20 @@ hypothesis: `next_receipt` takes the sequence number before it reads the clock
 and before admission takes its lock, so two concurrent admissions can read
 the clock in the other order. It holds for sequential admissions under a
 clock that does not step back. `clock_step_reorders` is the other side. -/
-theorem load_seq_order (l : List Intent)
-    (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.rid < b.job.rid → a.job.ms ≤ b.job.ms) :
-    (loadOrder l).Pairwise (fun a b => a.job.rid ≤ b.job.rid) := by
-  apply List.Pairwise.imp_of_mem _ (loadOrder_sorted l)
-  intro a b ha hb hab
-  rw [keyLe_iff] at hab
-  have hm := hmono b (mem_loadOrder.mp hb) a (mem_loadOrder.mp ha)
-  omega
+abbrev Spec.load_seq_order : Prop :=
+  ∀ (l : List Intent),
+    (∀ a ∈ l, ∀ b ∈ l, a.job.rid < b.job.rid → a.job.ms ≤ b.job.ms) →
+    (loadOrder l).Pairwise (fun a b => a.job.rid ≤ b.job.rid)
 
 /-- `load_seq_order` for a backlog of several processes: the hypothesis and
 the conclusion compare only rows of the same epoch. Across epochs the load
 order is issue-time order; sequence numbers of different processes are not
 comparable. -/
-theorem load_epoch_seq_order (l : List Intent)
-    (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.epoch = b.job.epoch → a.job.rid < b.job.rid →
-      a.job.ms ≤ b.job.ms) :
-    (loadOrder l).Pairwise (fun a b => a.job.epoch = b.job.epoch → a.job.rid ≤ b.job.rid) := by
-  apply List.Pairwise.imp_of_mem _ (loadOrder_sorted l)
-  intro a b ha hb hab he
-  rw [keyLe_iff] at hab
-  have hm := hmono b (mem_loadOrder.mp hb) a (mem_loadOrder.mp ha) he.symm
-  omega
-
-/-! ## Admission's batches
-
-Admission's batches hold only puts. Used by the crash theorems:
-`crash_never_reappliesW` (`Close.lean`) and, before #295,
-`crash_never_reapplies` (`History.lean`). -/
-
-theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
-    (hm : m ∈ ((admitLog all).take n).flatten) : ∃ j, m = .put j := by
-  obtain ⟨b, hb, hmb⟩ := List.mem_flatten.mp hm
-  obtain ⟨j, _, rfl⟩ := List.mem_map.mp ((List.take_sublist n _).subset hb)
-  exact ⟨j, List.mem_singleton.mp hmb⟩
+abbrev Spec.load_epoch_seq_order : Prop :=
+  ∀ (l : List Intent),
+    (∀ a ∈ l, ∀ b ∈ l, a.job.epoch = b.job.epoch → a.job.rid < b.job.rid →
+      a.job.ms ≤ b.job.ms) →
+    (loadOrder l).Pairwise (fun a b => a.job.epoch = b.job.epoch → a.job.rid ≤ b.job.rid)
 
 /-! ## Draining a lane to completion
 
@@ -961,50 +593,21 @@ def drainLane {α : Type} : Nat → Lane α → Lane α
 
 def drain {α : Type} (l : Lane α) : Lane α := drainLane l.queue.length l
 
-theorem drainLane_spec {α : Type} :
-    ∀ (n : Nat) (l : Lane α), l.queue.length = n →
-      (drainLane n l).queue = [] ∧ (drainLane n l).taken = l.history := by
-  intro n
-  induction n with
-  | zero =>
-    intro l h
-    refine ⟨List.eq_nil_of_length_eq_zero h, ?_⟩
-    show l.taken = l.taken ++ l.queue
-    rw [List.eq_nil_of_length_eq_zero h, List.append_nil]
-  | succ n ih =>
-    intro l h
-    show (drainLane n l.pop).queue = [] ∧ (drainLane n l.pop).taken = l.history
-    obtain ⟨queue, taken⟩ := l
-    cases queue with
-    | nil => simp at h
-    | cons x q =>
-      have hl : (Lane.pop ⟨x :: q, taken⟩).queue.length = n := by
-        simp [Lane.pop] at h ⊢
-        exact h
-      obtain ⟨h1, h2⟩ := ih _ hl
-      exact ⟨h1, h2.trans (Lane.pop_history _)⟩
-
 /-- **Drain applies each lane's writes in submission order, all of them.**
 However admissions and worker steps interleaved (`Receipts.run`), a lane
 drained to completion has taken exactly the submitted jobs, in submission
 order: the completion of `Receipts.lane_fifo`, whose prefix is what the
 worker had taken when the drain began. -/
-theorem drain_fifo (ops : List (Lambo.Receipts.Op Job)) :
+abbrev Spec.drain_fifo : Prop :=
+  ∀ (ops : List (Lambo.Receipts.Op Job)),
     (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).queue = [] ∧
-      (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).taken = Lambo.Receipts.submitted ops := by
-  obtain ⟨h1, h2⟩ := drainLane_spec _ (Lambo.Receipts.run ⟨[], []⟩ ops) rfl
-  refine ⟨h1, ?_⟩
-  unfold drain
-  rw [h2, Lambo.Receipts.run_history]
-  rfl
+      (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).taken = Lambo.Receipts.submitted ops
 
 /-- What the worker had taken when the drain began is a prefix of what the
 drain takes (`Receipts.lane_fifo` and `drain_fifo` agree). -/
-theorem drain_extends_taken {α : Type} (l : Lane α) : ∃ rest, l.taken ++ rest = (drain l).taken := by
-  refine ⟨l.queue, ?_⟩
-  unfold drain
-  rw [(drainLane_spec _ l rfl).2]
-  rfl
+abbrev Spec.drain_extends_taken : Prop :=
+  ∀ {α : Type} (l : Lane α),
+    ∃ rest, l.taken ++ rest = (drain l).taken
 
 /-! ## The `Drop` path (`abort_all_sync`)
 
@@ -1020,31 +623,19 @@ going away. This is the documented exception to "no write is lost silently";
 the write survives only if an earlier flush took its intent. `abort_all_sync`
 is unchanged by #295 (it aborts the workers and settles nothing, held writes'
 receipts included), so this describes the current Rust. -/
-theorem drop_settles_nothing (s : RStore) (q : Key) : lookup (abortAllSync s) q = lookup s q := rfl
+abbrev Spec.drop_settles_nothing : Prop :=
+  ∀ (s : RStore) (q : Key),
+    lookup (abortAllSync s) q = lookup s q
 
 /-! ## `settle_deferred` settles every set-aside entry -/
 
-theorem settleDeferred_all_settled (flush : CloseFlush) (now : Int) :
+/-- `settle_deferred` leaves no receipt pending: when every receipt outside the
+set-aside ids is already settled, every receipt is settled once it has run
+over those ids, whichever way the final flush ended. -/
+abbrev Spec.settleDeferred_all_settled : Prop :=
+  ∀ (flush : CloseFlush) (now : Int),
     ∀ (ids : List Key) (s : RStore), (∀ p ∈ s, p.1 ∉ ids → p.2.answer.isSettled = true) →
-      ∀ p ∈ settleDeferred flush now ids s, p.2.answer.isSettled = true := by
-  intro ids
-  induction ids with
-  | nil =>
-    intro s h p hp
-    exact h p hp (by simp)
-  | cons r ids ih =>
-    intro s h
-    apply ih
-    intro p hp hpi
-    obtain ⟨q, hq, rfl⟩ := mem_update hp
-    by_cases hqr : q.1 = r
-    · rw [ite_eq_left hqr]; exact deferEntry_settled flush now q.2
-    · rw [ite_eq_right hqr] at hpi ⊢
-      apply h q hq
-      intro hm
-      cases List.mem_cons.mp hm with
-      | inl h' => exact hqr h'
-      | inr h' => exact hpi h'
+      ∀ p ∈ settleDeferred flush now ids s, p.2.answer.isSettled = true
 
 /-! ## The restart map's seed (`spawn_replay`)
 
@@ -1070,33 +661,36 @@ def lookupLast (m : List (Key × Answer)) (r : Key) : Option Answer :=
 `replayStep` is the match on a run's result in `spawn_replay`. The current step (`stepQ` over `stepFixed` over `stepInput`, `Replay.lean`) overrides it for an unknown receipt format, an unparseable id and a graph-dependent input refusal and hands every other answer to it, so these arms are the current replay's. -/
 
 /-- A refusal that is a fact about the intent's own input settles `failed`. -/
-theorem replayStep_inputFact (img : Bool) (e : Err) (s : Streaks) (h : e.inputFact = true) :
-    (replayStep img (.run (.err e)) s).1 = .failed := by
-  cases e <;> simp_all [Err.inputFact, replayStep]
+abbrev Spec.replayStep_inputFact : Prop :=
+  ∀ (img : Bool) (e : Err) (s : Streaks),
+    e.inputFact = true →
+    (replayStep img (.run (.err e)) s).1 = .failed
 
 /-- So does a stored payload this build refuses to decode (#129). -/
-theorem replayStep_decode (img : Bool) (s : Streaks) :
-    replayStep img .decodeRefused s = (.failed, s) := rfl
+abbrev Spec.replayStep_decode : Prop :=
+  ∀ (img : Bool) (s : Streaks),
+    replayStep img .decodeRefused s = (.failed, s)
 
 /-- A cycle refusal settles `failed` and leaves both streaks alone: it is
 decided before any embed, so it says nothing about the embedder
 (`StoreError::is_cycle_refusal`, #116). -/
-theorem replayStep_cycle (img : Bool) (s : Streaks) :
-    replayStep img (.run (.err .cycle)) s = (.failed, s) := rfl
+abbrev Spec.replayStep_cycle : Prop :=
+  ∀ (img : Bool) (s : Streaks),
+    replayStep img (.run (.err .cycle)) s = (.failed, s)
 
 /-- A transient embed answer below the threshold is a `skip`: the intent is
 left unconsumed (the loop since #295, `loopD`, then defers its agent). -/
-theorem unavailable_skips (img : Bool) (s : Streaks) (h : s.transient + 1 < sickThreshold) :
+abbrev Spec.unavailable_skips : Prop :=
+  ∀ (img : Bool) (s : Streaks),
+    s.transient + 1 < sickThreshold →
     replayStep img (.run (.err .unavailable)) s =
-      (.skip, { s with transient := s.transient + 1 }) := by
-  simp only [replayStep]
-  rw [ite_eq_right (by omega)]
+      (.skip, { s with transient := s.transient + 1 })
 
 /-- The third transient in a row with nothing answered between stops the
 replay as `embedder` (`EMBEDDER_SICK_THRESHOLD`). -/
-theorem unavailable_stops (img : Bool) (s : Streaks) (h : sickThreshold ≤ s.transient + 1) :
-    (replayStep img (.run (.err .unavailable)) s).1 = .stop .embedder := by
-  simp only [replayStep]
-  rw [ite_eq_left h]
+abbrev Spec.unavailable_stops : Prop :=
+  ∀ (img : Bool) (s : Streaks),
+    sickThreshold ≤ s.transient + 1 →
+    (replayStep img (.run (.err .unavailable)) s).1 = .stop .embedder
 
 end Lambo.Drain

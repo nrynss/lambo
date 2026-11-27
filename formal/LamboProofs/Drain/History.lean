@@ -65,7 +65,7 @@ batches" over an empty intent table; a crash in the middle of a replay is not
 proved.
 -/
 
-import LamboProofs.Drain.Base
+import LamboProofs.Drain.Proofs.Base
 
 namespace Lambo.Drain
 

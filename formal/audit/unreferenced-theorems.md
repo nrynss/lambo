@@ -32,12 +32,12 @@ Precedence: a same-statement twin (b); a review verdict (a); a superseding count
 | `Contract/Store.lean` | 20 | 11 | 1 | 1 | 0 | 0 |
 | `Discovery.lean` | 15 | 9 | 0 | 0 | 0 | 0 |
 | `Dispatch.lean` | 85 | 46 | 9 | 9 | 0 | 0 |
-| `Drain/Base.lean` | 47 | 41 | 0 | 0 | 0 | 0 |
-| `Drain/Close.lean` | 91 | 71 | 0 | 0 | 0 | 0 |
 | `Drain/Examples.lean` | 7 | 0 | 0 | 0 | 0 | 0 |
 | `Drain/History.lean` | 35 | 21 | 1 | 1 | 0 | 0 |
-| `Drain/Replay.lean` | 73 | 52 | 0 | 0 | 0 | 0 |
-| `Drain/Worker.lean` | 28 | 20 | 0 | 0 | 0 | 0 |
+| `Drain/Proofs/Base.lean` | 47 | 41 | 0 | 0 | 0 | 0 |
+| `Drain/Proofs/Close.lean` | 91 | 71 | 0 | 0 | 0 | 0 |
+| `Drain/Proofs/Replay.lean` | 73 | 52 | 0 | 0 | 0 | 0 |
+| `Drain/Proofs/Worker.lean` | 28 | 20 | 0 | 0 | 0 | 0 |
 | `Expand.lean` | 25 | 20 | 2 | 2 | 0 | 0 |
 | `Fit.lean` | 73 | 54 | 4 | 4 | 0 | 0 |
 | `Flush/Errors.lean` | 49 | 29 | 0 | 0 | 0 | 0 |

@@ -8,7 +8,10 @@
 # One [[model]] per .lean file under formal/LamboProofs/ (subdirectories
 # included) other than the top-level Audit.lean, Drain/History.lean and
 # Drain/Examples.lean (the drain model's history layer and concrete cases,
-# which read no Rust of their own) and the shared lemma libraries under Lib/:
+# which read no Rust of their own), the proofs layer of a model in Spec and
+# Proofs form (<Model>/Proofs.lean or the files under a Proofs/ directory,
+# which prove what the Spec files state: the Spec file has the entry) and the
+# shared lemma libraries under Lib/:
 #
 #   lean          the model file, from the repository root.
 #   read_against  optional: the commit the model was last read against.
@@ -468,8 +471,10 @@ rust = [
   "src/daemon/hotlist.rs#HotList::retain_conditions",
 ]
 
-# The drain model is split by subsystem; each file is listed against the Rust
-# it reads. Drain/History.lean (the worker before #295, the replay before
+# The drain model is split by subsystem, and into a specification
+# (Drain/Spec/) and its proofs (Drain/Proofs/). Each Spec file is listed
+# against the Rust it reads; the Proofs files read none of their own and have
+# no entry. Drain/History.lean (the worker before #295, the replay before
 # #294) and Drain/Examples.lean (concrete cases evaluated by `decide` over the
 # other files' definitions) model no Rust of their own and have no entry.
 #
@@ -480,7 +485,7 @@ rust = [
 # adapters' load order, the error classes, the replay's step, its constants
 # and the restart map's seed (`spawn_replay`).
 [[model]]
-lean = "formal/LamboProofs/Drain/Base.lean"
+lean = "formal/LamboProofs/Drain/Spec/Base.lean"
 read_against = "e9b647cf"
 read_digest = "v2:sha256:5c763e25c6c8533b33e6d28cce1c7397e291375e9926bfc1559db408576c5e10"
 rust = [
@@ -514,7 +519,7 @@ rust = [
 # receipt format, block reason and load order (#294, #295), and the in-session hold's first model (`workH`), which reads the
 # lane worker.
 [[model]]
-lean = "formal/LamboProofs/Drain/Replay.lean"
+lean = "formal/LamboProofs/Drain/Spec/Replay.lean"
 read_against = "e9b647cf"
 read_digest = "v2:sha256:0282dfdcbe187b7abde5c1ee5e33199353fab810f149006ac65d262e557b3a02"
 rust = [
@@ -534,7 +539,7 @@ rust = [
 # (`serveR`). The caps' values are parameters, so their constants are not
 # refs.
 [[model]]
-lean = "formal/LamboProofs/Drain/Worker.lean"
+lean = "formal/LamboProofs/Drain/Spec/Worker.lean"
 read_against = "e9b647cf"
 read_digest = "v2:sha256:14367db80f39209b1818db0e7ddcd6f7b71e33a246acd57eb2b66e65bf8c8b54"
 rust = [
@@ -549,7 +554,7 @@ rust = [
 # Close: the close over the current worker, the dead-lettered set (#345, with
 # worker panics after `WriteCtx::run`'s commit) and where the lookup streak resets (#346, at the commit).
 [[model]]
-lean = "formal/LamboProofs/Drain/Close.lean"
+lean = "formal/LamboProofs/Drain/Spec/Close.lean"
 read_against = "e9b647cf"
 read_digest = "v2:sha256:8fe5b33bd0d3bd0dcf0eba8f8b054d40df753318f6918e9a38cd7be7b0d0b917"
 rust = [
