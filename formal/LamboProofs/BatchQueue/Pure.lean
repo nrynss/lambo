@@ -10,7 +10,7 @@ with `FORWARD_WIDTH` and `CHUNK_SLACK_BYTES` (`lengthChunks`, `chunksOf`,
 `lcAux`); `serve_take`'s extraction of a chunk from a group and its `remove`
 loop (`extract`, `chunkOf`, `removeDesc`); `forward_isolated` with the canary
 (`CANARY_TEXT`), the per-text reruns and `width_checked` (`forwardIsolated`);
-and one `serve_take` iteration with `MAX_SINGLE_STREAK` and the per-forward
+and one `serve_take` iteration with `MAX_SINGLE_STREAK` and the per-chunk
 pull of new singles (`pick`, `pullOf`), with `drive`, a restatement of the
 take loop with the arrivals as input. `MAX_BATCH`, `FORWARD_WIDTH`,
 `CHUNK_SLACK_BYTES` and `MAX_SINGLE_STREAK` are the fields of `Cfg`
@@ -33,7 +33,7 @@ with (`forwardIsolated_rowwise`); a failing device fails every caller
 one, and there is one answer per text, for no texts too
 (`forwardIsolated_device_down`, `forwardIsolated_width_mismatch`,
 `forwardIsolated_length`). Fairness: at most `MAX_SINGLE_STREAK` single
-forwards in a row while a take has bulk texts (`pick_progress`), and a take
+chunks in a row while a take has bulk texts (`pick_progress`), and a take
 ends within `phi + 1` iterations whatever arrives (`take_ends`;
 `|single| + 132·|bulk| + 1` with the Rust's constants, `phi_rust`). Since
 #310 a device fault that has passed by the canary changes no text's answer:
@@ -1225,7 +1225,7 @@ theorem pick_items_caps (c : Cfg) (pulled : List Req) (t : Take) (items : List R
 /-- #125 focused check: with bulk texts in the take, an iteration either runs
 a bulk chunk (resetting the streak) or runs a single chunk with the streak
 still below `MAX_SINGLE_STREAK`. So at most `MAX_SINGLE_STREAK` single
-forwards run in a row while the take has bulk texts. -/
+chunks run in a row while the take has bulk texts. -/
 theorem pick_progress (c : Cfg) (pulled : List Req) (t : Take) (items : List Req) (t' : Take)
     (hb : t.bulk ≠ []) (h : pick c pulled t = some (items, t')) :
     (t'.single = t.single ++ pulled ∧ items.length + t'.bulk.length = t.bulk.length ∧

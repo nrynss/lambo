@@ -213,13 +213,14 @@ impl BatchQueue {
     }
 
     /// Take up to `n` queued single embeds, leaving bulk ones queued in
-    /// order (#125). [`serve_take`] calls it before every forward while its
-    /// take still has bulk texts, so a recall queued before one of those
-    /// calls joins the take in progress instead of waiting for the next one.
-    /// A recall queued after the call made before the take's last bulk
-    /// forward (in practice, during that forward or later) is not taken here:
-    /// it waits for the single forwards still left in the take and then for
-    /// a later take.
+    /// order (#125). [`serve_take`] calls it before it forwards each chunk
+    /// while its take still has bulk texts, so a recall queued before one of
+    /// those calls joins the take in progress instead of waiting for the next
+    /// one. A chunk whose forward fails runs its recovery forwards before the
+    /// next call ([`forward_isolated`]). A recall queued after the call made
+    /// before the take's last bulk chunk (in practice, while that chunk is
+    /// forwarded or later) is not taken here: it waits for the single chunks
+    /// still left in the take and then for a later take.
     fn take_singles(&self, n: usize) -> Vec<Pending> {
         let mut q = self.lock_queue();
         if !q.iter().any(|p| !p.bulk) {
@@ -1460,22 +1461,26 @@ fn coalesce_loop(shared: Arc<Shared>) {
 ///
 /// Single embeds (a recall's query, a lone text) go before bulk ones, and
 /// while the take has bulk texts the queue is checked for new single embeds
-/// **before every forward** (review M1, Sonnet review), not only when the
-/// take is made. A recall that arrives during a forward after which the take
-/// still has bulk texts joins the take in progress, and when it is the only
-/// single embed waiting after such a bulk forward, the next forward is its
-/// own. A recall that arrives during the take's last bulk forward, or after
-/// it, is not pulled into the take, since nothing is pulled once the bulk
-/// group is empty: it waits for the single forwards still left in the take
+/// **before each chunk is forwarded** (review M1, Sonnet review), not only
+/// when the take is made. A chunk is forwarded by one [`forward_isolated`]
+/// call, which runs more than one forward when the chunk's forward fails: the
+/// canary, and each text alone if the canary passes. Those recovery forwards
+/// run before the queue is checked again, so a recall's wait includes them. A
+/// recall that arrives while a chunk is forwarded, with bulk texts left in the
+/// take after that chunk, joins the take in progress, and when it is the only
+/// single embed waiting after such a bulk chunk, the next chunk is its own. A
+/// recall that arrives while the take's last bulk chunk is forwarded, or
+/// after, is not pulled into the take, since nothing is pulled once the bulk
+/// group is empty: it waits for the single chunks still left in the take
 /// (singles that waited while [`MAX_SINGLE_STREAK`] forced that last bulk
 /// chunk) and then for a later take: the next one, unless [`MAX_BATCH`]
 /// single embeds queued before it fill that one.
 ///
 /// None of that is a bound on a recall's wait (#311). The single group is
-/// chunked by length, shortest first, each time a forward is chosen, so a
+/// chunked by length, shortest first, each time a chunk is chosen, so a
 /// shorter single embed that arrives later runs before a longer one that is
-/// already waiting, and after [`MAX_SINGLE_STREAK`] single forwards in a row
-/// a bulk chunk runs before the next single. A long recall can therefore
+/// already waiting, and after [`MAX_SINGLE_STREAK`] single chunks in a row a
+/// bulk chunk runs before the next single. A long recall can therefore
 /// wait for the whole rest of the take. In the model's run of a take of 24
 /// bulk texts, a 200-byte recall that arrives during the first bulk forward,
 /// with 5-byte single embeds arriving steadily after it, runs as the take's
@@ -1486,11 +1491,11 @@ fn coalesce_loop(shared: Arc<Shared>) {
 /// take waits for its end and then for a later take.
 ///
 /// Two rules protect the bulk texts of **this take**, and only those. After
-/// [`MAX_SINGLE_STREAK`] single forwards in a row, one bulk chunk runs even
+/// [`MAX_SINGLE_STREAK`] single chunks in a row, one bulk chunk runs even
 /// with singles waiting (`pick_progress` in `BatchQueue/Pure.lean`). And new
 /// singles are pulled from the queue only while the take still has bulk
 /// texts, so a steady stream of recalls cannot keep the take from ending:
-/// with at most [`MAX_BATCH`] singles pulled before each forward, a take of
+/// with at most [`MAX_BATCH`] singles pulled before each chunk, a take of
 /// `s` single and `b` bulk requests returns within `s + 132 * b + 1` passes
 /// of its loop (`take_ends`, `phi_rust`). The outer loop then makes its next
 /// take singles first ([`take_prioritized`]), so bulk requests that are
@@ -1544,16 +1549,18 @@ where
     }
 }
 
-/// Single forwards a take runs in a row before it runs one bulk chunk even
+/// Single chunks a take runs in a row before it runs one bulk chunk even
 /// with singles waiting (#125 focused check), so a stream of recalls cannot
 /// starve the bulk texts of the take in progress (`pick_progress` in
-/// `formal/LamboProofs/BatchQueue/Pure.lean`). It protects that take only
-/// (#311): a write's texts that are still queued can starve behind
-/// [`MAX_BATCH`] queued singles ([`take_prioritized`]). A recall waiting when
-/// the streak ends waits for that bulk chunk too, one that shorter single
-/// embeds keep overtaking can wait for the rest of the take, and one that
-/// arrives during the take's last bulk chunk does not join the take at all
-/// ([`serve_take`]).
+/// `formal/LamboProofs/BatchQueue/Pure.lean`). It counts chunks, not
+/// forwards: a chunk whose forward fails also runs its recovery forwards
+/// ([`forward_isolated`]). It protects that take only (#311): a write's
+/// texts that are still queued can starve behind [`MAX_BATCH`] queued
+/// singles ([`take_prioritized`]). A recall waiting when the streak ends
+/// waits for that bulk chunk too, its recovery forwards included, one that
+/// shorter single embeds keep overtaking can wait for the rest of the take,
+/// and one that arrives during the take's last bulk chunk does not join the
+/// take at all ([`serve_take`]).
 const MAX_SINGLE_STREAK: usize = 3;
 
 /// Most texts one forward runs (#125). Measured on Metal (M3 Pro, f16,
@@ -2213,13 +2220,17 @@ mod tests {
     fn a_lone_single_embed_queued_during_a_bulk_forward_with_bulk_left_runs_next() {
         // Sonnet review of #125: priority was per take, so a recall arriving
         // during a write's batch was never pulled into it. Now the queue is
-        // checked before every forward while the take has bulk texts, and a
-        // lone recall that arrives during a bulk forward with bulk texts left
-        // to run is the next forward. This pins that scenario only, not a
-        // bound on a recall's wait (#311): shorter singles can overtake a
-        // long recall until the take ends (`long_recall_waits_out_the_take`
-        // in `formal/LamboProofs/BatchQueue/Runs.lean`), and one that arrives
-        // during the take's last bulk forward is not pulled into the take.
+        // checked before each chunk is forwarded while the take has bulk
+        // texts, and a lone recall that arrives while a bulk chunk is
+        // forwarded, with bulk texts left to run, is the next chunk; every
+        // forward here succeeds, so it is also the next forward (a failed
+        // chunk would run its canary and reruns first). This pins that
+        // scenario only, not a bound on a recall's wait (#311): shorter
+        // singles can overtake a long recall until the take ends
+        // (`long_recall_waits_out_the_take` in
+        // `formal/LamboProofs/BatchQueue/Runs.lean`), and one that arrives
+        // while the take's last bulk chunk is forwarded is not pulled into
+        // the take.
         let q = BatchQueue::new();
         let mut rxs = Vec::new();
         let mut take = Vec::new();

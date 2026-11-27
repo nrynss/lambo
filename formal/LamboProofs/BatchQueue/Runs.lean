@@ -21,7 +21,7 @@ when only the drop of `Shared` answers the queue
 after a failed spawn only timeouts answer (`wedged_stays`). With `MAX_BATCH`
 singles queued at every take a queued bulk text is never taken
 (`queued_bulk_starves`). A recall can wait for the whole rest of its take:
-singles are length-chunked shortest first and pulled before every forward
+singles are length-chunked shortest first and pulled before every chunk
 while bulk texts remain, so shorter singles keep overtaking a long recall
 (`long_recall_waits_out_the_take`: a 200-byte recall runs at forward 10, after
 all three bulk forwards); the take still ends (`take_ends`). Since #311 the
@@ -249,7 +249,7 @@ def overtakeEvs : List Ev :=
 set_option maxRecDepth 20000 in
 /-- Shown about the Rust: a long recall waits out the take. Shorter singles
 that arrive later keep overtaking it (length chunks, shortest first, pulled
-before every forward while bulk remains), so it runs at forward 10, after
+before every chunk while bulk remains), so it runs at forward 10, after
 all three bulk forwards. `serve_take`'s doc cites this run for a recall's
 wait (#311). -/
 theorem long_recall_waits_out_the_take :

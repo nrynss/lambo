@@ -18,9 +18,9 @@ queued, the callers that gave up, what each observed, the forwards run).
 deadline (`giveUp`), the last handle's drop (`shutdown`), one worker step
 (`work`, deterministic), the worker's death (`die`), the supervisor's
 reaction (`supervise`, with a spawn that may fail) and the drop of `Shared`
-(`dropShared`). Each `work` step is one lock hold, one forward with the pull
-before it, or one `send`; `enqueue` needs no shutdown, since an awaiting
-`embed()` borrows the embedder.
+(`dropShared`). Each `work` step is one lock hold, one chunk's forwards
+(`forward_isolated`) with the pull before them, or one `send`; `enqueue` needs
+no shutdown, since an awaiting `embed()` borrows the embedder.
 
 Results: in every run no caller observes twice (`answered_at_most_once`); the
 invariant keeps every request in exactly one place, across deaths and
