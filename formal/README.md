@@ -11,8 +11,8 @@ to understand the modeled guarantees and run the local checks.
 
 `lake build` passes on Lean `v4.36.0` with no errors, no warnings and no
 `sorry`, and the axiom audit in `LamboProofs/Audit.lean` reports only Lean's
-standard axioms (`propext`, `Quot.sound`, and `Classical.choice` for 358
-theorems); 36 of the 837 audited theorems use no axioms at all.
+standard axioms (`propext`, `Quot.sound`, and `Classical.choice` for 359
+theorems); 36 of the 844 audited theorems use no axioms at all.
 
 What the models prove is in the table below, file by file, led by each model's
 end results: the theorems that state a property of the Rust, or, for a
