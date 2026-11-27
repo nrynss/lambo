@@ -39,14 +39,14 @@ BASE = [
 
 
 class Equivalence(unittest.TestCase):
-    def run_check(self, base, head, renames=None, deletions=None):
+    def run_check(self, base, head, renames=None, deletions=None, flags=()):
         with tempfile.TemporaryDirectory() as d:
             paths = []
             for name, rows in (("base", base), ("head", head)):
                 p = Path(d) / f"{name}.jsonl"
                 p.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
                 paths.append(p)
-            args = ["--base-dump", str(paths[0]), "--head-dump", str(paths[1])]
+            args = ["--base-dump", str(paths[0]), "--head-dump", str(paths[1]), *flags]
             if renames is not None:
                 r = Path(d) / "renames.tsv"
                 r.write_text(renames, encoding="utf-8")
@@ -196,6 +196,108 @@ class Equivalence(unittest.TestCase):
         code, out = self.run_check(BASE, head, "Lambo.A.helper\tLambo.Lib.List.helper\n")
         self.assertEqual(code, 1)
         self.assertIn("Lambo.A.helper: statement changed", out)
+
+
+T_STMT = "forall (n : Nat), Eq.{1} Nat n n"
+
+
+def in_spec_form(rows, stmt=T_STMT, spec="Lambo.A.Spec.t", rfl=True, prop=True):
+    """`rows` with `Lambo.A.t` restated as `theorem t : Spec.t`, the proposition
+    unfolding to `stmt`."""
+    head = [dict(d, type=spec, spec=spec, stmt=stmt, stmt_shape=stmt, spec_rfl=rfl)
+            if d["name"] == "Lambo.A.t" else d for d in rows]
+    if prop:
+        head.append(decl(spec, kind="def", type_="Prop", value=stmt, module="LamboProofs.A.Spec"))
+    return head
+
+
+class SpecForm(unittest.TestCase):
+    """`--spec-form` and `--only-form-changes`: a theorem restated as
+    `theorem foo : Spec.foo`."""
+
+    run_check = Equivalence.run_check
+
+    def test_a_restated_theorem_passes_with_the_flag_and_fails_without(self):
+        head = in_spec_form(BASE)
+        code, out = self.run_check(BASE, head, flags=["--spec-form"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("restated 1 in Spec form", out)
+        code, out = self.run_check(BASE, head)
+        self.assertEqual(code, 1)
+        self.assertIn("Lambo.A.t: statement changed", out)
+        self.assertIn("--spec-form", out)
+        self.assertIn("Lambo.A.Spec.t: def added at HEAD", out)
+
+    def test_a_proposition_that_unfolds_to_another_statement_fails(self):
+        for stmt in ("forall (n : Nat), Eq.{1} Nat n (n + 0)",          # another conclusion
+                     "forall (n : Nat), (LT.lt n 3) -> Eq.{1} Nat n n",   # a hypothesis added
+                     "forall (m : Nat), Eq.{1} Nat m m"):                 # a variable renamed
+            with self.subTest(stmt=stmt):
+                code, out = self.run_check(BASE, in_spec_form(BASE, stmt=stmt), flags=["--spec-form"])
+                self.assertEqual(code, 1)
+                self.assertIn("Lambo.A.t: statement changed: Lambo.A.Spec.t does not unfold to the base "
+                              "statement", out)
+                code, out = self.run_check(BASE, in_spec_form(BASE, stmt=stmt), flags=["--only-form-changes"])
+                self.assertEqual(code, 1)
+                self.assertIn("does not unfold to the base statement", out)
+
+    def test_the_proposition_must_be_the_theorems_own(self):
+        head = in_spec_form(BASE, spec="Lambo.A.Spec.other")
+        code, out = self.run_check(BASE, head, flags=["--spec-form"])
+        self.assertEqual(code, 1)
+        self.assertIn("stated as Lambo.A.Spec.other, but its Spec proposition must be Lambo.A.Spec.t", out)
+
+    def test_the_kernel_must_accept_the_unfolding(self):
+        code, out = self.run_check(BASE, in_spec_form(BASE, rfl=False), flags=["--spec-form"])
+        self.assertEqual(code, 1)
+        self.assertIn("the kernel does not accept Lambo.A.Spec.t as its own body", out)
+
+    def test_a_proposition_no_theorem_states_is_an_addition(self):
+        orphan = decl("Lambo.A.Spec.unproved", kind="def", type_="Prop", value="True")
+        code, out = self.run_check(BASE, in_spec_form(BASE) + [orphan], flags=["--spec-form"])
+        self.assertEqual(code, 1)
+        self.assertIn("Lambo.A.Spec.unproved: def added at HEAD", out)
+        self.assertNotIn("Lambo.A.Spec.t: def added", out)
+
+    def test_everything_else_is_still_compared(self):
+        head = [dict(d, value="fun (x : Nat) => x") if d["name"] == "Lambo.A.f" else d
+                for d in in_spec_form(BASE)]
+        code, out = self.run_check(BASE, head, flags=["--spec-form"])
+        self.assertEqual(code, 1)
+        self.assertIn("Lambo.A.f: definition body changed", out)
+
+    def test_a_theorem_leaving_spec_form_is_checked_the_same_way(self):
+        code, out = self.run_check(in_spec_form(BASE), BASE, flags=["--only-form-changes"])
+        self.assertEqual(code, 0, out)
+        changed = [dict(d, type="forall (n : Nat), Eq.{1} Nat n (n + 0)") if d["name"] == "Lambo.A.t" else d
+                   for d in BASE]
+        code, out = self.run_check(in_spec_form(BASE), changed, flags=["--only-form-changes"])
+        self.assertEqual(code, 1)
+        self.assertIn("does not unfold to the HEAD statement", out)
+
+    def test_a_private_name_in_the_statement_is_compared_by_its_user_name(self):
+        base = [dict(d, type="Eq.{1} Nat _private.LamboProofs.A.0.Lambo.A.k 0") if d["name"] == "Lambo.A.t"
+                else d for d in BASE]
+        head = in_spec_form(BASE, stmt="Eq.{1} Nat _private.LamboProofs.A.Spec.0.Lambo.A.k 0")
+        self.assertEqual(self.run_check(base, head, flags=["--spec-form"])[0], 0)
+
+    def test_only_form_changes_ignores_what_is_not_a_form_change(self):
+        # A theorem added, one deleted, one restated in place and a changed
+        # definition: a model change, not this mode's business.
+        head = [dict(d, value="fun (x : Nat) => x") if d["name"] == "Lambo.A.f" else
+                dict(d, type="True") if d["name"] == "Lambo.A.helper" else d
+                for d in BASE if d["name"] != "Lambo.B.helper"] + [decl("Lambo.A.extra")]
+        code, out = self.run_check(BASE, head, flags=["--only-form-changes"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("no theorem changed form", out)
+        code, out = self.run_check(BASE, in_spec_form(head), flags=["--only-form-changes"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("restated  Lambo.A.t", out)
+
+    def test_spec_name(self):
+        self.assertEqual(eq.spec_name("Lambo.Drain.drain_fifo"), "Lambo.Drain.Spec.drain_fifo")
+        self.assertEqual(eq.spec_name("Lambo.Cite.Reach.trans"), "Lambo.Cite.Spec.Reach.trans")
+        self.assertIsNone(eq.spec_name("Lambo.loose"))
 
 
 if __name__ == "__main__":
