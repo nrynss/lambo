@@ -128,7 +128,8 @@ struct Pending {
     tx: tokio::sync::oneshot::Sender<Result<Vec<f32>, EmbedError>>,
     /// Queued by [`Embedder::embed_batch`] (#125 review M1). A take serves
     /// single embeds (a recall's query, a lone write text) before bulk
-    /// ones, so a recall never waits behind a write's gathered texts.
+    /// ones, so a recall is not queued behind a write's gathered texts.
+    /// [`serve_take`] says how long it can still wait.
     bulk: bool,
 }
 
@@ -212,8 +213,9 @@ impl BatchQueue {
     }
 
     /// Take up to `n` queued single embeds, leaving bulk ones queued in
-    /// order (#125): checked before every forward of a take, so a recall
-    /// does not wait for the rest of a write's batch.
+    /// order (#125): checked before every forward of a take that still has
+    /// bulk texts, so a recall joins the take in progress and does not wait
+    /// for the next one.
     fn take_singles(&self, n: usize) -> Vec<Pending> {
         let mut q = self.lock_queue();
         if !q.iter().any(|p| !p.bulk) {
@@ -251,6 +253,18 @@ impl BatchQueue {
 /// Take up to `n` requests off `q` (#125 review M1): single embeds first,
 /// then bulk ones, each in arrival order. What is not taken stays queued in
 /// its order (K2-R1-2).
+///
+/// Bulk requests get only the room the singles leave (#311). With `n` or
+/// more single embeds queued, the take holds no bulk request and every
+/// queued bulk request stays queued (`takePrioritized_no_bulk` in
+/// `formal/LamboProofs/BatchQueue/Pure.lean`). Queued bulk work is therefore
+/// not protected from one take to the next: while at least [`MAX_BATCH`]
+/// single embeds are queued at every take, a write's queued texts are never
+/// taken (`queued_bulk_starves` in `BatchQueue/Runs.lean`, a run with a
+/// `MAX_BATCH` of 2). That takes single embeds arriving about as fast as the
+/// device embeds them, which is overload. A bulk text starved this way fails
+/// `Unavailable` (transient) at its caller's deadline, so its write is
+/// refused retryably and nothing is lost.
 fn take_prioritized(q: &mut Vec<Pending>, n: usize) -> Vec<Pending> {
     let mut taken = Vec::with_capacity(n.min(q.len()));
     for bulk in [false, true] {
@@ -1441,17 +1455,35 @@ fn coalesce_loop(shared: Arc<Shared>) {
 /// is done.
 ///
 /// Single embeds (a recall's query, a lone text) go before bulk ones, and
-/// the queue is checked for new single embeds **before every forward**
-/// (review M1, Sonnet review), not only when the take is made: a recall
-/// that arrives while a write's batch is being forwarded waits for at most
-/// the one forward in flight, never for the rest of the take.
+/// while the take has bulk texts the queue is checked for new single embeds
+/// **before every forward** (review M1, Sonnet review), not only when the
+/// take is made. A recall that arrives while a write's batch is being
+/// forwarded joins the take in progress, and when it is the only single
+/// embed waiting after a bulk forward, the next forward is its own.
 ///
-/// Two bounds keep that preference from starving the take's bulk texts:
-/// after [`MAX_SINGLE_STREAK`] single forwards in a row, one bulk chunk runs
-/// even with singles waiting; and new singles are pulled from the queue only
-/// while the take still has bulk texts to protect, so a steady stream of
-/// recalls cannot keep the take from ending (the outer loop then takes
-/// them, singles first, alongside the queued bulk work).
+/// That is not a bound on a recall's wait (#311). The single group is
+/// chunked by length, shortest first, each time a forward is chosen, so a
+/// shorter single embed that arrives later runs before a longer one that is
+/// already waiting, and after [`MAX_SINGLE_STREAK`] single forwards in a row
+/// a bulk chunk runs before the next single. A long recall can therefore
+/// wait for the whole rest of the take. In the model's run of a take of 24
+/// bulk texts, a 200-byte recall that arrives during the first bulk forward,
+/// with 5-byte single embeds arriving steadily after it, runs as the take's
+/// eleventh forward, after all three bulk forwards
+/// (`long_recall_waits_out_the_take` in
+/// `formal/LamboProofs/BatchQueue/Runs.lean`). Once a recall has joined a
+/// take, what bounds its wait is the end of that take.
+///
+/// Two rules protect the bulk texts of **this take**, and only those. After
+/// [`MAX_SINGLE_STREAK`] single forwards in a row, one bulk chunk runs even
+/// with singles waiting (`pick_progress` in `BatchQueue/Pure.lean`). And new
+/// singles are pulled from the queue only while the take still has bulk
+/// texts, so a steady stream of recalls cannot keep the take from ending:
+/// with at most [`MAX_BATCH`] singles pulled before each forward, a take of
+/// `s` single and `b` bulk requests returns within `s + 132 * b + 1` passes
+/// of its loop (`take_ends`, `phi_rust`). The outer loop then makes its next
+/// take singles first ([`take_prioritized`]), so bulk requests that are
+/// still queued, unlike this take's, can starve behind queued singles.
 ///
 /// Once shutdown is requested no new singles are pulled: the take finishes
 /// and the outer loop drains what is queued before it exits (K2-R1-7).
@@ -1502,9 +1534,14 @@ where
 }
 
 /// Single forwards a take runs in a row before it runs one bulk chunk even
-/// with singles waiting (#125 focused check): a recall waits at most one
-/// bulk forward more, and a write's batch is never starved by a stream of
-/// recalls.
+/// with singles waiting (#125 focused check), so a stream of recalls cannot
+/// starve the bulk texts of the take in progress (`pick_progress` in
+/// `formal/LamboProofs/BatchQueue/Pure.lean`). It protects that take only
+/// (#311): a write's texts that are still queued can starve behind
+/// [`MAX_BATCH`] queued singles ([`take_prioritized`]). A recall waiting when
+/// the streak ends waits for that bulk chunk too, and one that shorter
+/// single embeds keep overtaking can wait for the rest of the take
+/// ([`serve_take`]).
 const MAX_SINGLE_STREAK: usize = 3;
 
 /// Most texts one forward runs (#125). Measured on Metal (M3 Pro, f16,

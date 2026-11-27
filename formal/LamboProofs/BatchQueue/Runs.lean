@@ -19,13 +19,15 @@ after shutdown, when only the drop of `Shared` answers the queue
 (`death_after_shutdown_abandons_queue`, harmless: no caller can be waiting);
 after a failed spawn only timeouts answer (`wedged_stays`). With `MAX_BATCH`
 singles queued at every take a queued bulk text is never taken
-(`queued_bulk_starves`). A recall can wait for the whole rest of its take,
-breaking `serve_take`'s "waits for at most the one forward in flight" and
-`MAX_SINGLE_STREAK`'s "a recall waits at most one bulk forward more": singles
-are length-chunked shortest first and pulled before every forward while bulk
-texts remain, so shorter singles keep overtaking a long recall
+(`queued_bulk_starves`). A recall can wait for the whole rest of its take:
+singles are length-chunked shortest first and pulled before every forward
+while bulk texts remain, so shorter singles keep overtaking a long recall
 (`long_recall_waits_out_the_take`: a 200-byte recall runs at forward 10, after
-all three bulk forwards); the take still ends (`take_ends`).
+all three bulk forwards); the take still ends (`take_ends`). Since #311 the
+docs of `take_prioritized`, `serve_take` and `MAX_SINGLE_STREAK` state both.
+Before, they said a write's batch was never starved, that a recall "waits for
+at most the one forward in flight", and that it "waits at most one bulk
+forward more".
 
 Boundary: each run is one interleaving with the Rust's constants or a small
 configuration (`cfg2`); the general statements are `Worker.lean`'s and
@@ -98,12 +100,11 @@ def streamEvs : List Ev :=
   [.work, .work, .work]
 
 /-- The bulk chunks run at forwards 0 and `1 + MAX_SINGLE_STREAK`, and the
-take ends after six forwards. Shown about the docs: the recall that
-arrives during the third single forward (`sReq 103`) waits for that forward
-and then for a bulk forward before its own, more than `serve_take`'s "waits
-for at most the one forward in flight". This is the mild case; a long recall
-overtaken by shorter later singles waits out the whole take, beyond
-`MAX_SINGLE_STREAK`'s "at most one bulk forward more" too
+take ends after six forwards. The recall that arrives during the third single
+forward (`sReq 103`) waits for that forward and then for a bulk forward
+before its own, the wait `MAX_SINGLE_STREAK`'s doc gives a recall that is
+waiting when the streak ends. This is the mild case; a long recall overtaken
+by shorter later singles waits out the whole take
 (`long_recall_waits_out_the_take`). -/
 theorem test_stream_of_singles :
     let s := run Cfg.rust okFwd 4 { St.init with pc := .serving (split bulk16), issued := bulk16 } streamEvs
@@ -244,8 +245,8 @@ set_option maxRecDepth 20000 in
 /-- Shown about the Rust: a long recall waits out the take. Shorter singles
 that arrive later keep overtaking it (length chunks, shortest first, pulled
 before every forward while bulk remains), so it runs at forward 10, after
-all three bulk forwards, not after "the one forward in flight" nor "at most
-one bulk forward more". -/
+all three bulk forwards. `serve_take`'s doc cites this run for a recall's
+wait (#311). -/
 theorem long_recall_waits_out_the_take :
     let s := run Cfg.rust okFwd 4 { St.init with pc := .serving (split bulk24), issued := bulk24 }
       overtakeEvs
