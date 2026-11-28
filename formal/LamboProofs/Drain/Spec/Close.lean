@@ -2,8 +2,8 @@
 # Write-queue drain: the close, a crash, and the lookup-timeout streak
 
 What `close()` answers for each admitted write after any trace of
-`Worker.lean`'s worker (`closeW`), and against the flush history of which
-puts a dead letter dropped (`closeD`); what the serve after a crash applies;
+`Worker.lean`'s worker, given the puts a dead letter dropped (`closeD`, which
+with none is `closeW`); what the serve after a crash applies;
 the dead-lettered set's bookkeeping with worker panics (`stepP`); and how the
 lookup-timeout streak counts (`streakNew`).
 
@@ -48,6 +48,9 @@ fenced session's `closeW .durable` answers `intent_durable`, which the Rust's
 `close_fenced` (always `Incomplete`) never does: that a fenced close answers
 `close_unflushed` is code-backed, not proved. `stepW` has no panic; a worker
 that panics between its commit and its settle is the `DEv` model's.
+`Memory::close` is `closeD`; `closeW` is it only when no put was
+dead-lettered (`closeD_agrees`), so the results over `closeW` speak of such
+a session.
 -/
 
 import LamboProofs.Drain.Spec.Worker
@@ -62,9 +65,9 @@ open Lambo.Receipts (Answer Entry settle Lane)
 (`pending` or `pending_replay`). -/
 def deferredW (st : WS) : List Key := pendingIds st.store
 
-/-- `close()` (`Memory::close`): `abort_workers`, then `settle_deferred` by how
-the final flush ended, after any `runW` trace (a write still running is one
-the abort stopped before its commit). It reads no flush history; `closeD` does. -/
+/-- `close()` (`Memory::close`) when no put was dead-lettered: `abort_workers`,
+then `settle_deferred` by how the final flush ended, after any `runW` trace (a
+write still running is one the abort stopped before its commit). -/
 def closeW (flush : CloseFlush) (now : Int) (st : WS) : RStore :=
   settleDeferred flush now (deferredW st) st.store
 
@@ -202,8 +205,8 @@ def FateW.holds (all : List Job) (st : WS) (flush : CloseFlush) (now' : Int) (j 
   | .unflushed => j ∈ st.running ++ st.held ++ st.queue ∧ flush = .incomplete ∧
       ansOf (closeW flush now' st) j.key = some .closeUnflushed
 
-/-- **Every admitted write has exactly one fate at a close that reads no dead
-letter** (`closeW`). -/
+/-- **Every admitted write has exactly one fate at a close with no put
+dead-lettered** (`closeW`). -/
 abbrev Spec.shutdown_exactly_oneW : Prop :=
   ∀ {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job} {evs : List Ev} {st : WS},
     st = runW c sz now (WS.init (admitStore all)) evs →

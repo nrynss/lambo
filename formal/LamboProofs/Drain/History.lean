@@ -1,19 +1,22 @@
 /-
 # Write-queue drain: the history layer (before #294, #295 and #345)
 
-**Nothing in this file describes the current Rust.** It holds the lane worker
-loop before #295 (`work`, and `close` over it), under which an in-session
-embedder outage or lookup timeout answered `failed`, left the intent owed and
-let the agent's next write run, with the lane drain it ran to completion
-(`drainLane`, `drain`); the replay loop before #294 (`loop`, `replay`, over
-`replayStep`); the replay loop over #294's step (`loopWith stepInput`); the
-replay loop over #295's first step (`loopD stepFixed`,
-before an id in another receipt format was quarantined); and the close before
-#345 over the current worker. It is built and in the axiom audit, but
-`formal/models.toml` does not check it for drift and the docs do not cite it.
-Its theorems are the evidence for the findings in `Examples.lean`, or state
-an earlier layer's result; each doc comment names the current counterpart
-where there is one.
+It holds the layers the Rust has left behind: the lane worker loop before
+#295 (`work`, and `close` over it), under which an in-session embedder outage
+or lookup timeout answered `failed`, left the intent owed and let the agent's
+next write run, with the lane drain it ran to completion (`drainLane`,
+`drain`); the replay loop before #294 (`loop`, `replay`, over `replayStep`);
+the replay loop over #294's step (`loopWith stepInput`); the replay loop over
+#295's first step (`loopD stepFixed`, before an id in another receipt format
+was quarantined); and the close before #345, which read no dead letter: the
+current worker's `closeW`, in a session where a put was dead-lettered. Two
+results are about parts the current model keeps, and are here because only
+those layers used them: `drain_fifo` (a lane, named by no worker) and
+`load_seq_order` (`loadOrder`, the first stage of `fixedLoad`). It is built
+and in the axiom audit, but `formal/models.toml` does not check it for drift
+and the docs do not cite it. Its theorems are the evidence for the findings
+in `Examples.lean`, or state an earlier layer's result; each doc comment
+names the current counterpart where there is one.
 
 ## Results
 
@@ -121,11 +124,13 @@ theorem drainLane_spec {α : Type} :
       obtain ⟨h1, h2⟩ := ih _ hl
       exact ⟨h1, h2.trans (Lane.pop_history _)⟩
 
-/-- **The worker before #295 drained each lane in submission order, all of
-it.** However admissions and worker steps interleaved (`Receipts.run`), a
+/-- **A lane drained to completion took its submitted jobs in order, all of
+them.** However admissions and worker steps interleaved (`Receipts.run`), a
 lane drained to completion has taken exactly the submitted jobs, in
-submission order: the completion of `Receipts.lane_fifo`. The current worker
-takes each lane in that order too (`Receipts.lane_fifo`, `runW_ord`). -/
+submission order: the completion of `Receipts.lane_fifo`. It names no worker;
+only the worker before #295 drained a lane to completion, where the current
+one can hold an agent's writes. The current worker takes each lane in
+submission order (`Receipts.lane_fifo`, `runW_ord`). -/
 theorem drain_fifo (ops : List (Lambo.Receipts.Op Job)) :
     (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).queue = [] ∧
       (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).taken = Lambo.Receipts.submitted ops := by
@@ -142,7 +147,9 @@ among the rows, a higher sequence number never has an earlier issue time, the
 hypothesis: `next_receipt` takes the sequence number before it reads the clock
 and before admission takes its lock, so two concurrent admissions can read
 the clock in the other order. It holds for sequential admissions under a
-clock that does not step back. `clock_step_reorders` is the other side. -/
+clock that does not step back. `clock_step_reorders` is the other side.
+`loadOrder` is still the first stage of the current load `fixedLoad`, which
+needs no clock assumption (`fixedLoad_sorted`). -/
 theorem load_seq_order (l : List Intent)
     (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.rid < b.job.rid → a.job.ms ≤ b.job.ms) :
     (loadOrder l).Pairwise (fun a b => a.job.rid ≤ b.job.rid) := by
@@ -905,7 +912,9 @@ theorem outage_failed_but_owed (all done : List Job) (fence : Job → Bool)
 put.** In every reachable session, a set-aside write (running, held or
 queued when the close began) whose put the history dead-lettered answers
 `intent_durable` at a `closeW` whose flush completed, though its put is not
-committed. Current: `closeD_never_vouches_dropped`. -/
+committed. It is here because it reads `closeW` as the close before #345 in
+a session with a dead letter, where `Memory::close` is now `closeD`.
+Current: `closeD_never_vouches_dropped`. -/
 theorem closeW_vouches_dead_letteredW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
     {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
     (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
