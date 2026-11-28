@@ -598,6 +598,75 @@ class SpecForm(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("::warning::the form-change check did not run: formal/lean-toolchain changed", out)
 
+    def enum(self, ns="Lambo.A", order=("a", "b"), spec=False):
+        """`inductive S | a | b` in `ns`, with constructors in `order`, its
+        recursor and `casesOn` (generated: each lists the constructors in
+        order), and `t : forall s, g s = g s` over `g := S.casesOn ...`."""
+        s, mod = f"{ns}.S", "LamboProofs." + ns.rsplit(".", 1)[1]
+        premises = " ".join(f"(b0 {s}.{c}) ->" for c in order)
+        g = dict(decl("Lambo.A.g", kind="def", type_=f"{s} -> Nat",
+                      value=f"fun (x : {s}) => {s}.casesOn.{{1}} (fun (x : {s}) => Nat) x 0 1"),
+                 uses=[s, f"{s}.casesOn"])
+        rows = BASE + [
+            dict(decl(s, kind="inductive", type_="Type", module=mod), uses=[f"{s}.{c}" for c in order]),
+            *(dict(decl(f"{s}.{c}", kind="ctor", type_=s, module=mod), uses=[s]) for c in order),
+            dict(decl(f"{s}.rec", kind="rec", user=False, module=mod,
+                      type_=f"forall {{b0 : {s} -> Sort.{{u}}}}, {premises} (forall (t : {s}), b0 t)"),
+                 uses=[s, *(f"{s}.{c}" for c in order)]),
+            dict(decl(f"{s}.casesOn", kind="def", user=False, module=mod, value="c",
+                      type_=f"forall {{b0 : {s} -> Sort.{{u}}}} (t : {s}), {premises} b0 t"),
+                 uses=[s, f"{s}.rec"]),
+            g]
+        stmt = f"forall (x : {s}), Eq.{{1}} Nat (Lambo.A.g x) (Lambo.A.g x)"
+        rows = [dict(d, type=stmt) if d["name"] == "Lambo.A.t" else d for d in rows]
+        return in_spec_form(rows, stmt=stmt) if spec else rows
+
+    def test_reordered_constructors_fail(self):
+        # `a, b` to `b, a`: the inductive's and each constructor's type, and
+        # `g`'s printed body, are as before; only `S.rec`'s type records the
+        # order, and `g`, which applies `casesOn` positionally, now maps `a`
+        # to 1.
+        base = self.enum()
+        for flags, spec, want in (((), False, "Lambo.A.S: constructors reordered or deleted"),
+                                  (("--spec-form",), True, "Lambo.A.S: constructors reordered or deleted"),
+                                  (("--only-form-changes",), True,
+                                   "a definition it reaches changed: Lambo.A.S (constructors reordered")):
+            with self.subTest(flags=flags):
+                code, out = self.run_check(base, self.enum(spec=spec), flags=flags)
+                self.assertEqual(code, 0, out)
+                code, out = self.run_check(base, self.enum(order=("b", "a"), spec=spec), flags=flags)
+                self.assertEqual(code, 1, out)
+                self.assertIn(want, out)
+        # A constructor listed as deleted changes the recursor the same way.
+        code, out = self.run_check(self.without_g(base), self.without_g(self.enum(order=("a",))),
+                                   deletions="Lambo.A.S.b\tr\t-\n")
+        self.assertEqual(code, 1, out)
+        self.assertIn("Lambo.A.S: constructors reordered or deleted", out)
+
+    @staticmethod
+    def without_g(rows):
+        """`rows` without `g`, and `t` stated as in BASE."""
+        return [BASE[0] if d["name"] == "Lambo.A.t" else d for d in rows if d["name"] != "Lambo.A.g"]
+
+    def test_a_moved_inductive_keeps_its_constructor_order(self):
+        rows = "Lambo.A.S\tLambo.Lib.S\nLambo.A.S.a\tLambo.Lib.S.a\nLambo.A.S.b\tLambo.Lib.S.b\n"
+        base = self.enum()
+        for flags, spec in (((), False), (("--spec-form",), True), (("--only-form-changes",), True)):
+            with self.subTest(flags=flags):
+                code, out = self.run_check(base, self.enum("Lambo.Lib", spec=spec), rows, flags=flags)
+                self.assertEqual(code, 0, out)
+                code, out = self.run_check(base, self.enum("Lambo.Lib", ("b", "a"), spec), rows, flags=flags)
+                self.assertEqual(code, 1, out)
+                self.assertIn("Lambo.A.S -> Lambo.Lib.S (constructors reordered" if "--only-form-changes" in flags
+                              else "Lambo.A.S: constructors reordered", out)
+
+    def test_a_deleted_inductive_takes_its_recursor_along(self):
+        # As `Lambo.Drain.HState`: the inductive and its constructors listed,
+        # its generated recursor gone with them.
+        listed = "".join(f"{n}\tdeleted with its model\t-\n" for n in ("Lambo.A.S", "Lambo.A.S.a", "Lambo.A.S.b"))
+        code, out = self.run_check(self.without_g(self.enum()), BASE, deletions=listed)
+        self.assertEqual(code, 0, out)
+
     def test_spec_name(self):
         self.assertEqual(eq.spec_name("Lambo.Drain.drain_fifo"), "Lambo.Drain.Spec.drain_fifo")
         self.assertEqual(eq.spec_name("Lambo.Cite.Reach.trans"), "Lambo.Cite.Spec.Reach.trans")

@@ -15,7 +15,9 @@ not the source text), and compares the two by fully qualified name:
   and type, as the kernel term (binder names included), so no theorem is
   weakened, strengthened, restated or deleted. Its proof may differ;
 * every definition, inductive, constructor and structure keeps its type, and
-  a definition its body, so the theorems still speak of the same things;
+  a definition its body, so the theorems still speak of the same things. An
+  inductive also keeps its recursor's type (`S.rec`, generated), the one
+  type that lists its constructors in order, so a reorder fails too;
 * a declaration may change name only when FILE lists it, one `OLD<TAB>NEW`
   per line (a line starting with `#` is a comment), as a helper moved to the
   shared library: NEW must exist at HEAD with OLD's kind and type, and
@@ -56,7 +58,7 @@ its kernel name, not what it is), and a binder name without its macro
 scopes (a hygienic name records the module it was elaborated in). Only declarations written in the source
 are compared; the constants Lean generates for them (`foo._proof_1`,
 `foo.match_1`, `_auxLemma.N`, ...) are not, as their numbering follows the
-file layout. Nor are the syntax extensions a file declares (a `local
+file layout; only a recursor's type is, with its inductive (above). Nor are the syntax extensions a file declares (a `local
 notation`'s parser and unexpander, a `macro`'s rules: declarations whose type
 is `Lean.Macro`, `Lean.ParserDescr` and the like), whose names embed the
 module; they change no kernel term, and every statement that uses them is
@@ -280,6 +282,27 @@ def mentioned_by(dump, name):
                   if pat.search(d["type"] or "") or pat.search(str(d["value"] or "")))
 
 
+def recursor_change(bd, hd, old, new, deleted=()):
+    """For an inductive `old` at the base, `new` at HEAD: where its recursor's
+    type first differs, or None. The recursor takes one minor premise per
+    constructor in their order, which no other type records: reordered
+    constructors keep every compared type and change what `S.rec`, `casesOn`
+    applied positionally, `ctorIdx` or a derived `Ord` mean. Checked only when
+    both sides have the same constructors (by name after the moves, a base one
+    in `deleted` left out, and by type); otherwise a constructor itself is
+    reported."""
+    def ctors(dump, name):
+        return {c for c in dump.all[name]["uses"] or []
+                if c.startswith(name + ".") and dump.all.get(c, {}).get("kind") == "ctor"}
+    bc = {bd.renames.get(c, c): c for c in ctors(bd, old) if c not in deleted}
+    if set(bc) != ctors(hd, new) or any(bd.norm(bd.all[c]["type"]) != hd.norm(hd.all[n]["type"])
+                                         for n, c in bc.items()):
+        return None
+    bt = bd.norm((bd.all.get(old + ".rec") or {}).get("type")) or ""
+    ht = hd.norm((hd.all.get(new + ".rec") or {}).get("type")) or ""
+    return first_difference(bt, ht) if bt != ht else None
+
+
 def spec_name(name):
     """The Spec proposition of a theorem: `Lambo.Drain.Spec.foo` for
     `Lambo.Drain.foo` (`Spec` goes after the model's namespace)."""
@@ -364,7 +387,8 @@ def changed_definitions(bd, hd, bstmt, hstmt, b, h):
         b, a = bd.all.get(old) if old else None, hd.all.get(n)
         if (b or a) and not (b or a)["user"]:
             # A generated constant (a matcher, an equation lemma) is compared
-            # through the user declaration it belongs to.
+            # through the user declaration it belongs to; a recursor with its
+            # inductive, below.
             continue
         label = n if old in (None, n) else f"{old} -> {n}"
         if b is None or a is None:
@@ -375,6 +399,8 @@ def changed_definitions(bd, hd, bstmt, hstmt, b, h):
             out.append(f"{label} (type changed)")
         elif bd.norm(b["value"]) != hd.norm(a["value"]):
             out.append(f"{label} (body changed)")
+        elif b["kind"] == "inductive" and recursor_change(bd, hd, old, n):
+            out.append(f"{label} (constructors reordered: its recursor's type changed)")
     return out
 
 
@@ -475,6 +501,9 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
                                  "a Spec proposition)" if changed_form else ""))
         if b["kind"] != "theorem" and bd.norm(b["value"]) != hd.norm(h["value"]):
             errors.append(f"{name}: definition body changed")
+        diff = b["kind"] == h["kind"] == "inductive" and recursor_change(bd, hd, name, new, deletions)
+        if diff:
+            errors.append(f"{name}: constructors reordered or deleted: its recursor's type changed\n{diff}")
         if b["private"] != h["private"] and renames.get(name) != name:
             # A private name is `_private.<module>.0.<name>` in the kernel, so
             # going private or public renames the declaration.
