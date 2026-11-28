@@ -145,7 +145,7 @@ missing entry is skipped. -/
 def settleOne (s : RStore) (r : Key) (a : Answer) (now : Int) : RStore :=
   update s r (fun e => (settle e a now).1)
 
-/-- What admission (`WritePipeline::admit`) leaves for the jobs it accepted: a
+/-- What admission (`WritePipeline`, `admission.rs`) leaves for the jobs it accepted: a
 `Pending` entry each, and a `PutWriteIntent` each, on its own hold. -/
 def admitStore (js : List Job) : RStore := js.map (fun j => (j.key, ⟨.pending, none⟩))
 

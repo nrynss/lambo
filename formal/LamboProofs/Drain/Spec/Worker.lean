@@ -9,7 +9,7 @@ the parking (`wake`), and the latched lease-lost fence (`fence`); then the
 serve that follows a session (`serveR`).
 
 Rust: `src/writeq/execution.rs` (`WritePipeline::spawn_worker`, the hold
-arm, `held_retry_backoff`); `Lanes` and `WritePipeline::admit`
+arm, `held_retry_backoff`); `Lanes` and admission in `WritePipeline`
 (`src/writeq/admission.rs`); `settle_one`, `hold_one`
 (`src/writeq/receipts.rs`); `WritePipeline::spawn_replay`
 (`src/writeq/replay.rs`).
@@ -89,7 +89,7 @@ inductive Ev where
   | fence
   deriving DecidableEq, Repr
 
-/-- `WritePipeline::admit`'s three checks, every one counting held writes. -/
+/-- Admission's three checks (`admission.rs`), every one counting held writes. -/
 def fits (c : Caps) (sz : Job → Nat) (st : WS) (j : Job) : Bool :=
   decide ((ofAgent j.agent st.load).length < c.lane) && decide (st.load.length < c.total) &&
     decide ((st.load.map sz).sum + sz j ≤ c.bytes)
