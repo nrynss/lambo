@@ -81,8 +81,9 @@ The manifest itself is checked on every run, and a broken manifest fails
 `formal/LamboProofs/` (subdirectories included) other than the top-level
 `Audit.lean`, the history layers and concrete cases (`Drain/History.lean`,
 `Drain/Examples.lean`, `Tiered/History.lean`), the proofs layer of a model in
-Spec and Proofs form (`<Model>/Proofs.lean`, or the files under a `Proofs/`
-directory: its `Spec` files carry the entries) and the shared lemma libraries
+Spec and Proofs form (`<Model>/Proofs.lean` beside a `<Model>/Spec.lean` or
+`<Model>/Spec/`, or `<Model>/Proofs/<X>.lean` beside `<Model>/Spec/<X>.lean`:
+its `Spec` files carry the entries) and the shared lemma libraries
 under `Lib/` must have exactly one entry, every Lean file and Rust path an
 entry names must exist, every `#item` must be found, `read_digest` must be
 `v<N>:sha256:` and 64 lowercase hex digits (a bare `sha256:` is scheme 1) with
@@ -129,18 +130,31 @@ SKIP_MODELS = {"Audit.lean", "Drain/History.lean", "Drain/Examples.lean", "Tiere
 SKIP_DIRS = ("Lib/",)
 
 
-def is_proofs_layer(rel):
+def is_proofs_layer(rel, files):
     """Whether `rel` is a proofs file of a model in Spec and Proofs form:
-    `<Model>/Proofs.lean` or a file under a `Proofs/` directory. It proves the
-    propositions its `Spec` file states and reads no Rust of its own: the
-    entry, and the reading of the Rust it records, belong to the `Spec` file."""
+    `<Model>/Proofs.lean` beside a `<Model>/Spec.lean` or a `<Model>/Spec/`
+    directory, or `<Model>/Proofs/<X>.lean` beside `<Model>/Spec/<X>.lean` (or
+    a single `<Model>/Spec.lean`). It proves the propositions its `Spec` file
+    states and reads no Rust of its own: the entry, and the reading of the
+    Rust it records, belong to the `Spec` file. `files` is every `.lean` path
+    under MODEL_DIR, relative to it: a file named like a proofs layer with no
+    such `Spec` beside it is a model file like any other and needs an entry."""
     parts = rel.split("/")
-    return "Proofs" in parts[:-1] or parts[-1] == "Proofs.lean"
+    if len(parts) >= 2 and parts[-1] == "Proofs.lean":
+        model = "/".join(parts[:-1])
+        return f"{model}/Spec.lean" in files or any(f.startswith(f"{model}/Spec/") for f in files)
+    if len(parts) >= 3 and parts[-2] == "Proofs":
+        model = "/".join(parts[:-2])
+        return f"{model}/Spec/{parts[-1]}" in files or f"{model}/Spec.lean" in files
+    return False
 
 
-def is_model(rel):
-    """Whether `rel`, a `.lean` path relative to MODEL_DIR, needs an entry."""
-    return rel not in SKIP_MODELS and not rel.startswith(SKIP_DIRS) and not is_proofs_layer(rel)
+def is_model(rel, files):
+    """Whether `rel`, a `.lean` path relative to MODEL_DIR, needs an entry;
+    `files` is every `.lean` path there (`is_proofs_layer`)."""
+    return rel not in SKIP_MODELS and not rel.startswith(SKIP_DIRS) and not is_proofs_layer(rel, files)
+
+
 ENTRY_KEYS = {"lean", "rust", "read_against", "read_digest"}
 ITEM_KINDS = r"(?:fn|struct|enum|trait|type|const|static|mod|union)"
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -252,7 +266,8 @@ class WorkTree:
             for f in filenames:
                 if f.endswith(".lean"):
                     out.add(f"{rel}/{f}")
-        return {p for p in out if is_model(p[len(MODEL_DIR) + 1:])}
+        files = {p[len(MODEL_DIR) + 1:] for p in out}
+        return {p for p in out if is_model(p[len(MODEL_DIR) + 1:], files)}
 
 
 class GitTree:
@@ -267,8 +282,9 @@ class GitTree:
 
     def model_files(self):
         prefix = MODEL_DIR + "/"
-        return {p for p in self.repo.tree(self.rev)
-                if p.startswith(prefix) and p.endswith(".lean") and is_model(p[len(prefix):])}
+        lean = {p for p in self.repo.tree(self.rev) if p.startswith(prefix) and p.endswith(".lean")}
+        files = {p[len(prefix):] for p in lean}
+        return {p for p in lean if is_model(p[len(prefix):], files)}
 
 
 # --------------------------------------------------------------------------
@@ -1810,15 +1826,26 @@ def self_test():
         write("formal/LamboProofs/Drain/History.lean", "-- history layer, no entry\n")
         write("formal/LamboProofs/Drain/Proofs/Base.lean", "-- proofs layer, no entry\n")
         write("formal/LamboProofs/Score/Proofs.lean", "-- proofs layer, no entry\n")
-        commit("add Lib/L, Drain/History and two proofs layers")
+        commit("add Lib/L, Drain/History and two files named like proofs layers")
         code, out = run()
-        expect("a shared library, the history layer and a proofs layer need no entry",
-               code == 0 and "no entry" not in out, out)
+        expect("a file named like a proofs layer, with no Spec beside it, needs an entry: exit 3",
+               code == 3 and "no entry for formal/LamboProofs/Drain/Proofs/Base.lean" in out
+               and "no entry for formal/LamboProofs/Score/Proofs.lean" in out
+               and "Lib/L.lean" not in out and "History.lean" not in out, out)
         write("formal/LamboProofs/Drain/Spec/Base.lean", "-- spec layer, needs an entry\n")
-        commit("add Drain/Spec/Base")
+        write("formal/LamboProofs/Score/Spec.lean", "-- spec layer, needs an entry\n")
+        commit("add Drain/Spec/Base and Score/Spec")
         code, out = run()
-        expect("a Spec file without an entry: exit 3",
-               code == 3 and "no entry for formal/LamboProofs/Drain/Spec/Base.lean" in out, out)
+        expect("a Spec file without an entry: exit 3, its proofs layer needs none",
+               code == 3 and "no entry for formal/LamboProofs/Drain/Spec/Base.lean" in out
+               and "no entry for formal/LamboProofs/Score/Spec.lean" in out
+               and "/Proofs" not in out, out)
+        write("formal/LamboProofs/Drain/Proofs/Other.lean", "-- no Spec/Other.lean beside it\n")
+        commit("add Drain/Proofs/Other")
+        code, out = run()
+        expect("a Proofs/ file whose Spec/ file of the same name is missing needs an entry",
+               code == 3 and "no entry for formal/LamboProofs/Drain/Proofs/Other.lean" in out
+               and "Proofs/Base.lean" not in out, out)
         git("rm", "-q", "-r", "formal/LamboProofs/Lib", "formal/LamboProofs/Drain",
             "formal/LamboProofs/Score")
         manifest(c4, c11, a_rust=A2, b_rust='"src/b.rs#keep", "src/gone.rs"')

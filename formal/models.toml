@@ -9,8 +9,9 @@
 # included) other than the top-level Audit.lean, Drain/History.lean and
 # Drain/Examples.lean (the drain model's history layer and concrete cases,
 # which read no Rust of their own), the proofs layer of a model in Spec and
-# Proofs form (<Model>/Proofs.lean or the files under a Proofs/ directory,
-# which prove what the Spec files state: the Spec file has the entry) and the
+# Proofs form (<Model>/Proofs.lean beside <Model>/Spec.lean or <Model>/Spec/,
+# or <Model>/Proofs/<X>.lean beside <Model>/Spec/<X>.lean, which prove what
+# the Spec files state: the Spec file has the entry) and the
 # shared lemma libraries under Lib/:
 #
 #   lean          the model file, from the repository root.
