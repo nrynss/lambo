@@ -74,9 +74,12 @@ the flag.
 `--only-form-changes` runs that one check and nothing else, for CI on every
 pull request: for each theorem declared on both sides whose statement is in
 Spec form on one side and spelled out on the other, the two statements must
-be the same. A theorem added, deleted or restated without changing form is
-not its business (a model change may do all three), so it passes when no
-theorem changed form.
+be the same, and so must every definition under `LamboProofs` the statement
+reaches, transitively through definition bodies (its kind, type and body):
+this mode compares no definition by itself, and a statement that prints as
+before says something else once a definition it mentions changed. A theorem
+added, deleted or restated without changing form is not its business (a
+model change may do all three), so it passes when no theorem changed form.
 
 The base is built from scratch unless the working tree has a `formal/.lake`:
 then the base starts from a copy of it and Lake rebuilds only the modules
@@ -263,9 +266,68 @@ def statement(dump, name, d):
     return dump.norm(d["stmt"]), None
 
 
+# A constant's name in a printed kernel term: the text between separators,
+# with a universe instantiation (`Eq.{1}` prints as `Eq.` then `{1}`) cut off.
+NAME_TOKEN = re.compile(r"[^\s()\[\]{},:@]+")
+
+
+def reached_definitions(dump, roots):
+    """The constants of `dump` other than theorems that `roots` reach, through
+    the bodies of definitions: what a statement mentioning `roots` means. A
+    theorem is not followed (its value is a proof, not a meaning), and a
+    constant outside the dump (Lean's own library) ends the walk."""
+    seen, stack = set(), list(roots)
+    while stack:
+        n = stack.pop()
+        if n in seen:
+            continue
+        d = dump.all.get(n)
+        if d is None or d["kind"] == "theorem":
+            continue
+        seen.add(n)
+        stack.extend(d["uses"] or [])
+    return seen
+
+
+def statement_roots(dump, stmt, extra=()):
+    """The constants of `dump` that a normalised statement names, and `extra`."""
+    roots = {tok.rstrip(".") for tok in NAME_TOKEN.findall(stmt or "")}
+    return {n for n in roots | set(extra) if n in dump.all}
+
+
+def changed_definitions(bd, hd, bstmt, hstmt, h):
+    """The definitions a restated theorem's statement reaches, transitively
+    through definition bodies, that differ between base and HEAD: missing on
+    one side, or of another kind, type or body. The two statements can print
+    alike while a definition they mention changed underneath, so the same
+    statement would no longer say the same thing. HEAD's Spec proposition
+    also contributes the constants its body uses."""
+    prop = hd.all.get(h.get("spec") or "")
+    base = reached_definitions(bd, statement_roots(bd, bstmt))
+    head = reached_definitions(hd, statement_roots(hd, hstmt, (prop or {}).get("uses") or ()))
+    out = []
+    for n in sorted({bd.renames.get(x, x) for x in base} | head):
+        old = next((x for x, y in bd.renames.items() if y == n), n)
+        b, a = bd.all.get(old), hd.all.get(n)
+        if (b or a) and not (b or a)["user"]:
+            # A generated constant (a matcher, an equation lemma) is compared
+            # through the user declaration it belongs to.
+            continue
+        if b is None or a is None:
+            out.append(f"{n} (declared at {'HEAD' if b is None else 'the base'} only)")
+        elif b["kind"] != a["kind"]:
+            out.append(f"{n} (kind changed)")
+        elif bd.norm(b["type"]) != hd.norm(a["type"]):
+            out.append(f"{n} (type changed)")
+        elif bd.norm(b["value"]) != hd.norm(a["value"]):
+            out.append(f"{n} (body changed)")
+    return out
+
+
 def form_change(bd, hd, name, new, b, h):
     """For a theorem in Spec form on one side only: None when both sides state
-    the same thing, else the error."""
+    the same thing, else the error. The statements must print alike, and
+    every definition they reach must be unchanged."""
     bs, berr = statement(bd, name, b)
     hs, herr = statement(hd, new, h)
     if berr or herr:
@@ -274,6 +336,10 @@ def form_change(bd, hd, name, new, b, h):
         which = h.get("spec") or b.get("spec")
         return (f"{name}: statement changed: {which} does not unfold to the "
                 f"{'base' if h.get('spec') else 'HEAD'} statement\n{first_difference(bs, hs)}")
+    changed = changed_definitions(bd, hd, bs, hs, h if h.get("spec") else b if b.get("spec") else h)
+    if changed:
+        return (f"{name}: statement changed: it prints as before, but a definition it reaches "
+                f"changed: {', '.join(changed)}")
     return None
 
 

@@ -294,6 +294,39 @@ class SpecForm(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("restated  Lambo.A.t", out)
 
+    def test_a_changed_definition_under_a_restated_statement_fails(self):
+        # `t` mentions `f`, whose body changed: the statement prints as before
+        # but no longer says the same thing. `--only-form-changes` compares no
+        # definition by itself, so it must follow the statement into `f`.
+        stmt = "forall (n : Nat), Eq.{1} Nat (Lambo.A.f n) n"
+        base = [dict(d, type=stmt) if d["name"] == "Lambo.A.t" else d for d in BASE]
+        changed = [dict(d, value="fun (x : Nat) => x") if d["name"] == "Lambo.A.f" else d for d in base]
+        for flag in ("--only-form-changes", "--spec-form"):
+            with self.subTest(flag=flag):
+                code, out = self.run_check(base, in_spec_form(base, stmt=stmt), flags=[flag])
+                self.assertEqual(code, 0, out)
+                code, out = self.run_check(base, in_spec_form(changed, stmt=stmt), flags=[flag])
+                self.assertEqual(code, 1, out)
+                self.assertIn("Lambo.A.t: statement changed: it prints as before, but a definition it "
+                              "reaches changed: Lambo.A.f (body changed)", out)
+                self.assertNotIn("states what it stated", out)
+                self.assertNotIn("restated  Lambo.A.t", out)
+        # Reached through another definition's body, and through the uses of
+        # HEAD's proposition, the same.
+        g = decl("Lambo.A.g", kind="def", type_="Nat -> Nat", value="fun (x : Nat) => Lambo.A.f x")
+        g["uses"] = ["Lambo.A.f"]
+        stmt2 = "forall (n : Nat), Eq.{1} Nat (Lambo.A.g n) n"
+        base2 = [dict(d, type=stmt2) if d["name"] == "Lambo.A.t" else d for d in BASE] + [g]
+        changed2 = [dict(d, value="fun (x : Nat) => x") if d["name"] == "Lambo.A.f" else d for d in base2]
+        code, out = self.run_check(base2, in_spec_form(changed2, stmt=stmt2), flags=["--only-form-changes"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("Lambo.A.f (body changed)", out)
+        # A definition the statement does not reach may change.
+        code, out = self.run_check(BASE, in_spec_form([dict(d, value="fun (x : Nat) => x")
+                                                       if d["name"] == "Lambo.A.f" else d for d in BASE]),
+                                   flags=["--only-form-changes"])
+        self.assertEqual(code, 0, out)
+
     def test_spec_name(self):
         self.assertEqual(eq.spec_name("Lambo.Drain.drain_fifo"), "Lambo.Drain.Spec.drain_fifo")
         self.assertEqual(eq.spec_name("Lambo.Cite.Reach.trans"), "Lambo.Cite.Spec.Reach.trans")
