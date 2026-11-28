@@ -240,6 +240,47 @@ class Equivalence(unittest.TestCase):
                       "at the base", out)
         self.assertIn("Lambo.A.sneak: theorem added at HEAD", out)
 
+    def test_a_row_older_than_the_base_renames_nothing(self):
+        # Its OLD is no declaration of the base, so it rewrites no base term:
+        # `Nat.succ` read as `Lambo.A.f` would pass a restated `t`.
+        base = [dict(d, type="forall (n : Nat), Eq.{1} Nat (Nat.succ n) (Nat.succ n)")
+                if d["name"] == "Lambo.A.t" else d for d in BASE]
+        head = [dict(d, type="forall (n : Nat), Eq.{1} Nat (Lambo.A.f n) (Lambo.A.f n)")
+                if d["name"] == "Lambo.A.t" else d for d in BASE]
+        for flags in ((), ("--spec-form",)):
+            with self.subTest(flags=flags):
+                code, out = self.run_check(base, head, "Nat.succ\tLambo.A.f\n", flags=flags)
+                self.assertEqual(code, 1, out)
+                self.assertIn("Lambo.A.t: statement changed", out)
+
+    def test_a_namespace_is_not_an_old_name(self):
+        # `Lambo.A` would rename the start of `Lambo.A.f`, reading it as
+        # `Lambo.B.helper.f`.
+        g = decl("Lambo.B.helper.f", kind="def", type_="Nat -> Nat", value="fun (x : Nat) => 0",
+                 module="LamboProofs.B")
+        base = [dict(d, type="Eq.{1} Nat (Lambo.A.f 0) 0") if d["name"] == "Lambo.A.t" else d
+                for d in BASE] + [g]
+        head = [dict(d, type="Eq.{1} Nat (Lambo.B.helper.f 0) 0") if d["name"] == "Lambo.A.t" else d
+                for d in BASE] + [g]
+        code, out = self.run_check(base, head, "Lambo.A\tLambo.B.helper\n")
+        self.assertEqual(code, 1, out)
+        self.assertIn("Lambo.A.t: statement changed", out)
+        self.assertIn("Lambo.A: listed as moved, but it names a namespace", out)
+        # A move made in this diff renames a whole name, a universe
+        # instantiation after it included.
+        moved = [dict(d, name="Lambo.Old.f") if d["name"] == "Lambo.A.f" else
+                 dict(d, type="Eq.{1} Nat (Lambo.Old.f.{0} 0) 0")
+                 if d["name"] == "Lambo.A.t" else d for d in BASE]
+        head = [dict(d, type="Eq.{1} Nat (Lambo.A.f.{0} 0) 0")
+                if d["name"] == "Lambo.A.t" else d for d in BASE]
+        code, out = self.run_check(moved, head, "Lambo.Old.f\tLambo.A.f\n")
+        self.assertEqual(code, 0, out)
+
+    def test_a_generated_constant_is_not_an_old_name(self):
+        code, out = self.run_check(BASE, BASE, "Lambo.A.f.match_1\tLambo.A.f\n")
+        self.assertEqual(code, 1, out)
+        self.assertIn("Lambo.A.f.match_1: listed as moved, but a constant Lean generates", out)
+
     def test_a_name_both_moved_and_deleted_fails(self):
         # Moved, OLD would admit NEW; deleted, OLD would skip the comparison:
         # together they let NEW be added unchecked.
@@ -401,6 +442,18 @@ class SpecForm(unittest.TestCase):
         changed = [dict(d, value="fun (x : Nat) => x") if d["name"] == "Lambo.A.f" else d for d in base]
         code, out = self.run_check(base2, in_spec_form(changed, stmt=stmt), "Lambo.Old.f\tLambo.A.f\n",
                                    flags=["--spec-form"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("Lambo.A.f (body changed)", out)
+
+    def test_a_generated_old_name_does_not_hide_a_reached_definition(self):
+        # `A.f.match_1 -> A.f` is no move made in this diff (its OLD is no
+        # declaration), so the restated `t`, which reaches `A.f`, still
+        # compares `A.f` on both sides.
+        stmt = "forall (n : Nat), Eq.{1} Nat (Lambo.A.f n) n"
+        base = [dict(d, type=stmt) if d["name"] == "Lambo.A.t" else d for d in BASE]
+        changed = [dict(d, value="fun (x : Nat) => x") if d["name"] == "Lambo.A.f" else d for d in base]
+        code, out = self.run_check(base, in_spec_form(changed, stmt=stmt), "Lambo.A.f.match_1\tLambo.A.f\n",
+                                   flags=["--only-form-changes"])
         self.assertEqual(code, 1, out)
         self.assertIn("Lambo.A.f (body changed)", out)
 

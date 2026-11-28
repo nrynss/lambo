@@ -19,12 +19,16 @@ not the source text), and compares the two by fully qualified name:
 * a declaration may change name only when FILE lists it, one `OLD<TAB>NEW`
   per line (a line starting with `#` is a comment), as a helper moved to the shared library:
   NEW must exist at HEAD with OLD's kind and type, and several OLD names may
-  map to one NEW (duplicates merged). Names in FILE rewrite references in the
-  compared bodies too. FILE keeps every move, so an OLD declared neither at
-  the base nor at HEAD, with its NEW declared at both, was moved before the
-  base and is not compared; with its NEW declared at HEAD only, it is an
-  error, since it would let NEW be added unchecked. A line whose OLD and NEW are the same name lists a
-  declaration that went private or public, which otherwise fails (below);
+  map to one NEW (duplicates merged). A row whose OLD is declared at the base
+  is a move made in this diff: it alone may add its NEW, and it renames OLD to
+  NEW wherever a base statement or body mentions it (as a whole name, never
+  the start of a longer one). FILE keeps every move, so a row whose OLD is
+  declared neither at the base nor at HEAD, with its NEW declared at both, was
+  moved before the base: it is not compared and renames nothing. With its NEW
+  declared at HEAD only it is an error, since it would let NEW be added
+  unchecked, and so is an OLD that names a generated constant or a
+  namespace. A line whose OLD and NEW are the same name lists a declaration
+  that went private or public, which otherwise fails (below);
 * a theorem may be missing at HEAD only when `--deletions FILE` lists it,
   one `NAME<TAB>REASON<TAB>KEPT` per line (a line starting with `#` is a
   comment; a reason may contain `#`, as in an issue number): NAME is a
@@ -182,7 +186,15 @@ class Dump:
                 self.all[d["name"]] = d
                 if d["user"] and d["type"] not in SYNTAX_TYPES:
                     self.user[d["name"]] = d
-        self.renames = renames
+        # The moves made in this diff: the rows whose OLD is declared here. A
+        # row older than the base names no declaration of it, so it renames
+        # nothing. An OLD matches a whole name only, never the start of a
+        # longer one (`Lambo.A` in `Lambo.A.f`), though a universe
+        # instantiation may follow it (`Lambo.A.f.{1}`).
+        self.renames = {old: new for old, new in renames.items() if old in self.user}
+        alts = sorted(self.renames, key=len, reverse=True)
+        self._rename = re.compile(r"(?<![\w.'])(?:" + "|".join(re.escape(a) for a in alts)
+                                  + r")(?![\w']|\.(?!\{))") if alts else None
         self._aux = {}
 
     def aux(self, name):
@@ -198,22 +210,9 @@ class Dump:
             return None
         s = PRIVATE.sub("", s)
         s = AUX.sub(lambda m: self.aux(PRIVATE.sub("", m.group(0))), s)
-        if self.renames:
-            s = RENAME_RE(self.renames).sub(lambda m: self.renames[m.group(0)], s)
+        if self._rename:
+            s = self._rename.sub(lambda m: self.renames[m.group(0)], s)
         return s
-
-
-_rename_cache = {}
-
-
-def RENAME_RE(renames):
-    key = id(renames)
-    if key not in _rename_cache:
-        alts = sorted(renames, key=len, reverse=True)
-        _rename_cache[key] = re.compile(
-            r"(?<![\w.'])(?:" + "|".join(re.escape(a) for a in alts) + r")(?![\w'])"
-        )
-    return _rename_cache[key]
 
 
 def read_renames(path):
@@ -327,9 +326,8 @@ def changed_definitions(bd, hd, bstmt, hstmt, b, h):
     head = reached_definitions(hd, statement_roots(hd, hstmt, (hprop or {}).get("uses") or ()))
     out = []
     for n in sorted({bd.renames.get(x, x) for x in base} | head):
-        # Only a move made in this diff renames: one made before the base has
-        # no OLD there, and its NEW is declared on both sides.
-        old = next((x for x, y in bd.renames.items() if y == n and x in bd.all), n)
+        # `bd.renames` holds only the moves made in this diff.
+        old = next((x for x, y in bd.renames.items() if y == n), n)
         b, a = bd.all.get(old), hd.all.get(n)
         if (b or a) and not (b or a)["user"]:
             # A generated constant (a matcher, an equation lemma) is compared
@@ -388,10 +386,10 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
     deletions = deletions or {}
     errors, notes = [], []
     restated = [] if restated is None else restated
-    # Only a move made in this diff may add its NEW; a move made before the
-    # base has its NEW declared there already. A deleted OLD is not compared,
-    # so it admits no NEW, and listing it as both is an error.
-    targets = {new for old, new in renames.items() if old in base and old not in deletions}
+    # Only a move made in this diff (`bd.renames`) may add its NEW; a move
+    # made before the base has its NEW declared there already. A deleted OLD
+    # is not compared, so it admits no NEW, and listing it as both is an error.
+    targets = {new for old, new in bd.renames.items() if old not in deletions}
     for old in sorted(set(renames) & set(deletions)):
         errors.append(f"{old}: listed both as moved to {renames[old]} and as deleted")
     for name, (reason, kept) in sorted(deletions.items()):
@@ -460,7 +458,13 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
         errors.append(f"{name}: {h['kind']} added at HEAD (not a listed move"
                       + (", nor the Spec proposition of a restated theorem)" if spec_form else ")"))
     for old, new in renames.items():
-        if old not in base and (old in head or new not in head):
+        if old not in base and old not in head and (old in bd.all or old in hd.all):
+            errors.append(f"{old}: listed as moved, but a constant Lean generates or a syntax "
+                          f"extension, not a declaration the check compares")
+        elif old not in base and old not in head and any(
+                n.startswith(old + ".") for n in (*bd.all, *hd.all)):
+            errors.append(f"{old}: listed as moved, but it names a namespace, not a declaration")
+        elif old not in base and (old in head or new not in head):
             errors.append(f"{old}: listed as moved, but not declared at the base")
         elif old not in base and new not in base:
             errors.append(f"{old}: listed as moved before the base, but {new} is not declared at the base")
