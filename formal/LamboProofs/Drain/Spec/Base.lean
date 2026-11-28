@@ -288,8 +288,9 @@ def replayStep (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
     | .softLock => (.stop .other, s)
     | .other => (.stop .other, s)
 
-/-- What a replay did: restart-map inserts, batches appended, jobs applied and
-failed, and the block reason if it stopped before the end of the backlog. -/
+/-- What a replay did: its answers by receipt id (restart-map inserts, but for
+a `badId` row's `failed`, which has no parsed id to key the map), the batches
+appended, the jobs applied and failed, and the block reason if it stopped. -/
 structure ROut where
   answers : List (Key × Answer)
   log : List Batch
