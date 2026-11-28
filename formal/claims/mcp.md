@@ -150,14 +150,20 @@ no row's verdict changes. The rows name the `Spec` file, and the page's
 anchors cite the propositions (`lean: Drain.Spec.<name>`); the anchor check
 now refuses a theorem or a lemma of the proofs layer.
 
+**D-86 (2026-11-28, #350 review).** D-86 is TESTED, not PROVEN: the claim
+is that the server runs the retry in the background, and `retry_enabled` and
+`retry_settles_head` show only that a retry is enabled and what it settles,
+since the timer is not modelled. The pipeline test that waits for the held
+writes to apply with no new write backs it.
+
 ## Summary
 
 726 claims.
 
 | Class | Rows |
 |---|---|
-| PROVEN | 127 |
-| TESTED | 306 |
+| PROVEN | 126 |
+| TESTED | 307 |
 | CODE-ONLY | 216 |
 | COMMENT-ONLY | 0 |
 | CONTRADICTED | 53 |
@@ -168,7 +174,7 @@ now refuses a theorem or a lemma of the proofs layer.
 | 1-147: transports, forwarding, what every tool expects, errors (T) | 91 | 5 | 47 | 22 | 13 | 4 |
 | 149-218: recall legs, arguments, confidence, truncation (R) | 72 | 27 | 17 | 16 | 6 | 6 |
 | 219-360: recall warnings, duplicates, supersession, layers (Q) | 172 | 42 | 65 | 55 | 6 | 4 |
-| 361-590: derive, derive_image, record_action (D) | 186 | 25 | 104 | 40 | 11 | 6 |
+| 361-590: derive, derive_image, record_action (D) | 186 | 24 | 105 | 40 | 11 | 6 |
 | 591-790: reserve, inspect, stale, saints, stats, limits (S) | 205 | 28 | 73 | 83 | 17 | 4 |
 
 The re-check moved six rows out of PROVEN (T-02, Q-33, Q-53a, Q-63, D-33,
@@ -941,7 +947,7 @@ already in order.
 | D-83b | 417 | lambo_derive / A derive needs the embedder | "a concept is stored with its embedding or it is not stored at all" | CONTRADICTED | same as D-83a | Same missing condition: hybrid on `MemoryStore` creates 1, embeds 0. |
 | D-84 | 417 | lambo_derive / A derive needs the embedder | "is not applied and not lost: its intent stays in place and its receipt answers `pending_replay`" | PROVEN | `outage_holdsW` in `Drain/Spec/Close.lean`; `a_write_reached_during_an_in_session_embedder_outage_is_not_consumed` in `src/memory/tests/replay.rs` | Was TESTED. The theorem: the write is held, appends nothing, answers `pending_replay` and stays owed. |
 | D-85 | 417 | lambo_derive / A derive needs the embedder | "The server holds that agent's later writes behind it, also `pending_replay`, so none applies ahead of it" | PROVEN | `runW_ord` in `Drain/Spec/Worker.lean`; `an_outage_in_session_holds_the_agents_later_writes_behind_the_owed_one` in `src/memory/tests/replay.rs` | Concurrency is not modelled. |
-| D-86 | 417 | lambo_derive / A derive needs the embedder | "re-attempts the held writes, oldest first, in the background" | PROVEN | `retry_settles_head`, `retry_enabled` in `Drain/Spec/Worker.lean`; `held_writes_are_retried_without_a_new_write_even_when_the_lane_is_full` in `src/writeq/pipeline_tests/hold.rs` | The retry timer is not modelled. |
+| D-86 | 417 | lambo_derive / A derive needs the embedder | "re-attempts the held writes, oldest first, in the background" | TESTED | `held_writes_are_retried_without_a_new_write_even_when_the_lane_is_full` in `src/writeq/pipeline_tests/hold.rs` | Was PROVEN. `retry_enabled` and `retry_settles_head` in `Drain/Spec/Worker.lean` show a retry is always enabled and what it settles, not that the server runs it: the retry timer is not modelled (as T-43c says). |
 | D-87 | 417 | lambo_derive / A derive needs the embedder | "a second after the outage, the wait doubling after each failed attempt up to 30 seconds" | CODE-ONLY | `held_retry_backoff` in `src/writeq/execution.rs:603`; `HYBRID_IO_TIMEOUT` in `src/graph/hybrid.rs:263` | 1, 2, 4, 8, 16, 30 s, from the end of the failed attempt. Could pin: a unit test of `held_retry_backoff(1..=7)`. |
 | D-88 | 417 | lambo_derive / A derive needs the embedder | "a write that never embeds costs one attempt (itself up to 30 seconds) per cycle of at most a minute" | CODE-ONLY | `src/writeq/execution.rs:held_retry_backoff` (capped at `HYBRID_IO_TIMEOUT`); `src/graph/hybrid.rs:HYBRID_IO_TIMEOUT` (30 s, the one deadline over a write's embeds and lookups) | 30 s wait plus 30 s attempt. Could pin: same unit test. |
 | D-89a | 417 | lambo_derive / A derive needs the embedder | "Sending another write, or one that is refused, does not retry them sooner." | TESTED | `new_writes_do_not_retry_a_held_write_before_its_backoff` in `src/writeq/pipeline_tests/hold.rs` | Covers new writes only. |
