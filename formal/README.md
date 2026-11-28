@@ -374,7 +374,8 @@ follow the file layout.
 A change that puts a model into Spec and Proofs form changes the form of every result it restates: the type of `theorem foo` is no longer the statement but the constant `Spec.foo`. Run the check with `--spec-form` for such a change:
 
 ```bash
-PATH="$HOME/.elan/bin:$PATH" python3 -I scripts/formal/check-decl-equivalence.py --base origin/main --spec-form
+PATH="$HOME/.elan/bin:$PATH" python3 -I scripts/formal/check-decl-equivalence.py --base origin/main --spec-form \
+  --renames formal/audit/moved-helpers.tsv --deletions formal/audit/deleted-theorems.tsv
 ```
 
 Everything above still applies, and a theorem whose type differs passes only when it changed form and states the same thing: its type is exactly `Lambo.<Model>.Spec.<name>`, a `Prop`-valued definition, and that definition's body is the base's statement as the kernel term. `DumpDecls.lean` does the unfolding in Lean (one definition, its universe levels put in, and the proofs Lean abstracts out of a definition's body put back). Its kernel check compares `Spec.foo` with that body in the same environment, so it guards only the putting back of the proofs; that `Spec.foo` says what the old statement said rests on the two printed kernel terms being equal and on every definition the statement reaches, through definition bodies, being unchanged (which `--spec-form` checks for every definition anyway, and `--only-form-changes` for those). A weakened statement, an added hypothesis or a dropped conclusion fails with the first place the two terms differ. The printed term names a bound variable only where something refers to it, so `(h : P)` before and `P →` now compare equal. A `Spec` proposition may be added only as the statement of the theorem of its name.
