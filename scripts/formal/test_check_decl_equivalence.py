@@ -327,6 +327,31 @@ class SpecForm(unittest.TestCase):
                                    flags=["--only-form-changes"])
         self.assertEqual(code, 0, out)
 
+    def test_a_toolchain_change_skips_only_form_changes(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            def git(*a):
+                subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=d, check=True,
+                               capture_output=True)
+            (Path(d) / "formal").mkdir()
+            tc = Path(d) / "formal" / "lean-toolchain"
+            tc.write_text("leanprover/lean4:v4.36.0\n", encoding="utf-8")
+            git("init", "-q")
+            git("add", ".")
+            git("commit", "-q", "-m", "base")
+            self.assertIsNone(eq.toolchain_change(d, "HEAD"))
+            tc.write_text("leanprover/lean4:v4.37.0\n", encoding="utf-8")
+            self.assertEqual(eq.toolchain_change(d, "HEAD"),
+                             ("leanprover/lean4:v4.36.0", "leanprover/lean4:v4.37.0"))
+            # A base without the file is no change.
+            self.assertIsNone(eq.toolchain_change(d, "HEAD~0:nonexistent"))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = eq.main(["--repo", d, "--base", "HEAD", "--only-form-changes"])
+            self.assertEqual(code, 0)
+            self.assertIn("skipped: formal/lean-toolchain differs between HEAD (leanprover/lean4:v4.36.0)",
+                          out.getvalue())
+
     def test_spec_name(self):
         self.assertEqual(eq.spec_name("Lambo.Drain.drain_fifo"), "Lambo.Drain.Spec.drain_fifo")
         self.assertEqual(eq.spec_name("Lambo.Cite.Reach.trans"), "Lambo.Cite.Spec.Reach.trans")

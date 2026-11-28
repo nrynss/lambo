@@ -83,7 +83,10 @@ model change may do all three), so it passes when no theorem changed form.
 
 The base is built from scratch unless the working tree has a `formal/.lake`:
 then the base starts from a copy of it and Lake rebuilds only the modules
-whose sources differ.
+whose sources differ. With `--only-form-changes` and no `--base-dump`, a
+change of `formal/lean-toolchain` between the base and the working tree
+skips the check (exit 0, saying so): CI has no elan, so it would build the
+base with the new Lean, from a build the new Lean must redo in full.
 
 Exit 0 when the only differences are the listed renames and deletions (and,
 with `--spec-form`, the theorems restated in Spec form), 1 otherwise. Needs
@@ -439,6 +442,21 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
     return errors, notes
 
 
+TOOLCHAIN = "formal/lean-toolchain"
+
+
+def toolchain_change(repo, base):
+    """`(base's, the working tree's)` Lean toolchain when they differ, else
+    None. A missing file at the base reads as no change: there is nothing to
+    compare it with."""
+    shown = subprocess.run(["git", "show", f"{base}:{TOOLCHAIN}"], cwd=repo, capture_output=True, text=True)
+    path = Path(repo) / TOOLCHAIN
+    if shown.returncode != 0 or not path.exists():
+        return None
+    old, new = shown.stdout.strip(), path.read_text(encoding="utf-8").strip()
+    return (old, new) if old != new else None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", default=".", help="repository root (default: .)")
@@ -456,6 +474,16 @@ def main(argv=None):
     ap.add_argument("--head-dump", help="reuse a dump of HEAD instead of building it")
     args = ap.parse_args(argv)
     repo = Path(args.repo).resolve()
+    if args.only_form_changes and not args.base_dump:
+        # CI has no elan: the base is built with the working tree's Lean, so a
+        # change of toolchain would build it with the wrong one, and from a
+        # copied build that the new Lean must redo in full.
+        bump = toolchain_change(repo, args.base)
+        if bump:
+            print(f"skipped: {TOOLCHAIN} differs between {args.base} ({bump[0]}) and the working tree "
+                  f"({bump[1]}), so the base cannot be built with this Lean; no theorem's form was "
+                  f"compared. Compare by hand, with elan, or pass --base-dump.")
+            return 0
     script = repo / "scripts" / "formal" / "DumpDecls.lean"
     work = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="decl-eq-"))
     work.mkdir(parents=True, exist_ok=True)
