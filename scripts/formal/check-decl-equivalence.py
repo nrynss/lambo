@@ -308,16 +308,20 @@ def statement_roots(dump, stmt, extra=()):
     return {n for n in roots | set(extra) if n in dump.all}
 
 
-def changed_definitions(bd, hd, bstmt, hstmt, h):
+def changed_definitions(bd, hd, bstmt, hstmt, b, h):
     """The definitions a restated theorem's statement reaches, transitively
     through definition bodies, that differ between base and HEAD: missing on
     one side, or of another kind, type or body. The two statements can print
     alike while a definition they mention changed underneath, so the same
-    statement would no longer say the same thing. HEAD's Spec proposition
-    also contributes the constants its body uses."""
-    prop = hd.all.get(h.get("spec") or "")
-    base = reached_definitions(bd, statement_roots(bd, bstmt))
-    head = reached_definitions(hd, statement_roots(hd, hstmt, (prop or {}).get("uses") or ()))
+    statement would no longer say the same thing. A side whose theorem `b`
+    (base) or `h` (HEAD) is in Spec form also contributes the constants its
+    proposition's body uses, looked up in that side's dump: the normalised
+    statement can name a generated constant by its hash, not by the
+    definitions it reaches."""
+    bprop = bd.all.get(b.get("spec") or "")
+    hprop = hd.all.get(h.get("spec") or "")
+    base = reached_definitions(bd, statement_roots(bd, bstmt, (bprop or {}).get("uses") or ()))
+    head = reached_definitions(hd, statement_roots(hd, hstmt, (hprop or {}).get("uses") or ()))
     out = []
     for n in sorted({bd.renames.get(x, x) for x in base} | head):
         old = next((x for x, y in bd.renames.items() if y == n), n)
@@ -349,7 +353,7 @@ def form_change(bd, hd, name, new, b, h):
         which = h.get("spec") or b.get("spec")
         return (f"{name}: statement changed: {which} does not unfold to the "
                 f"{'base' if h.get('spec') else 'HEAD'} statement\n{first_difference(bs, hs)}")
-    changed = changed_definitions(bd, hd, bs, hs, h if h.get("spec") else b if b.get("spec") else h)
+    changed = changed_definitions(bd, hd, bs, hs, b, h)
     if changed:
         return (f"{name}: statement changed: it prints as before, but a definition it reaches "
                 f"changed: {', '.join(changed)}")

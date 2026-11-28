@@ -365,6 +365,29 @@ class SpecForm(unittest.TestCase):
                                    flags=["--only-form-changes"])
         self.assertEqual(code, 0, out)
 
+    def test_each_sides_proposition_contributes_its_own_uses(self):
+        # The printed statement names no definition (a generated constant is
+        # normalised to a hash), but the proposition's body uses `g`. Whichever
+        # side is in Spec form, its proposition is looked up in its own dump
+        # and `g`'s change is found; leaving Spec form, it was looked up in
+        # HEAD's dump, where the proposition is gone, and `g` went unchecked.
+        g = decl("Lambo.A.g", kind="def", type_="Nat -> Nat", value="fun (x : Nat) => x")
+        g2 = dict(g, value="fun (x : Nat) => 0")
+        spec = in_spec_form(BASE + [g])
+        for d in spec:
+            if d["name"] == "Lambo.A.Spec.t":
+                d["uses"] = ["Lambo.A.g"]
+        spec2 = [dict(d, value=g2["value"]) if d["name"] == "Lambo.A.g" else d for d in spec]
+        for label, base, head in (("leaving", spec, BASE + [g2]), ("entering", BASE + [g], spec2)):
+            with self.subTest(label):
+                code, out = self.run_check(base, head, flags=["--only-form-changes"])
+                self.assertEqual(code, 1, out)
+                self.assertIn("Lambo.A.t: statement changed: it prints as before, but a definition it "
+                              "reaches changed: Lambo.A.g (body changed)", out)
+        # Unchanged, both directions pass.
+        self.assertEqual(self.run_check(spec, BASE + [g], flags=["--only-form-changes"])[0], 0)
+        self.assertEqual(self.run_check(BASE + [g], spec, flags=["--only-form-changes"])[0], 0)
+
     def test_a_toolchain_change_skips_only_form_changes(self):
         import subprocess
         with tempfile.TemporaryDirectory() as d:
