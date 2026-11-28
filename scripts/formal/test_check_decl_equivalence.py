@@ -216,6 +216,18 @@ class Equivalence(unittest.TestCase):
         # Unlisted, the same move is a deletion and an addition.
         self.assertEqual(self.run_check(BASE, head)[0], 1)
 
+    def test_a_move_before_the_base_is_not_compared(self):
+        listed = "Lambo.Old.helper\tLambo.A.helper\n"
+        code, out = self.run_check(BASE, BASE, listed)
+        self.assertEqual(code, 0, out)
+        # Its NEW gone too, or its OLD back at HEAD, it is an error.
+        head = [d for d in BASE if d["name"] != "Lambo.A.helper"]
+        code, out = self.run_check(head, head, listed)
+        self.assertEqual(code, 1)
+        self.assertIn("Lambo.Old.helper: listed as moved, but not declared at the base", out)
+        code, out = self.run_check(BASE, BASE + [decl("Lambo.Old.helper")], listed)
+        self.assertEqual(code, 1)
+
     def test_listed_move_must_keep_the_statement(self):
         lib = decl("Lambo.Lib.List.helper", type_="True", module="LamboProofs.Lib.List")
         head = [d for d in BASE if d["name"] != "Lambo.A.helper"] + [lib]

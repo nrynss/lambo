@@ -20,7 +20,9 @@ not the source text), and compares the two by fully qualified name:
   per line (a line starting with `#` is a comment), as a helper moved to the shared library:
   NEW must exist at HEAD with OLD's kind and type, and several OLD names may
   map to one NEW (duplicates merged). Names in FILE rewrite references in the
-  compared bodies too. A line whose OLD and NEW are the same name lists a
+  compared bodies too. FILE keeps every move, so an OLD declared neither at
+  the base nor at HEAD, with its NEW declared at HEAD, was moved before the
+  base and is not compared. A line whose OLD and NEW are the same name lists a
   declaration that went private or public, which otherwise fails (below);
 * a theorem may be missing at HEAD only when `--deletions FILE` lists it,
   one `NAME<TAB>REASON<TAB>KEPT` per line (a line starting with `#` is a
@@ -444,8 +446,10 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
         errors.append(f"{name}: {h['kind']} added at HEAD (not a listed move"
                       + (", nor the Spec proposition of a restated theorem)" if spec_form else ")"))
     for old, new in renames.items():
-        if old not in base:
+        if old not in base and (old in head or new not in head):
             errors.append(f"{old}: listed as moved, but not declared at the base")
+        # Otherwise, gone before the base with NEW in its place: FILE keeps
+        # every move, so a later base has some already made.
     for name, h in sorted(head.items()):
         if h["kind"] == "theorem":
             bad = set(h["axioms"] or []) - STANDARD_AXIOMS
