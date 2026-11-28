@@ -237,7 +237,9 @@ def read_renames(path):
         if not line:
             continue
         parts = [x.strip() for x in (line.split("\t") if "\t" in line else line.split())]
-        if len(parts) != 2 or not all(parts):
+        # Two fields of one word each: a note after NEW is refused, not read
+        # as part of NEW.
+        if len(parts) != 2 or any(len(x.split()) != 1 for x in parts):
             raise SystemExit(f"{path}: want OLD<TAB>NEW, got {raw!r}")
         old, new = parts
         if renames.get(old, new) != new:

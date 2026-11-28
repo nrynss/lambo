@@ -281,12 +281,15 @@ class Equivalence(unittest.TestCase):
         head = [d for d in BASE if d["name"] != "Lambo.A.helper"] + [lib]
         for rows, msg in (("Lambo.A.helper\tLambo.Lib.List.helper\tx\n", "want OLD<TAB>NEW"),
                           ("Lambo.A.helper\n", "want OLD<TAB>NEW"),
+                          ("Lambo.A.helper\tLambo.Lib.List.helper # note\n", "want OLD<TAB>NEW"),
+                          ("Lambo.A.helper x\tLambo.Lib.List.helper\n", "want OLD<TAB>NEW"),
                           ("Lambo.A.helper\tLambo.Lib.List.helper\nLambo.A.helper\tLambo.B.helper\n",
                            "Lambo.A.helper is listed as moved to both Lambo.Lib.List.helper and "
                            "Lambo.B.helper")):
-            with self.subTest(rows=rows), self.assertRaises(SystemExit) as cm:
-                self.run_check(BASE, head, rows)
-            self.assertIn(msg, str(cm.exception))
+            with self.subTest(rows=rows):
+                with self.assertRaises(SystemExit) as cm:
+                    self.run_check(BASE, head, rows)
+                self.assertIn(msg, str(cm.exception))
         # The same row twice is one move.
         rows = "Lambo.A.helper\tLambo.Lib.List.helper\n" * 2
         self.assertEqual(self.run_check(BASE, head, rows)[0], 0)
