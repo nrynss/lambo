@@ -23,6 +23,7 @@ Results:
 * `replay_dead_letter_two_restarts`: a rejected mixed batch settles the bad intent and
   leaves its neighbour owed once.
 * `fixed_sessionWide_stops`: a non-transient error that is not an input refusal stops the replay.
+* `stepInput_agrees`: outside an input refusal, `stepInput` is `replayStep`.
 
 Boundary: each replay step is atomic and a run's result is an input per
 write. A deferred agent stays deferred for the rest of the serve, and the
@@ -55,6 +56,12 @@ def stepInput (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
   match rr with
   | .run (.err .inputRefusal) => (.failed, s)
   | rr => replayStep image rr s
+
+/-- **On every result but an input refusal, `stepInput` is `replayStep`.** -/
+abbrev Spec.stepInput_agrees : Prop :=
+  ∀ (img : Bool) (rr : RR) (s : Streaks),
+    rr ≠ .run (.err .inputRefusal) →
+    stepInput img rr s = replayStep img rr s
 
 /-- The replay loop with its step as a parameter and no deferral: the loop
 `fixed_sessionWide_stops` is stated over. -/

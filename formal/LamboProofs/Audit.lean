@@ -440,6 +440,7 @@ open Lambo
 #print axioms Lambo.Drain.store_error_blocks_backlog
 -- input refusals, per-agent order and the in-session hold (#294, #295)
 #print axioms Lambo.Drain.replayStep_inputRefusal_stops
+#print axioms Lambo.Drain.stepInput_agrees
 #print axioms Lambo.Drain.stepInput_refusesInput
 #print axioms Lambo.Drain.stepInput_sessionWide
 #print axioms Lambo.Drain.fixed_sessionWide_stops

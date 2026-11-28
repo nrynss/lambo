@@ -39,7 +39,10 @@ receipt retention, eviction, the undelivered queue, delivery destinations and
 the live entry a replay inserts; the stale consumed-row skip at seeding; the
 adapters' purge of old consumed rows (never a pending one); counters, the
 ledger and logging; the lease fence at the flush (a fenced flush is refused
-at the store); `calibration.rs`.
+at the store); `calibration.rs`. `spawn_replay`'s step is `Replay.lean`'s
+`stepQ`: outside the arms its layers override (`badId`, `unknownFormat`,
+`inputRefusal`), the results here carry to it through `stepQ_agrees`,
+`stepFixed_agrees` and `stepInput_agrees`.
 -/
 
 import LamboProofs.Receipts
@@ -254,7 +257,7 @@ Pinned by `formal_constants_tests::drain`. -/
 def lookupTimeoutLimit : Nat := sickThreshold
 
 /-- The match on the run's result in `spawn_replay`, arm by arm in source
-order. -/
+order; `stepQ` (`Replay.lean`) overrides its `badId` and `inputRefusal` arms. -/
 def replayStep (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
   match rr with
   | .halt => (.stop .unset, s)

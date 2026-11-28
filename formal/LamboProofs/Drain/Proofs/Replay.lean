@@ -17,6 +17,13 @@ def OrderInv (rows : List Intent) (applied : List Job) : Prop :=
 
 /-! ## Input refusals -/
 
+theorem stepInput_agrees : Spec.stepInput_agrees := by
+  intro img rr s h
+  unfold stepInput
+  split
+  · exact absurd rfl h
+  · rfl
+
 /-- Every input refusal settles `failed`. -/
 theorem stepInput_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
     (stepInput img (.run (.err e)) s).1 = .failed := by
