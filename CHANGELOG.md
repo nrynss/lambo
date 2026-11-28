@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### Changes
+
+- Formal models: the drain model is in Spec and Proofs form (#350). Each
+  subsystem file under `formal/LamboProofs/Drain/` is now two:
+  `Drain/Spec/<File>.lean` holds the definitions and each guarantee about the
+  current Rust as a named proposition `Spec.<name>` with no proof (42 of
+  them), and `Drain/Proofs/<File>.lean` proves it as
+  `theorem <name> : Spec.<name>`, beside the lemmas the proofs need, which
+  are stated in full as before. `scripts/formal/check-decl-equivalence.py
+  --spec-form` checks that each proposition states exactly what its theorem
+  stated (the printed kernel terms are equal and every definition they reach
+  is unchanged). 13 theorems moved unchanged to `Drain/History.lean` (9:
+  results over layers the Rust has left behind, and the lemmas only they
+  use) and `Drain/Examples.lean` (4 findings). 32 theorems, with 17
+  definitions only they used, were deleted because they stated no guarantee
+  about the current Rust or a kept result states them: `rfl` unfoldings of a
+  definition's arms, the model compared with itself, and statements over the
+  first in-session hold model, the replay without its retry pass and rules
+  the Rust no longer runs (`formal/audit/deleted-theorems.tsv`, "#350 Spec
+  review"). The models now have 2,367 theorems, from 2,399; the four `Spec`
+  files are about 1,400 lines, against about 3,200 lines of proofs.
+  `--only-form-changes` runs the form comparison alone, definitions each
+  statement reaches included, on every pull request, and skips it, with a
+  CI warning, when `formal/lean-toolchain` changes; a `--renames` row older
+  than the base must name a declaration the base has.
+  `scripts/formal/audit-theorems.py --check` now also fails on a `Spec`
+  proposition that the theorem of its name does not prove, and on a
+  `Proofs` lemma that no proof outside `History.lean` and `Examples.lean`
+  uses. Docs anchors cite the propositions (`lean: Drain.Spec.<name>`) or
+  definitions, and the anchor check refuses a theorem or lemma of the proofs
+  layer. Claims ledger rows D-86, S-136a and S-136d are TESTED, not PROVEN:
+  the theorems they cited did not entail them or were `rfl` unfoldings,
+  since deleted. `formal/README.md`, "Reading a Spec file", describes the
+  form and when a theorem gets a proposition; the other models are not in
+  it yet. Earlier entries below name the drain files and theorems as they
+  were.
+
 ### Fixed
 
 - The in-process candle embedder answers a request its coalescer worker died

@@ -2,7 +2,7 @@
 """Check that a change to the Lean models restates nothing they prove.
 
   python3 -I scripts/formal/check-decl-equivalence.py [--base REF] [--renames FILE]
-      [--deletions FILE]
+      [--deletions FILE] [--spec-form | --only-form-changes]
       [--keep DIR] [--base-dump F] [--head-dump F]
 
 Builds the models at REF (default `origin/main`, exported with `git archive`
@@ -15,12 +15,25 @@ not the source text), and compares the two by fully qualified name:
   and type, as the kernel term (binder names included), so no theorem is
   weakened, strengthened, restated or deleted. Its proof may differ;
 * every definition, inductive, constructor and structure keeps its type, and
-  a definition its body, so the theorems still speak of the same things;
+  a definition its body, so the theorems still speak of the same things. An
+  inductive also keeps its recursor's type (`S.rec`, generated), the one
+  type that lists its constructors in order, so a reorder fails too;
 * a declaration may change name only when FILE lists it, one `OLD<TAB>NEW`
-  per line (a line starting with `#` is a comment), as a helper moved to the shared library:
-  NEW must exist at HEAD with OLD's kind and type, and several OLD names may
-  map to one NEW (duplicates merged). Names in FILE rewrite references in the
-  compared bodies too;
+  per line (a line starting with `#` is a comment), as a helper moved to the
+  shared library: NEW must exist at HEAD with OLD's kind and type, and
+  several OLD names may map to one NEW (duplicates merged), though one OLD
+  may not map to two. A row whose OLD is declared at the base is a move made
+  in this diff: it alone may add its NEW, and it renames OLD to NEW wherever
+  a base statement or body mentions it, in OLD itself and in each longer name
+  under `OLD.` that Lean generates for it (`OLD.casesOn`), never in a user
+  declaration under it or in a name that merely starts with OLD's text.
+  FILE keeps every move, so a row whose OLD is declared neither at the base
+  nor at HEAD, with its NEW declared at both, was moved before the base: it
+  is not compared and renames nothing. With its NEW declared at HEAD only it
+  is an error, since it would let NEW be added unchecked, and so is an OLD
+  that names a generated constant or a namespace. A line whose OLD and NEW
+  are the same name lists a declaration that went private or public, which
+  otherwise fails (below);
 * a theorem may be missing at HEAD only when `--deletions FILE` lists it,
   one `NAME<TAB>REASON<TAB>KEPT` per line (a line starting with `#` is a
   comment; a reason may contain `#`, as in an issue number): NAME is a
@@ -28,7 +41,11 @@ not the source text), and compares the two by fully qualified name:
   the theorem at HEAD that states the same thing or more (`-` when there is
   none, as for a dead helper). A definition (or other non-theorem) can be
   listed only when no declaration left at HEAD mentions it in its type or
-  value, so its deletion changes nothing the others state;
+  value, so its deletion changes nothing the others state. FILE keeps every
+  deletion, so a NAME declared neither at the base nor at HEAD was deleted
+  before the base: it is counted, not compared, and only its KEPT must still
+  be declared at HEAD. A name listed both here and as an OLD of the renames
+  FILE is an error;
 * no declaration is added at HEAD other than a NEW of FILE;
 * every theorem at HEAD rests on `propext`, `Quot.sound` and
   `Classical.choice` at most.
@@ -36,18 +53,65 @@ not the source text), and compares the two by fully qualified name:
 Which module a declaration lives in is reported (a summary of the moves), not
 compared, so splitting a model file into several is allowed. A private name
 is compared as its user-facing name (a declaration that goes private or
-public fails: that changes its kernel name), and a binder name without its macro
+public fails unless `--renames` lists it under its own name: that changes
+its kernel name, not what it is), and a binder name without its macro
 scopes (a hygienic name records the module it was elaborated in). Only declarations written in the source
-are compared; the constants Lean generates for them (`foo.proof_1`,
+are compared; the constants Lean generates for them (`foo._proof_1`,
 `foo.match_1`, `_auxLemma.N`, ...) are not, as their numbering follows the
-file layout. Nor are the syntax extensions a file declares (a `local
+file layout; only a recursor's type is, with its inductive (above). Nor are the syntax extensions a file declares (a `local
 notation`'s parser and unexpander, a `macro`'s rules: declarations whose type
 is `Lean.Macro`, `Lean.ParserDescr` and the like), whose names embed the
 module; they change no kernel term, and every statement that uses them is
 compared as the kernel term it elaborated to.
 
-Exit 0 when the only differences are the listed renames and deletions, 1
-otherwise. Needs
+`--spec-form` is for a change that puts a model into Spec and Proofs form
+(formal/README.md, "Reading a Spec file"): the statement of `theorem foo`
+moves into a definition `Spec.foo : Prop` and the theorem becomes `theorem foo
+: Spec.foo`, so its type is no longer the old term. With the flag, a theorem
+whose type differs passes when it changed form and still states the same
+thing:
+
+* its type at HEAD is exactly the definition `Lambo.<Model>.Spec.<name>`, for
+  the theorem `Lambo.<Model>.<name>`, of type `Prop`;
+* that definition's body, with the proofs Lean abstracted out of it
+  (`foo._proof_1`) put back, prints as the base's statement, as the kernel
+  term, and every definition that body reaches (transitively through
+  definition bodies) is unchanged. `DumpDecls.lean` does the unfolding in
+  Lean; its kernel check (`spec_rfl`) compares `Spec.foo` with that body in
+  the same environment, so it guards only the putting back of the proofs.
+  What makes `Spec.foo` say exactly what the old statement said is the equal
+  printed terms over unchanged definitions: nothing was weakened, no
+  hypothesis added, no conclusion dropped. The printed term names a bound
+  variable only where something refers to it, so a hypothesis written
+  `(h : P)` before and `P →` now compares equal;
+* the definition `Spec.foo` may be added at HEAD, but only as the statement
+  of the theorem of its name.
+
+A theorem that leaves Spec form is checked the same way round, and one in
+Spec form on both sides is compared as before: its type is the same constant,
+and that definition's body must not change. Everything else is as without
+the flag.
+
+`--only-form-changes` runs that one check and nothing else, for CI on every
+pull request: for each theorem declared on both sides whose statement is in
+Spec form on one side and spelled out on the other, the two statements must
+be the same, and so must every definition under `LamboProofs` the statement
+reaches, transitively through definition bodies (its kind, type and body):
+this mode compares no definition by itself, and a statement that prints as
+before says something else once a definition it mentions changed. A theorem
+added, deleted or restated without changing form is not its business (a
+model change may do all three), so it passes when no theorem changed form.
+
+The base is built from scratch unless the working tree has a `formal/.lake`:
+then the base starts from a copy of it and Lake rebuilds only the modules
+whose sources differ. With `--only-form-changes` and no `--base-dump`, a
+change of `formal/lean-toolchain` between the base and the working tree
+skips the check (exit 0, saying so, and under GitHub Actions also as a
+`::warning::` annotation): CI has no elan, so it would build the base with
+the new Lean, from a build the new Lean must redo in full.
+
+Exit 0 when the only differences are the listed renames and deletions (and,
+with `--spec-form`, the theorems restated in Spec form), 1 otherwise. Needs
 `lake` (`~/.elan/bin` on PATH, or LAKE set) and git.
 """
 
@@ -127,8 +191,26 @@ class Dump:
                 self.all[d["name"]] = d
                 if d["user"] and d["type"] not in SYNTAX_TYPES:
                     self.user[d["name"]] = d
-        self.renames = renames
+        # The moves made in this diff: the rows whose OLD is declared here. A
+        # row older than the base names no declaration of it, so it renames
+        # nothing. A match is a whole dotted name that is OLD or starts with
+        # `OLD.` (the longest such OLD), a universe instantiation after it
+        # left out (`Lambo.A.f.{1}`); see `_moved`.
+        self.renames = {old: new for old, new in renames.items() if old in self.user}
+        alts = sorted(self.renames, key=len, reverse=True)
+        self._rename = re.compile(r"(?<![\w.'])(" + "|".join(re.escape(a) for a in alts)
+                                  + r")((?:\.[^\s()\[\]{},:@.]+)*)(?![\w'])") if alts else None
         self._aux = {}
+
+    def _moved(self, m):
+        """A name under OLD (`Lambo.A.S.casesOn`, which Lean generates for
+        `Lambo.A.S`) moves with OLD, unless it is, or lies under, a user
+        declaration of its own below OLD (`Lambo.A.f.lem`), which stays."""
+        old, rest = m.group(1), m.group(2)
+        parts = rest.split(".")
+        if any(old + ".".join(parts[:k]) in self.user for k in range(2, len(parts) + 1)):
+            return m.group(0)
+        return self.renames[old] + rest
 
     def aux(self, name):
         if name not in self._aux:
@@ -143,22 +225,9 @@ class Dump:
             return None
         s = PRIVATE.sub("", s)
         s = AUX.sub(lambda m: self.aux(PRIVATE.sub("", m.group(0))), s)
-        if self.renames:
-            s = RENAME_RE(self.renames).sub(lambda m: self.renames[m.group(0)], s)
+        if self._rename:
+            s = self._rename.sub(self._moved, s)
         return s
-
-
-_rename_cache = {}
-
-
-def RENAME_RE(renames):
-    key = id(renames)
-    if key not in _rename_cache:
-        alts = sorted(renames, key=len, reverse=True)
-        _rename_cache[key] = re.compile(
-            r"(?<![\w.'])(?:" + "|".join(re.escape(a) for a in alts) + r")(?![\w'])"
-        )
-    return _rename_cache[key]
 
 
 def read_renames(path):
@@ -169,8 +238,15 @@ def read_renames(path):
         line = "" if raw.lstrip().startswith("#") else raw.strip()
         if not line:
             continue
-        old, new = line.split("\t") if "\t" in line else line.split()
-        renames[old.strip()] = new.strip()
+        parts = [x.strip() for x in (line.split("\t") if "\t" in line else line.split())]
+        # Two fields of one word each: a note after NEW is refused, not read
+        # as part of NEW.
+        if len(parts) != 2 or any(len(x.split()) != 1 for x in parts):
+            raise SystemExit(f"{path}: want OLD<TAB>NEW, got {raw!r}")
+        old, new = parts
+        if renames.get(old, new) != new:
+            raise SystemExit(f"{path}: {old} is listed as moved to both {renames[old]} and {new}")
+        renames[old] = new
     return renames
 
 
@@ -206,15 +282,184 @@ def mentioned_by(dump, name):
                   if pat.search(d["type"] or "") or pat.search(str(d["value"] or "")))
 
 
-def compare(bd, hd, renames, deletions=None):
+def recursor_change(bd, hd, old, new, deleted=()):
+    """For an inductive `old` at the base, `new` at HEAD: where its recursor's
+    type first differs, or None. The recursor takes one minor premise per
+    constructor in their order, which no other type records: reordered
+    constructors keep every compared type and change what `S.rec`, `casesOn`
+    applied positionally, `ctorIdx` or a derived `Ord` mean. Checked only when
+    both sides have the same constructors (by name after the moves, a base one
+    in `deleted` left out, and by type); otherwise a constructor itself is
+    reported."""
+    def ctors(dump, name):
+        return {c for c in dump.all[name]["uses"] or []
+                if c.startswith(name + ".") and dump.all.get(c, {}).get("kind") == "ctor"}
+    bc = {bd.renames.get(c, c): c for c in ctors(bd, old) if c not in deleted}
+    if set(bc) != ctors(hd, new) or any(bd.norm(bd.all[c]["type"]) != hd.norm(hd.all[n]["type"])
+                                         for n, c in bc.items()):
+        return None
+    bt = bd.norm((bd.all.get(old + ".rec") or {}).get("type")) or ""
+    ht = hd.norm((hd.all.get(new + ".rec") or {}).get("type")) or ""
+    return first_difference(bt, ht) if bt != ht else None
+
+
+def spec_name(name):
+    """The Spec proposition of a theorem: `Lambo.Drain.Spec.foo` for
+    `Lambo.Drain.foo` (`Spec` goes after the model's namespace)."""
+    parts = name.split(".")
+    return ".".join(parts[:2] + ["Spec"] + parts[2:]) if len(parts) > 2 else None
+
+
+def statement(dump, name, d):
+    """What a theorem states, as the kernel term, and the error if it is in
+    Spec form but not well formed: its `Spec` definition's body when its type
+    is that definition, its type otherwise."""
+    if not d.get("spec"):
+        return dump.norm(d["type"]), None
+    if d["spec"] != spec_name(name):
+        return None, (f"{name}: stated as {d['spec']}, but its Spec proposition must be "
+                      f"{spec_name(name)}")
+    if not d.get("spec_rfl"):
+        return None, f"{name}: the kernel does not accept {d['spec']} as its own body"
+    return dump.norm(d["stmt"]), None
+
+
+# A constant's name in a printed kernel term: the text between separators,
+# with a universe instantiation (`Eq.{1}` prints as `Eq.` then `{1}`) cut off.
+NAME_TOKEN = re.compile(r"[^\s()\[\]{},:@]+")
+
+
+def reached_definitions(dump, roots):
+    """The constants of `dump` other than theorems that `roots` reach, through
+    the bodies of definitions: what a statement mentioning `roots` means. A
+    theorem is not followed (its value is a proof, not a meaning), and a
+    constant outside the dump (Lean's own library) ends the walk."""
+    seen, stack = set(), list(roots)
+    while stack:
+        n = stack.pop()
+        if n in seen:
+            continue
+        d = dump.all.get(n)
+        if d is None or d["kind"] == "theorem":
+            continue
+        seen.add(n)
+        stack.extend(d["uses"] or [])
+    return seen
+
+
+def statement_roots(dump, stmt, extra=()):
+    """The constants of `dump` that a normalised statement names, and `extra`.
+    A move's NEW in the statement stands for every OLD that `dump` renames to
+    it."""
+    roots = {tok.rstrip(".") for tok in NAME_TOKEN.findall(stmt or "")}
+    roots |= {old for old, new in dump.renames.items() if new in roots}
+    return {n for n in roots | set(extra) if n in dump.all}
+
+
+def changed_definitions(bd, hd, bstmt, hstmt, b, h):
+    """The definitions a restated theorem's statement reaches, transitively
+    through definition bodies, that differ between base and HEAD: missing on
+    one side, or of another kind, type or body. The two statements can print
+    alike while a definition they mention changed underneath, so the same
+    statement would no longer say the same thing. A side whose theorem `b`
+    (base) or `h` (HEAD) is in Spec form also contributes the constants its
+    proposition's body uses, looked up in that side's dump: the normalised
+    statement can name a generated constant by its hash, not by the
+    definitions it reaches."""
+    bprop = bd.all.get(b.get("spec") or "")
+    hprop = hd.all.get(h.get("spec") or "")
+    base = reached_definitions(bd, statement_roots(bd, bstmt, (bprop or {}).get("uses") or ()))
+    head = reached_definitions(hd, statement_roots(hd, hstmt, (hprop or {}).get("uses") or ()))
+    # (base name, HEAD name) pairs: each reached base constant with where it
+    # went (`bd.renames` holds only the moves made in this diff), then each
+    # reached HEAD constant no reached base one went to, with every base
+    # constant that went there (None when there is none). Several OLDs merged
+    # into one NEW are each compared with it.
+    pairs = {(x, bd.renames.get(x, x)) for x in base}
+    went = {n for _, n in pairs}
+    for n in head - went:
+        olds = [x for x, y in bd.renames.items() if y == n]
+        if n in bd.all and n not in bd.renames:
+            olds.append(n)
+        pairs |= {(x, n) for x in olds or [None]}
+    out = []
+    for old, n in sorted(pairs, key=lambda p: (p[1], p[0] or "")):
+        b, a = bd.all.get(old) if old else None, hd.all.get(n)
+        if (b or a) and not (b or a)["user"]:
+            # A generated constant (a matcher, an equation lemma) is compared
+            # through the user declaration it belongs to; a recursor with its
+            # inductive, below.
+            continue
+        label = n if old in (None, n) else f"{old} -> {n}"
+        if b is None or a is None:
+            out.append(f"{label} (declared at {'HEAD' if b is None else 'the base'} only)")
+        elif b["kind"] != a["kind"]:
+            out.append(f"{label} (kind changed)")
+        elif bd.norm(b["type"]) != hd.norm(a["type"]):
+            out.append(f"{label} (type changed)")
+        elif bd.norm(b["value"]) != hd.norm(a["value"]):
+            out.append(f"{label} (body changed)")
+        elif b["kind"] == "inductive" and recursor_change(bd, hd, old, n):
+            out.append(f"{label} (constructors reordered: its recursor's type changed)")
+    return out
+
+
+def form_change(bd, hd, name, new, b, h):
+    """For a theorem in Spec form on one side only: None when both sides state
+    the same thing, else the error. The statements must print alike, and
+    every definition they reach must be unchanged."""
+    bs, berr = statement(bd, name, b)
+    hs, herr = statement(hd, new, h)
+    if berr or herr:
+        return berr or herr
+    if bs != hs:
+        which = h.get("spec") or b.get("spec")
+        return (f"{name}: statement changed: {which} does not unfold to the "
+                f"{'base' if h.get('spec') else 'HEAD'} statement\n{first_difference(bs, hs)}")
+    changed = changed_definitions(bd, hd, bs, hs, b, h)
+    if changed:
+        return (f"{name}: statement changed: it prints as before, but a definition it reaches "
+                f"changed: {', '.join(changed)}")
+    return None
+
+
+def compare_forms(bd, hd):
+    """`--only-form-changes`: the theorems declared on both sides whose
+    statement is in Spec form on one side only."""
+    errors, restated = [], []
+    for name, b in sorted(bd.user.items()):
+        h = hd.user.get(name)
+        if h is None or b["kind"] != "theorem" or h["kind"] != "theorem":
+            continue
+        if bool(b.get("spec")) == bool(h.get("spec")):
+            continue
+        err = form_change(bd, hd, name, name, b, h)
+        if err:
+            errors.append(err)
+        else:
+            restated.append(name)
+    return errors, restated
+
+
+def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
     base, head = bd.user, hd.user
     deletions = deletions or {}
     errors, notes = [], []
-    targets = set(renames.values())
+    restated = [] if restated is None else restated
+    # Only a move made in this diff (`bd.renames`) may add its NEW; a move
+    # made before the base has its NEW declared there already. A deleted OLD
+    # is not compared, so it admits no NEW, and listing it as both is an error.
+    targets = {new for old, new in bd.renames.items() if old not in deletions}
+    for old in sorted(set(renames) & set(deletions)):
+        errors.append(f"{old}: listed both as moved to {renames[old]} and as deleted")
     for name, (reason, kept) in sorted(deletions.items()):
         b = base.get(name)
-        if b is None:
+        if b is None and name in head:
             errors.append(f"{name}: listed as deleted, but not declared at the base")
+        elif b is None:
+            # Deleted before the base: the file keeps every deletion, so a
+            # later base has some already gone. Only its KEPT is checked.
+            pass
         elif b["kind"] != "theorem":
             users = mentioned_by(hd, name)
             if users:
@@ -229,7 +474,7 @@ def compare(bd, hd, renames, deletions=None):
             continue
         new = renames.get(name, name)
         h = head.get(new)
-        if name in renames and name in head:
+        if name in renames and name in head and new != name:
             errors.append(f"{name}: listed as moved to {new}, but still declared")
             continue
         if h is None:
@@ -242,20 +487,52 @@ def compare(bd, hd, renames, deletions=None):
             errors.append(f"{name}: universe parameters {b['levels']} -> {h['levels']}")
         bt, ht = bd.norm(b["type"]), hd.norm(h["type"])
         if bt != ht:
-            errors.append(f"{name}: statement changed\n{first_difference(bt, ht)}")
+            changed_form = (b["kind"] == h["kind"] == "theorem"
+                            and bool(b.get("spec")) != bool(h.get("spec")))
+            if spec_form and changed_form:
+                err = form_change(bd, hd, name, new, b, h)
+                if err:
+                    errors.append(err)
+                else:
+                    restated.append(new)
+            else:
+                errors.append(f"{name}: statement changed\n{first_difference(bt, ht)}"
+                              + ("\n    (it changed form: --spec-form compares the statement behind "
+                                 "a Spec proposition)" if changed_form else ""))
         if b["kind"] != "theorem" and bd.norm(b["value"]) != hd.norm(h["value"]):
             errors.append(f"{name}: definition body changed")
-        if b["private"] != h["private"]:
+        diff = b["kind"] == h["kind"] == "inductive" and recursor_change(bd, hd, name, new, deletions)
+        if diff:
+            errors.append(f"{name}: constructors reordered or deleted: its recursor's type changed\n{diff}")
+        if b["private"] != h["private"] and renames.get(name) != name:
             # A private name is `_private.<module>.0.<name>` in the kernel, so
             # going private or public renames the declaration.
             errors.append(f"{name}: {'private' if b['private'] else 'public'} at the base, "
                           f"{'private' if h['private'] else 'public'} at HEAD")
+    # A Spec proposition may be added only as the statement of the theorem of
+    # its name, restated from the base.
+    stated = {head[n]["spec"] for n in restated if head[n].get("spec")}
     for name in sorted(set(head) - set(base)):
-        if name not in targets:
-            errors.append(f"{name}: {head[name]['kind']} added at HEAD (not a listed move)")
+        if name in targets:
+            continue
+        h = head[name]
+        if spec_form and name in stated and h["kind"] == "def" and h["type"] == "Prop":
+            continue
+        errors.append(f"{name}: {h['kind']} added at HEAD (not a listed move"
+                      + (", nor the Spec proposition of a restated theorem)" if spec_form else ")"))
     for old, new in renames.items():
-        if old not in base:
+        if old not in base and old not in head and (old in bd.all or old in hd.all):
+            errors.append(f"{old}: listed as moved, but a constant Lean generates or a syntax "
+                          f"extension, not a declaration the check compares")
+        elif old not in base and old not in head and any(
+                n.startswith(old + ".") for n in (*bd.all, *hd.all)):
+            errors.append(f"{old}: listed as moved, but it names a namespace, not a declaration")
+        elif old not in base and (old in head or new not in head):
             errors.append(f"{old}: listed as moved, but not declared at the base")
+        elif old not in base and new not in base:
+            errors.append(f"{old}: listed as moved before the base, but {new} is not declared at the base")
+        # Otherwise, gone before the base with NEW in its place: FILE keeps
+        # every move, so a later base has some already made.
     for name, h in sorted(head.items()):
         if h["kind"] == "theorem":
             bad = set(h["axioms"] or []) - STANDARD_AXIOMS
@@ -264,17 +541,52 @@ def compare(bd, hd, renames, deletions=None):
     return errors, notes
 
 
+TOOLCHAIN = "formal/lean-toolchain"
+
+
+def toolchain_change(repo, base):
+    """`(base's, the working tree's)` Lean toolchain when they differ, else
+    None. A missing file at the base reads as no change: there is nothing to
+    compare it with."""
+    shown = subprocess.run(["git", "show", f"{base}:{TOOLCHAIN}"], cwd=repo, capture_output=True, text=True)
+    path = Path(repo) / TOOLCHAIN
+    if shown.returncode != 0 or not path.exists():
+        return None
+    old, new = shown.stdout.strip(), path.read_text(encoding="utf-8").strip()
+    return (old, new) if old != new else None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", default=".", help="repository root (default: .)")
     ap.add_argument("--base", default="origin/main", help="git ref to compare against")
     ap.add_argument("--renames", help="OLD<TAB>NEW lines: helpers moved to the shared library")
     ap.add_argument("--deletions", help="NAME<TAB>REASON<TAB>KEPT lines: theorems deleted on purpose")
+    form = ap.add_mutually_exclusive_group()
+    form.add_argument("--spec-form", action="store_true",
+                      help="accept a theorem restated as `theorem foo : Spec.foo` when Spec.foo unfolds "
+                           "to its old statement, and the Spec propositions added for them")
+    form.add_argument("--only-form-changes", action="store_true",
+                      help="check only the theorems whose statement moved into or out of Spec form")
     ap.add_argument("--keep", help="write the two dumps into this directory")
     ap.add_argument("--base-dump", help="reuse a dump of the base instead of building it")
     ap.add_argument("--head-dump", help="reuse a dump of HEAD instead of building it")
     args = ap.parse_args(argv)
     repo = Path(args.repo).resolve()
+    if args.only_form_changes and not args.base_dump:
+        # CI has no elan: the base is built with the working tree's Lean, so a
+        # change of toolchain would build it with the wrong one, and from a
+        # copied build that the new Lean must redo in full.
+        bump = toolchain_change(repo, args.base)
+        if bump:
+            print(f"skipped: {TOOLCHAIN} differs between {args.base} ({bump[0]}) and the working tree "
+                  f"({bump[1]}), so the base cannot be built with this Lean; no theorem's form was "
+                  f"compared. Compare by hand, with elan, or pass --base-dump.")
+            if os.environ.get("GITHUB_ACTIONS"):
+                # A step that passes is not read: say so on the run's summary.
+                print(f"::warning::the form-change check did not run: {TOOLCHAIN} changed between "
+                      f"{args.base} and the working tree, so no theorem's form was compared")
+            return 0
     script = repo / "scripts" / "formal" / "DumpDecls.lean"
     work = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="decl-eq-"))
     work.mkdir(parents=True, exist_ok=True)
@@ -289,14 +601,33 @@ def main(argv=None):
             arch = subprocess.run(["git", "archive", "--format=tar", args.base, "formal"],
                                   cwd=repo, check=True, capture_output=True).stdout
             subprocess.run(["tar", "-x", "-C", str(tree)], input=arch, check=True)
+            built = repo / "formal" / ".lake"
+            if built.is_dir():
+                # Start the base from the working tree's build: Lake rebuilds
+                # only the modules whose sources differ.
+                shutil.copytree(built, tree / "formal" / ".lake", symlinks=True)
             dump(tree / "formal", script, base_dump.resolve())
         if not args.head_dump:
             dump(repo / "formal", script, head_dump.resolve())
         renames = read_renames(args.renames)
         bd, hd = Dump(base_dump, renames), Dump(head_dump, {})
         base, head = bd.user, hd.user
+        if args.only_form_changes:
+            errors, restated = compare_forms(bd, hd)
+            print(f"base {args.base}: {len(restated) + len(errors)} theorem(s) changed form")
+            for n in restated:
+                print(f"  restated  {n}")
+            if errors:
+                print(f"{len(errors)} difference(s):", file=sys.stderr)
+                for e in errors:
+                    print(f"  {e}", file=sys.stderr)
+                return 1
+            print("equivalent: every theorem that moved into or out of Spec form states what it stated"
+                  if restated else "no theorem changed form")
+            return 0
         deletions = read_deletions(args.deletions)
-        errors, notes = compare(bd, hd, renames, deletions)
+        restated = []
+        errors, notes = compare(bd, hd, renames, deletions, spec_form=args.spec_form, restated=restated)
         kinds = Counter(d["kind"] for d in base.values())
         moved = Counter((b["module"], head[renames.get(n, n)]["module"])
                         for n, b in base.items()
@@ -309,10 +640,17 @@ def main(argv=None):
             print(f"  renamed {len(renames)} (moved helpers):")
             for old, new in sorted(renames.items()):
                 print(f"    {old} -> {new}")
-        if deletions:
-            print(f"  deleted {len(deletions)}:")
-            for name, (reason, kept) in sorted(deletions.items()):
+        now = {n: v for n, v in deletions.items() if n in base}
+        if now:
+            print(f"  deleted {len(now)}:")
+            for name, (reason, kept) in sorted(now.items()):
                 print(f"    {name}: {reason}" + (f" (kept: {kept})" if kept else ""))
+        if len(now) < len(deletions):
+            print(f"  {len(deletions) - len(now)} listed deletion(s) predate the base")
+        if restated:
+            by_model = Counter(".".join(n.split(".")[:2]) for n in restated)
+            print(f"  restated {len(restated)} in Spec form, each unfolding to its old statement: "
+                  + ", ".join(f"{k} {v}" for k, v in sorted(by_model.items())))
         for n in notes:
             print(f"  note: {n}")
         if errors:
@@ -322,6 +660,7 @@ def main(argv=None):
             return 1
         print("equivalent: every statement and definition unchanged"
               + (" but the listed moves and deletions" if renames or deletions else "")
+              + (", the restated theorems as their Spec propositions unfold" if restated else "")
               + "; theorems rest on standard axioms only")
         return 0
     finally:

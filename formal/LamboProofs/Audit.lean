@@ -29,10 +29,14 @@ import LamboProofs.Conflict.Contradiction
 import LamboProofs.Hotlist.List
 import LamboProofs.Hotlist.Recall
 import LamboProofs.Hotlist.Cycle
-import LamboProofs.Drain.Base
-import LamboProofs.Drain.Replay
-import LamboProofs.Drain.Worker
-import LamboProofs.Drain.Close
+import LamboProofs.Drain.Spec.Base
+import LamboProofs.Drain.Proofs.Base
+import LamboProofs.Drain.Spec.Replay
+import LamboProofs.Drain.Proofs.Replay
+import LamboProofs.Drain.Spec.Worker
+import LamboProofs.Drain.Proofs.Worker
+import LamboProofs.Drain.Spec.Close
+import LamboProofs.Drain.Proofs.Close
 import LamboProofs.Drain.Examples
 import LamboProofs.Drain.History
 import LamboProofs.Flush.Retry
@@ -436,17 +440,11 @@ open Lambo
 #print axioms Lambo.Drain.store_error_blocks_backlog
 -- input refusals, per-agent order and the in-session hold (#294, #295)
 #print axioms Lambo.Drain.replayStep_inputRefusal_stops
-#print axioms Lambo.Drain.loopWith_replayStep
-#print axioms Lambo.Drain.replayWith_replayStep
 #print axioms Lambo.Drain.stepInput_agrees
-#print axioms Lambo.Drain.stepInput_inputRefusal
 #print axioms Lambo.Drain.stepInput_refusesInput
 #print axioms Lambo.Drain.stepInput_sessionWide
-#print axioms Lambo.Drain.fixed_input_goes_on
 #print axioms Lambo.Drain.fixed_sessionWide_stops
-#print axioms Lambo.Drain.fixed_agrees_with_worker
 #print axioms Lambo.Drain.stepFixed_agrees
-#print axioms Lambo.Drain.stepFixed_badId
 #print axioms Lambo.Drain.stepFixed_refusesInput
 #print axioms Lambo.Drain.stepFixed_skip
 #print axioms Lambo.Drain.loopD_deferred
@@ -460,8 +458,6 @@ open Lambo
 #print axioms Lambo.Drain.replayD_facts
 #print axioms Lambo.Drain.replayD_applied_pending
 #print axioms Lambo.Drain.mem_eq_of_key
-#print axioms Lambo.Drain.fixed_agent_order
-#print axioms Lambo.Drain.fixed_badId_settled
 #print axioms Lambo.Drain.fixedD_input_goes_on
 #print axioms Lambo.Drain.minE_spec
 #print axioms Lambo.Drain.minE_self
@@ -478,26 +474,13 @@ open Lambo
 #print axioms Lambo.Drain.fixedLoad_sorted
 #print axioms Lambo.Drain.fixedLoad_epochs
 #print axioms Lambo.Drain.fixedLoad_agrees
-#print axioms Lambo.Drain.fixed_epoch_seq_order
-#print axioms Lambo.Drain.fixed_agent_order_load
 #print axioms Lambo.Drain.orderInv_perm
 #print axioms Lambo.Drain.applyMut_jobs
 #print axioms Lambo.Drain.foldl_jobs
 #print axioms Lambo.Drain.loopD_preserves
 #print axioms Lambo.Drain.replayD_preserves
-#print axioms Lambo.Drain.drainHeld_split
-#print axioms Lambo.Drain.drainHeld_clears
-#print axioms Lambo.Drain.filter_agent_of_all
-#print axioms Lambo.Drain.arriveH_split
-#print axioms Lambo.Drain.workH_split
-#print axioms Lambo.Drain.hold_split
 #print axioms Lambo.Drain.pairwise_of_agent_filters
-#print axioms Lambo.Drain.session_orderInv
-#print axioms Lambo.Drain.hold_then_serve_order
-#print axioms Lambo.Drain.arriveH_clears
 #print axioms Lambo.Drain.stepQ_agrees
-#print axioms Lambo.Drain.stepQ_badId
-#print axioms Lambo.Drain.stepQ_unknownFormat
 #print axioms Lambo.Drain.stepQ_skip
 #print axioms Lambo.Drain.serveQ_block
 #print axioms Lambo.Drain.serveQ_log
@@ -507,7 +490,6 @@ open Lambo
 #print axioms Lambo.Drain.replayP_preserves
 #print axioms Lambo.Drain.loopD_settles
 #print axioms Lambo.Drain.replayP_progress
-#print axioms Lambo.Drain.hold_then_serveQ_order
 #print axioms Lambo.Drain.ofAgent_append
 #print axioms Lambo.Drain.ofAgent_cons
 #print axioms Lambo.Drain.ofAgent_nil
@@ -526,8 +508,6 @@ open Lambo
 #print axioms Lambo.Drain.finishW_caps
 #print axioms Lambo.Drain.stepW_caps
 #print axioms Lambo.Drain.runW_caps
-#print axioms Lambo.Drain.stepW_caps_free
-#print axioms Lambo.Drain.refused_wakes
 #print axioms Lambo.Drain.retry_settles_head
 #print axioms Lambo.Drain.retry_enabled
 #print axioms Lambo.Drain.stepW_fenced
@@ -536,20 +516,16 @@ open Lambo
 #print axioms Lambo.Drain.serveR_reported
 #print axioms Lambo.Drain.serveR_log
 #print axioms Lambo.Drain.sessionW_then_serve_order
-#print axioms Lambo.Drain.drain_extends_taken
 #print axioms Lambo.Drain.work_log
 #print axioms Lambo.Drain.drained_final
 #print axioms Lambo.Drain.workerStep_atomic
 #print axioms Lambo.Drain.loop_facts
 #print axioms Lambo.Drain.close_answer
 #print axioms Lambo.Drain.retry_upgrades
-#print axioms Lambo.Drain.drop_settles_nothing
 #print axioms Lambo.Drain.replay_applied_pending
 #print axioms Lambo.Drain.replay_order
 #print axioms Lambo.Drain.load_seq_order
 #print axioms Lambo.Drain.load_epoch_seq_order
-#print axioms Lambo.Drain.replayStep_cycle
-#print axioms Lambo.Drain.replayStep_decode
 #print axioms Lambo.Drain.unavailable_skips
 #print axioms Lambo.Drain.unavailable_stops
 #print axioms Lambo.Drain.outage_failed_but_owed
@@ -588,10 +564,8 @@ open Lambo
 #print axioms Lambo.Drain.closeD_vouches_only_committed
 #print axioms Lambo.Drain.closeD_durable_iff
 #print axioms Lambo.Drain.closeD_retryD
-#print axioms Lambo.Drain.closeD_keptDropped
 #print axioms Lambo.Drain.keptAtConsume_vouches_after_panic
 #print axioms Lambo.Drain.runP_inv
-#print axioms Lambo.Drain.settlePrune_never_vouches_dropped
 #print axioms Lambo.Drain.settlePrune_exact
 #print axioms Lambo.Drain.settlePrune_unsettled_bounded
 #print axioms Lambo.Drain.settlePrune_settled_forgotten

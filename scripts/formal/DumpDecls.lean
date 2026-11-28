@@ -4,7 +4,7 @@ scripts/formal/check-decl-equivalence.py and scripts/formal/audit-theorems.py.
 
   cd formal && lake env lean --run ../scripts/formal/DumpDecls.lean OUT.jsonl MOD...
 
-MOD is each module to import (`LamboProofs.Drain.Base`, ...). Every constant
+MOD is each module to import (`LamboProofs.Drain.Spec.Base`, ...). Every constant
 whose module is under `LamboProofs` is written, auxiliary ones included, as
 
   {"name", "private", "module", "kind", "user", "line", "span", "levels",
@@ -12,7 +12,7 @@ whose module is under `LamboProofs` is written, auxiliary ones included, as
 
 `user` is true when the declaration has a source range: the elaborator gives
 one to every declaration written in the source, and none to the constants it
-generates (`foo.proof_1`, `foo.match_1`, `foo.eq_1`, `_auxLemma`, recursors,
+generates (`foo._proof_1`, `foo.match_1`, `foo.eq_1`, `_auxLemma`, recursors,
 ...). `line` is the line of its name in its module's source, and `span` the
 first and last lines of its declaration, doc comment included. `type` is the
 kernel type as `Expr.dbgToString` prints it, so binder names count; `value`
@@ -23,7 +23,17 @@ erased (`clean`); a generated constant's binders are named by depth instead
 universe parameters by position, so two declarations have the same shape
 exactly when they state the same thing (for finding duplicated lemmas).
 `uses` is every constant the type and value mention. `axioms` (theorems
-only) is what `#print axioms` would answer. After the constants comes one
+only) is what `#print axioms` would answer. A theorem stated in Spec form
+(`theorem foo : Spec.foo`, its type exactly a `Prop`-valued definition with a
+name component `Spec`) also has `spec`, that definition's name; `stmt` and
+`stmt_shape`, the definition's body printed as `type` and `shape` are, which
+is the statement the theorem proves, spelled out; and `spec_rfl`, whether the
+kernel accepts `Spec.foo` and that body as definitionally equal. That body is
+`Spec.foo`'s own value in this environment, so the kernel check guards only
+the inlining of abstracted proofs (`inlineAuxProofs`), not the statement:
+that a restated theorem states what it stated rests on
+`check-decl-equivalence.py` finding the printed body equal to the base's
+printed statement, with every definition it reaches unchanged. After the constants comes one
 `{"record": "module", "module", "fnv1a64"}` line per module: the FNV-1a hash
 of the source file it was dumped from (run from `formal/`). Names are printed as Lean prints
 them; a private name is printed as its user-facing name, with "private":
@@ -44,6 +54,47 @@ def kindOf : ConstantInfo → String
   | .recInfo _ => "rec"
 
 def userName (n : Name) : Name := (privateToUserName? n).getD n
+
+/-- Whether `n` is a proof Lean abstracted out of a definition's body
+(`foo._proof_1`). -/
+def isAuxProof : Name → Bool
+  | .str _ s => s.startsWith "_proof_"
+  | _ => false
+
+/-- `e` with every abstracted proof (`foo._proof_1 a b`) replaced by the proof
+it stands for. Lean abstracts the proofs nested in a definition's body into
+such constants and leaves a theorem's statement as written, so the same
+statement reads differently as a `Spec` definition's body. -/
+partial def inlineAuxProofs (env : Environment) (e : Expr) : Expr :=
+  e.replace fun e =>
+    match e.getAppFn with
+    | .const n us =>
+      if isAuxProof n then
+        match env.find? n with
+        | some (.thmInfo t) =>
+          some (inlineAuxProofs env
+            ((t.value.instantiateLevelParams t.levelParams us).beta e.getAppArgs))
+        | _ => none
+      else none
+    | _ => none
+
+/-- The proposition a theorem in Spec form proves, with its body: `type` is
+exactly a constant whose name has a component `Spec` and which is a
+definition of type `Prop`. The body has the constant's universe levels put
+in and its abstracted proofs put back, so it is the statement `type`
+abbreviates, as a theorem would state it. -/
+def specOf (env : Environment) (type : Expr) : Option (Name × Expr) :=
+  match type with
+  | .const n us =>
+    if (userName n).components.contains `Spec then
+      match env.find? n with
+      | some (.defnInfo d) =>
+        if d.type.isProp then
+          some (n, inlineAuxProofs env (d.value.instantiateLevelParams d.levelParams us))
+        else none
+      | _ => none
+    else none
+  | _ => none
 
 /-- `e` with every binder name's macro scopes erased: a hygienic binder name
 (`x._@.LamboProofs.Drain.2566094802._hygCtx._hyg.25`, from `(·.key)`) names
@@ -111,7 +162,22 @@ def main (args : List String) : IO UInt32 := do
           let (axs, _) ← (collectAxioms c : CoreM _).toIO ctx { env }
           pure (toJson (axs.toList.map toString))
         | _ => pure Json.null
-      let j := Json.mkObj [
+      let shapeOf (e : Expr) : String :=
+        toString (canon 0 (e.instantiateLevelParams ci.levelParams
+          ((List.range ci.levelParams.length).map fun i => .param (.mkSimple s!"u{i}"))))
+      let spec := match ci with
+        | .thmInfo _ => specOf env ci.type
+        | _ => none
+      let specFields := match spec with
+        | some (s, body) => [
+            ("spec", toJson (toString (userName s))),
+            ("stmt", toJson (toString (norm body))),
+            ("stmt_shape", toJson (shapeOf body)),
+            ("spec_rfl", toJson (match Kernel.isDefEq env {} ci.type body with
+              | .ok b => b
+              | .error _ => false))]
+        | none => []
+      let j := Json.mkObj <| specFields ++ [
         ("name", toJson (toString (userName c))),
         ("private", toJson (isPrivateName c)),
         ("module", toJson (toString mod)),
@@ -121,8 +187,7 @@ def main (args : List String) : IO UInt32 := do
         ("span", span),
         ("levels", toJson (ci.levelParams.map toString)),
         ("type", toJson (toString (norm ci.type))),
-        ("shape", toJson (toString (canon 0 (ci.type.instantiateLevelParams ci.levelParams
-          ((List.range ci.levelParams.length).map fun i => .param (.mkSimple s!"u{i}")))))),
+        ("shape", toJson (shapeOf ci.type)),
         ("value", value),
         ("uses", toJson uses),
         ("axioms", axioms)]

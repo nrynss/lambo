@@ -165,7 +165,7 @@ impl ConsumeStamp {
 /// settles (`Graph::settled_write`, in the worker's settle), not at its
 /// consume, and the flush's note skips a put only when its write is consumed
 /// and no longer in the record, that is, settled (Lean:
-/// `Drain.settlePrune_never_vouches_dropped`; pruning at the consume,
+/// `Drain.settlePrune_exact`; pruning at the consume,
 /// `Drain.keptAtConsume_vouches_after_panic`). The replay passes no
 /// `WorkerCommit`: its writes are earlier processes', whose puts are not in
 /// this process's log.
@@ -177,8 +177,7 @@ impl ConsumeStamp {
 /// falls before both or after both. Reset later (the `Ok` arm, or the settle
 /// block before that), a timeout another lane met in between counted toward
 /// the old run (Lean: `Drain.streak_okArm_counts_across_commit`,
-/// `Drain.streak_old_counts_across_commit`; the fix,
-/// `Drain.streakNew_eq_runSince`).
+/// `Drain.streak_old_counts_across_commit`; the fix, `Drain.heldNew_iff`).
 ///
 /// Lock order: graph write, then lanes, as admission nests them
 /// (`WritePipeline::admit`); no path takes the lanes lock and then the

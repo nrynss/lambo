@@ -197,6 +197,38 @@ class Lean(Fixture):
         self.assertEqual(len(errors), 1, errors)
         self.assertIn("declares no nope", errors[0])
 
+    def test_a_model_in_spec_and_proofs_form_resolves_in_its_spec_only(self):
+        self.write("formal/LamboProofs/Layered/Spec/Base.lean",
+                   "namespace Lambo.Layered\ndef step : Nat := 0\n"
+                   "abbrev Spec.step_ok : Prop := step = 0\nend Lambo.Layered\n")
+        self.write("formal/LamboProofs/Layered/Proofs/Base.lean",
+                   "namespace Lambo.Layered\ntheorem helper : True := trivial\n"
+                   "theorem step_ok : Spec.step_ok := rfl\nend Lambo.Layered\n")
+        self.write("formal/LamboProofs/Layered/History.lean",
+                   "namespace Lambo.Layered\ntheorem old : True := trivial\nend Lambo.Layered\n")
+        self.assertEqual(self.errors("{/* lean: Layered.step, Layered.Spec.step_ok */}"), [])
+        for name, says in [
+            ("step_ok", "a theorem of the proofs layer; cite its proposition Layered.Spec.step_ok"),
+            ("helper", "a lemma of the proofs layer, which the specification "
+                       "(formal/LamboProofs/Layered/Spec) does not state"),
+            ("old", "formal/LamboProofs/Layered/Spec declares no old"),
+            ("Spec.helper", "formal/LamboProofs/Layered/Spec declares no Spec.helper"),
+        ]:
+            with self.subTest(name=name):
+                errors = self.errors(f"{{/* lean: Layered.{name} */}}")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(says, errors[0])
+
+    def test_a_single_file_spec_layer_resolves_too(self):
+        self.write("formal/LamboProofs/One/Spec.lean",
+                   "namespace Lambo.One\ndef f : Nat := 0\nabbrev Spec.f_zero : Prop := f = 0\nend Lambo.One\n")
+        self.write("formal/LamboProofs/One/Proofs.lean",
+                   "namespace Lambo.One\ntheorem f_zero : Spec.f_zero := rfl\nend Lambo.One\n")
+        self.assertEqual(self.errors("{/* lean: One.f, One.Spec.f_zero */}"), [])
+        errors = self.errors("{/* lean: One.f_zero */}")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("cite its proposition One.Spec.f_zero", errors[0])
+
     def test_one_bad_name_in_a_list_is_reported(self):
         errors = self.errors("{/* lean: Demo.Status, Demo.missing, Demo.Flags */}")
         self.assertEqual(len(errors), 1)

@@ -23,7 +23,8 @@ not model files), records what references it:
 * example: an `example` in the models names it (examples are not kept in
   the environment, so this one is textual: an identifier in the example's
   text that is a theorem of the example's namespace);
-* anchor: a docs page's `{/* lean: Model.name */}` anchor;
+* anchor: a docs page's `{/* lean: Model.name */}` anchor, or, for a theorem
+  in Spec form, `{/* lean: Model.Spec.name */}`, its proposition;
 * ledger: a claims ledger under `formal/claims/` names it in backticks, in
   a line that names its model file (or any model, when the line names none);
 * rust: a comment in `src/` or `tests/` names it as `Model.name`, or in
@@ -56,11 +57,25 @@ unreferenced theorem the report gives a class and a one-line reason:
 Precedence: a same-statement twin (b); a review verdict (a); a superseding
 counterpart (b); a `@[simp]` lemma (c); a dead helper (b); the rest (c).
 
+A model in Spec and Proofs form (formal/README.md, "Reading a Spec file")
+states a result as a definition `Spec.name : Prop` in its `Spec` file and
+proves it as `theorem name : Spec.name` in its `Proofs` file. Such a theorem's
+doc comment is its proposition's, and a citation of `Model.Spec.name` (an
+anchor, a ledger row, a Rust comment) is a citation of the theorem.
+
 `--check` exits 1 when a theorem is neither used by a proof (or named by
 another declaration) nor carries a doc comment; when an unreferenced theorem
-has no `keep` or `narrowed` verdict in the review file; or when the review
+has no `keep` or `narrowed` verdict in the review file; when the review
 file is stale (a kept theorem no longer declared, a `deleted` one still
-declared or missing from `deleted-theorems.tsv`). CI runs it.
+declared or missing from `deleted-theorems.tsv`); or when the Spec form is
+broken: a `Spec` proposition that the theorem of its name does not prove (a
+result stated and not proved), a theorem stated as another name's
+proposition, a theorem declared in a `Spec` file, a `Spec` proposition
+declared in a `Proofs` file, or a lemma of a `Proofs` file that no proof
+outside `History.lean` and `Examples.lean` uses (formal/README.md's rule: a
+`Spec` proposition exists only for a guarantee about the Rust, a lemma only
+history or examples use goes beside them, and anything else a proof does
+not use is deleted). CI runs it.
 
 `--duplicates` lists theorems that state the same thing (the same `shape`:
 binders named by depth, universe parameters by position) in more than one
@@ -85,7 +100,52 @@ SIGNALS = ("proof", "named", "simp", "example", "anchor", "ledger", "rust", "aud
 ANCHOR = re.compile(r"\{/\* lean: (?P<body>[^*]*?) \*/\}")
 TICKED = re.compile(r"`([A-Za-z_][\w'.]*)`")
 QUALIFIED = re.compile(r"(?<![\w.])([A-Z][A-Za-z]*)\.([a-z_A-Z][\w']*)")
-LEAN_FILE = re.compile(r"(?:LamboProofs/)?((?:[A-Z][A-Za-z]*/)?[A-Z][A-Za-z]*)\.lean")
+LEAN_FILE = re.compile(r"(?:LamboProofs/)?((?:[A-Z][A-Za-z]*/)*[A-Z][A-Za-z]*)\.lean")
+SPEC_PREFIX = re.compile(r"(?<![\w'])Spec\.")
+
+
+def unspec(text):
+    """`text` with every `Spec.` name prefix dropped: a citation of
+    `Drain.Spec.foo` (or `Spec.foo`) is a citation of the theorem `foo`
+    that proves it."""
+    return SPEC_PREFIX.sub("", text)
+
+
+def spec_name(name):
+    """The Spec proposition of a theorem: `Lambo.Drain.Spec.foo` for
+    `Lambo.Drain.foo`."""
+    parts = name.split(".")
+    return ".".join(parts[:2] + ["Spec"] + parts[2:]) if len(parts) > 2 else None
+
+
+def statement_shape(d):
+    """What a theorem states, by shape: for one in Spec form its proposition's
+    body (`stmt_shape`), since its type names only its own proposition, so two
+    theorems proving one statement through two `Spec` names would not match;
+    its type's `shape` otherwise."""
+    return d["stmt_shape"] if d.get("spec") and d.get("stmt_shape") else d["shape"]
+
+
+def is_spec_module(module):
+    """Whether a module is a `Spec` file (`LamboProofs.Drain.Spec.Base`,
+    `LamboProofs.Score.Spec`)."""
+    return "Spec" in module.split(".")[1:]
+
+
+def is_proofs_module(module):
+    """Whether a module is a `Proofs` file (`LamboProofs.Drain.Proofs.Base`,
+    `LamboProofs.Score.Proofs`)."""
+    return "Proofs" in module.split(".")[1:]
+
+
+HISTORY_FILES = ("History.lean", "Examples.lean")
+
+
+def is_history_module(module):
+    """Whether a module is a history layer or an examples file
+    (`LamboProofs.Drain.History`, `LamboProofs.Drain.Examples`): neither
+    layer of a model in Spec and Proofs form."""
+    return module.split(".")[-1] + ".lean" in HISTORY_FILES
 
 
 def build_dump(repo, out):
@@ -135,6 +195,10 @@ class Models:
                     continue
                 self.env[d["name"]] = d
         self.user = {n: d for n, d in self.env.items() if d["user"]}
+        # The Spec propositions: a `Prop`-valued definition with a name
+        # component `Spec` below its model's namespace.
+        self.spec_props = {n for n, d in self.user.items()
+                           if d["kind"] == "def" and d["type"] == "Prop" and "Spec" in n.split(".")[2:-1]}
         # The theorems count-theorems.py counts: a `theorem` line in a model file.
         files = {p.resolve() for p in ct.model_files(repo)}
         decl_lines = defaultdict(set)
@@ -176,6 +240,26 @@ class Models:
         while n in self.parent:
             n = self.parent[n]
         return n
+
+    def doc(self, n):
+        """A theorem's doc comment: its own, or, for a theorem in Spec form
+        that has none, its proposition's."""
+        d = self.theorems[n]
+        own = doc_comment(self.text[module_path(self.repo, d["module"]).resolve()].split("\n"), d)
+        prop = self.user.get(d.get("spec") or "")
+        if own or prop is None:
+            return own
+        src = self.text.get(module_path(self.repo, prop["module"]).resolve())
+        return doc_comment(src.split("\n"), prop) if src else ""
+
+    def headers(self, n):
+        """The header of a theorem's file and, for one in Spec form, of its
+        proposition's file, where its results are listed."""
+        d = self.theorems[n]
+        out = header_of(self.text[module_path(self.repo, d["module"]).resolve()])
+        prop = self.user.get(d.get("spec") or "")
+        src = self.text.get(module_path(self.repo, prop["module"]).resolve()) if prop else None
+        return out + ("\n" + header_of(src) if src else "")
 
     def proof_users(self):
         """For each theorem, the user declarations whose type or value uses it."""
@@ -242,7 +326,7 @@ def anchor_refs(m):
     for page in pages:
         for a in ANCHOR.finditer(page.read_text(encoding="utf-8")):
             for ref in a.group("body").split(","):
-                name = "Lambo." + ref.strip()
+                name = "Lambo." + unspec(ref.strip())
                 if name in m.theorems:
                     refs[name].add(page.relative_to(m.repo).as_posix())
     return refs
@@ -256,7 +340,7 @@ def by_short(m):
 
 
 def models_named(line):
-    """Model namespaces a line names through a `.lean` path (`Drain/Close.lean` is Drain)."""
+    """Model namespaces a line names through a `.lean` path (`Drain/Spec/Close.lean` is Drain)."""
     out = set()
     for f in LEAN_FILE.findall(line):
         out.add(f.split("/")[0])
@@ -269,7 +353,7 @@ def ledger_refs(m):
     for f in sorted((m.repo / "formal" / "claims").glob("*.md")):
         for line in f.read_text(encoding="utf-8").splitlines():
             named = models_named(line)
-            for tok in TICKED.findall(line):
+            for tok in TICKED.findall(unspec(line)):
                 for n in short.get(tok.split(".")[-1], ()):
                     if tok.count(".") and "Lambo." + tok != n and not n.endswith("." + tok):
                         continue
@@ -290,7 +374,7 @@ def rust_refs(m):
         for i, line in enumerate(lines):
             if "//" not in line:
                 continue
-            comment = line[line.index("//"):]
+            comment = unspec(line[line.index("//"):])
             for model, name in QUALIFIED.findall(comment):
                 n = f"Lambo.{model}.{name}"
                 if n in m.theorems:
@@ -366,9 +450,10 @@ def audit_refs(m):
 
 
 def header_of(src):
-    """A model file's header: its comments before `namespace`."""
-    cut = src.find("\nnamespace ")
-    return src if cut < 0 else src[:cut]
+    """A model file's header: its comments before the `namespace` command (a
+    line that is one, not a line of prose that starts with the word)."""
+    cut = re.search(r"^namespace [\w.]+[ \t]*$", src, re.M)
+    return src[:cut.start()] if cut else src
 
 
 def doc_comment(src_lines, d):
@@ -458,7 +543,8 @@ def signals_class(m, n, d, src_lines, header, readme, changelog, doc_mentions, r
     short, local = n.split(".")[-1], local_name(n)
     path = module_path(m.repo, d["module"])
     rel = path.relative_to(m.repo / "formal" / "LamboProofs").as_posix()
-    doc = doc_comment(src_lines, d)
+    doc = m.doc(n)
+    header = m.headers(n)
     ticks = {f"`{short}`", f"`{local}`"}
     if any(t in header for t in ticks):
         return "a", f"named among the results in the header of `{rel}`"
@@ -508,13 +594,19 @@ def check(m, reviewed, deleted):
     had that doc comment reviewed (`reviewed`, the review file's verdicts)."""
     refs = all_refs(m)
     used = set(refs["proof"]) | set(refs["named"]) | set(refs["simp"])
+    # What a `Proofs` lemma needs: a use outside the history layers and the
+    # examples, which are not specification and need no lemma of the proofs.
+    used_by_model = set(refs["simp"])
+    used_by_model |= {n for n, us in refs["proof"].items()
+                      if any(not is_history_module(m.user[o]["module"]) for o in us)}
+    used_by_model |= {n for n, files in refs["named"].items() if any(f not in HISTORY_FILES for f in files)}
     bad, unreviewed, stale = [], [], []
     for n, d in m.theorems.items():
         if n in used:
             continue
         p = module_path(m.repo, d["module"]).resolve()
         where = (p.relative_to(m.repo.resolve()).as_posix(), d["line"], local_name(n))
-        if not doc_comment(m.text[p].split("\n"), d):
+        if not m.doc(n):
             bad.append(where)
         elif not any(refs[k].get(n) for k in SIGNALS) and reviewed.get(n, ("",))[0] not in ("keep", "narrowed"):
             unreviewed.append(where)
@@ -526,6 +618,38 @@ def check(m, reviewed, deleted):
                 stale.append(f"{n} is reviewed as deleted but not listed in {DELETED}")
         elif n not in m.theorems:
             stale.append(f"{n} is reviewed as {verdict} but no model declares it (mark it deleted, or drop the row)")
+    # The Spec form: every proposition is proved by the theorem of its name,
+    # and a Spec file holds no theorem.
+    form = []
+    proved = set()
+    for n, d in sorted(m.theorems.items()):
+        where = f"{module_path(m.repo, d['module']).relative_to(m.repo).as_posix()}:{d['line']}"
+        if is_spec_module(d["module"]):
+            form.append(f"{where}: {local_name(n)} is a theorem in a Spec file: a Spec file states, "
+                        f"its Proofs file proves")
+        if is_proofs_module(d["module"]) and not d.get("spec") and n not in used_by_model:
+            form.append(f"{where}: {local_name(n)} is a lemma of a Proofs file that no proof outside "
+                        f"{' and '.join(HISTORY_FILES)} uses: state it in Spec form, if it is a guarantee about "
+                        f"the Rust, move it beside the history or examples that use it, or delete it")
+        if d.get("spec"):
+            if d["spec"] != spec_name(n):
+                form.append(f"{where}: {local_name(n)} is stated as {local_name(d['spec'])}, not as its own "
+                            f"proposition {local_name(spec_name(n))}")
+            else:
+                proved.add(d["spec"])
+    for n in sorted(m.spec_props):
+        d = m.user[n]
+        if is_proofs_module(d["module"]):
+            form.append(f"{module_path(m.repo, d['module']).relative_to(m.repo).as_posix()}:{d['line']}: "
+                        f"{local_name(n)} is a Spec proposition declared in a Proofs file: it belongs in "
+                        f"its Spec file")
+    for n in sorted(m.spec_props - proved):
+        d = m.user[n]
+        form.append(f"{module_path(m.repo, d['module']).relative_to(m.repo).as_posix()}:{d['line']}: "
+                    f"{local_name(n)} is stated and not proved: no `theorem "
+                    f"{local_name(n).replace('Spec.', '', 1)} : {local_name(n)}`")
+    for line in form:
+        print(line, file=sys.stderr)
     for path, line, name in sorted(bad):
         print(f"{path}:{line}: {name} is used by no proof and has no doc comment stating its Rust guarantee",
               file=sys.stderr)
@@ -534,13 +658,15 @@ def check(m, reviewed, deleted):
               f"against the rule and add a verdict to {REVIEWED}", file=sys.stderr)
     for line in stale:
         print(f"{REVIEWED}: {line}", file=sys.stderr)
-    if bad or unreviewed or stale:
+    if bad or unreviewed or stale or form:
         print(f"{len(bad)} theorem(s) neither used nor documented, {len(unreviewed)} unreviewed, "
-              f"{len(stale)} stale review row(s) (formal/README.md, \"How the models are written\")",
+              f"{len(stale)} stale review row(s), {len(form)} broken Spec form(s) (formal/README.md, "
+              f"\"How the models are written\")",
               file=sys.stderr)
         return 1
     print(f"every theorem of {len(m.theorems)} is used by a proof or documented, and every unreferenced one "
-          f"is reviewed ({len(reviewed)} review rows)")
+          f"is reviewed ({len(reviewed)} review rows); every Spec proposition of {len(m.spec_props)} is "
+          f"proved by the theorem of its name")
     return 0
 
 
@@ -572,7 +698,7 @@ def main(argv=None):
         groups = defaultdict(list)
         for n, d in m.user.items():
             if d["kind"] == "theorem":
-                groups[d["shape"]].append(n)
+                groups[statement_shape(d)].append(n)
         dups = [v for v in groups.values() if len(v) > 1]
         for v in sorted(dups):
             print("  ".join(sorted(v)))
@@ -591,13 +717,12 @@ def main(argv=None):
     # Theorem names that other theorems' doc comments mention.
     doc_mentions = defaultdict(set)
     for n, d in m.theorems.items():
-        lines = m.text[module_path(repo, d["module"]).resolve()].split("\n")
-        for tok in TICKED.findall(doc_comment(lines, d)):
+        for tok in TICKED.findall(m.doc(n)):
             doc_mentions[tok.split(".")[-1]].add(n)
 
     shapes = defaultdict(list)
     for n, d in m.theorems.items():
-        shapes[d["shape"]].append(n)
+        shapes[statement_shape(d)].append(n)
     per_file = defaultdict(list)
     counts = Counter()
     for n, d in m.theorems.items():
@@ -610,7 +735,7 @@ def main(argv=None):
             continue
         p = module_path(repo, d["module"]).resolve()
         src = m.text[p]
-        twins = sorted(x for x in shapes[d["shape"]] if x != n and any(refs[k].get(x) for k in SIGNALS))
+        twins = sorted(x for x in shapes[statement_shape(d)] if x != n and any(refs[k].get(x) for k in SIGNALS))
         cls, why = classify(m, n, d, src.split("\n"), header_of(src), readme, changelog, doc_mentions, twins,
                             referenced=lambda x: any(refs[k].get(x) for k in SIGNALS), review=reviewed.get(n))
         per_file[rel].append((d["line"], local_name(n), cls, why))
@@ -626,9 +751,9 @@ def main(argv=None):
     w(f"Generated by `python3 -I scripts/formal/audit-theorems.py --out formal/audit/unreferenced-theorems.md` "
       f"from the models as built.\n")
     if deleted:
-        w(f"{len(deleted)} theorems this audit found unreferenced were deleted in the change that added it; "
-          f"`{args.deleted}` lists them with their reasons (and `check-decl-equivalence.py --deletions` "
-          f"reads it), and so does the section \"Deleted\" at the end.\n")
+        w(f"`{args.deleted}` lists the {len(deleted)} declarations deleted from the models on purpose, "
+          f"each with its reason, in the groups its header describes (`check-decl-equivalence.py "
+          f"--deletions` reads it); so does the section \"Deleted\" at the end.\n")
     w("A theorem counts as referenced when another declaration's proof or definition uses it (read from "
       "Lean's environment, through the constants Lean generates), an `example` names it, a docs page's "
       "`lean:` anchor cites it, a claims ledger under `formal/claims/` names it with its model file, a "
@@ -647,8 +772,8 @@ def main(argv=None):
     w("* **(c)** not settled: an undocumented lemma or a documented theorem not yet reviewed, which "
       "`--check` fails on, or a `@[simp]` lemma `simp` may use without naming it.\n")
     w("Precedence: a same-statement twin (b); a review verdict (a); a superseding counterpart (b); a "
-      "`@[simp]` lemma (c); a dead helper (b); the rest (c). `Drain/History.lean` describes no current Rust "
-      "and is kept as the evidence for its findings. Names are given below their model's namespace "
+      "`@[simp]` lemma (c); a dead helper (b); the rest (c). `Drain/History.lean` holds the layers the Rust "
+      "has left behind, kept as the evidence for its findings. Names are given below their model's namespace "
       "(`Reach.trans` is `Lambo.Cite.Reach.trans`).\n")
     w("## Summary\n")
     w(f"{total['total']} theorems in {len(files)} model files; {total['a'] + total['b'] + total['c']} "
@@ -682,12 +807,11 @@ def main(argv=None):
         w("")
     if deleted:
         w("## Deleted\n")
-        w("Each was referenced by nothing when it was deleted (no proof in the dump, no other declaration "
-          "naming it, no example, docs anchor, claims ledger row, Rust comment, oracle or README, and no "
-          "`Audit.lean` line but `Drain.orderInv_nil`'s, removed with it), except two groups: those marked "
-          f"\"purpose review\" failed the review recorded in `{REVIEWED}`, and the #280 rows remove that "
-          f"unimplemented design model (with its `Audit.lean` lines, and the definitions only it used) at the "
-          f"owner's request.\n")
+        w(f"Each row's reason says why it went, and its group: found unreferenced by this audit; failed "
+          f"the purpose review recorded in `{REVIEWED}` (\"purpose review\"); the unimplemented #280 "
+          f"design model, at the owner's request; made false or redundant by a fix of the Rust (\"#N "
+          f"fixed\"); or no guarantee about the current Rust when the drain model went into Spec form "
+          f"(\"#350 Spec review\"). `{args.deleted}`'s header describes each group.\n")
         for name, reason, kept in deleted:
             w(f"- `{name.removeprefix('Lambo.')}`: {reason}"
               + (f"; kept: `{kept.removeprefix('Lambo.')}`" if kept != "-" else "") + ".")
