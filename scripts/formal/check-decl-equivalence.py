@@ -96,8 +96,9 @@ The base is built from scratch unless the working tree has a `formal/.lake`:
 then the base starts from a copy of it and Lake rebuilds only the modules
 whose sources differ. With `--only-form-changes` and no `--base-dump`, a
 change of `formal/lean-toolchain` between the base and the working tree
-skips the check (exit 0, saying so): CI has no elan, so it would build the
-base with the new Lean, from a build the new Lean must redo in full.
+skips the check (exit 0, saying so, and under GitHub Actions also as a
+`::warning::` annotation): CI has no elan, so it would build the base with
+the new Lean, from a build the new Lean must redo in full.
 
 Exit 0 when the only differences are the listed renames and deletions (and,
 with `--spec-form`, the theorems restated in Spec form), 1 otherwise. Needs
@@ -508,6 +509,10 @@ def main(argv=None):
             print(f"skipped: {TOOLCHAIN} differs between {args.base} ({bump[0]}) and the working tree "
                   f"({bump[1]}), so the base cannot be built with this Lean; no theorem's form was "
                   f"compared. Compare by hand, with elan, or pass --base-dump.")
+            if os.environ.get("GITHUB_ACTIONS"):
+                # A step that passes is not read: say so on the run's summary.
+                print(f"::warning::the form-change check did not run: {TOOLCHAIN} changed between "
+                      f"{args.base} and the working tree, so no theorem's form was compared")
             return 0
     script = repo / "scripts" / "formal" / "DumpDecls.lean"
     work = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="decl-eq-"))

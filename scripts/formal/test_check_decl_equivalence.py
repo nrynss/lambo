@@ -8,8 +8,10 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -405,23 +407,37 @@ class SpecForm(unittest.TestCase):
                 subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=d, check=True,
                                capture_output=True)
             (Path(d) / "formal").mkdir()
+            (Path(d) / "formal" / "README.md").write_text("x\n", encoding="utf-8")
+            git("init", "-q")
+            git("add", ".")
+            git("commit", "-q", "-m", "before the toolchain file")
             tc = Path(d) / "formal" / "lean-toolchain"
             tc.write_text("leanprover/lean4:v4.36.0\n", encoding="utf-8")
-            git("init", "-q")
             git("add", ".")
             git("commit", "-q", "-m", "base")
             self.assertIsNone(eq.toolchain_change(d, "HEAD"))
             tc.write_text("leanprover/lean4:v4.37.0\n", encoding="utf-8")
             self.assertEqual(eq.toolchain_change(d, "HEAD"),
                              ("leanprover/lean4:v4.36.0", "leanprover/lean4:v4.37.0"))
-            # A base without the file is no change.
-            self.assertIsNone(eq.toolchain_change(d, "HEAD~0:nonexistent"))
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                code = eq.main(["--repo", d, "--base", "HEAD", "--only-form-changes"])
+            # A base without the file (a real commit, before it was added) is no change.
+            self.assertIsNone(eq.toolchain_change(d, "HEAD~1"))
+
+            def skip(env):
+                out = io.StringIO()
+                with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stdout(out):
+                    if "GITHUB_ACTIONS" not in env:
+                        os.environ.pop("GITHUB_ACTIONS", None)
+                    code = eq.main(["--repo", d, "--base", "HEAD", "--only-form-changes"])
+                return code, out.getvalue()
+
+            code, out = skip({})
             self.assertEqual(code, 0)
-            self.assertIn("skipped: formal/lean-toolchain differs between HEAD (leanprover/lean4:v4.36.0)",
-                          out.getvalue())
+            self.assertIn("skipped: formal/lean-toolchain differs between HEAD (leanprover/lean4:v4.36.0)", out)
+            self.assertNotIn("::warning::", out)
+            # In CI the skip is a warning on the run, still exit 0.
+            code, out = skip({"GITHUB_ACTIONS": "true"})
+            self.assertEqual(code, 0)
+            self.assertIn("::warning::the form-change check did not run: formal/lean-toolchain changed", out)
 
     def test_spec_name(self):
         self.assertEqual(eq.spec_name("Lambo.Drain.drain_fifo"), "Lambo.Drain.Spec.drain_fifo")
