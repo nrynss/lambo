@@ -531,24 +531,6 @@ abbrev Spec.closeD_agrees : Prop :=
 
 /-! ### The rule before #345 is wrong -/
 
-/-- **#345, in general: the close before the fix (`closeW`) vouches for a
-dead-lettered put.** In every reachable session, a set-aside write (running,
-held or queued when the close began) whose put the history dead-lettered
-answers `intent_durable` at a `closeW` whose flush completed, though its put
-is not committed. The current close is `closeD`, which does not
-(`closeD_never_vouches_dropped`). -/
-abbrev Spec.closeW_vouches_dead_letteredW : Prop :=
-  ∀ {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job} {evs : List Ev} {st : WS},
-    st = runW c sz now (WS.init (admitStore all)) evs →
-    (st.admitted.map (·.key)).Nodup →
-    (∀ j ∈ st.admitted, j ∈ all) →
-    (all.map (·.key)).Nodup →
-    ∀ (hist : List Landed) (now' : Int) {j : Job},
-    j ∈ st.running ++ st.held ++ st.queue →
-    j.key ∈ droppedPuts (sessLog all st) hist →
-    ansOf (closeW .durable now' st) j.key = some .intentRecorded ∧
-      j.key ∉ committedPuts (sessLog all st) hist
-
 /-! ### The fixed rule -/
 
 /-- **Shutdown accounting under the fixed close (#345).** As
@@ -713,14 +695,6 @@ structure DS where
 
 def DS.init : DS := ⟨[], [], [], [], []⟩
 
-/-- The rule at `1b4d89e4`: prune at the consume, skip a consumed put at the
-note. -/
-def stepK (s : DS) : DEv → DS
-  | .consume k => { s with consumed := k :: s.consumed, dl := s.dl.filter (· ≠ k) }
-  | .settle k => { s with settled := k :: s.settled }
-  | .deadLetter ks =>
-    { s with dropped := ks ++ s.dropped, dl := ks.filter (fun k => k ∉ s.consumed) ++ s.dl }
-
 /-- The current rule: prune at the settle; skip at the note only a put whose
 write is consumed and settled (consumed, and out of `cu`). -/
 def stepP (s : DS) : DEv → DS
@@ -734,23 +708,6 @@ def stepP (s : DS) : DEv → DS
 /-- What a close whose final flush completed answers a set-aside receipt
 `k` (one not settled), given the set. -/
 def vouches (s : DS) (k : Key) : Bool := decide (k ∉ s.settled) && decide (k ∉ s.dl)
-
-private def kP : Key := (0, 1000, 1)
-
-/-- **#345 review: pruning at the consume vouches for a dropped put after a
-worker panic.** The write's put is dead-lettered while it is queued; it
-commits (its consume is appended, which forgets it); its worker panics
-before the settle. At close it is set aside and out of the set, so the close
-answers `intent_durable`, though its put was dropped. Second case: the put
-and the consume ride the dropped batch together, and the note skips it. The
-current rule keeps both in the set. Rust test
-`a_worker_that_panics_after_its_commit_does_not_get_intent_durable`. -/
-abbrev Spec.keptAtConsume_vouches_after_panic : Prop :=
-  let t1 := [DEv.deadLetter [kP], .consume kP]
-  let t2 := [DEv.consume kP, .deadLetter [kP]]
-  (t1.foldl stepK DS.init).dropped = [kP] ∧ vouches (t1.foldl stepK DS.init) kP = true ∧
-    (t2.foldl stepK DS.init).dropped = [kP] ∧ vouches (t2.foldl stepK DS.init) kP = true ∧
-    vouches (t1.foldl stepP DS.init) kP = false ∧ vouches (t2.foldl stepP DS.init) kP = false
 
 /-- The step a worker can take: it never consumes a write it already
 settled (a write is consumed at most once, before its settle). -/
@@ -865,33 +822,11 @@ inductive SEv where
   | timeout
   deriving DecidableEq, Repr
 
-/-- The streak before #346: reset in the settle block. -/
-def streakOld (s : Nat) : SEv → Nat
-  | .commit => s
-  | .okArm => s
-  | .settleOk => 0
-  | .timeout => s + 1
-
-/-- #346's first fix: reset in the worker's `Ok` arm, after `WriteCtx::run`
-returned. -/
-def streakOkArm (s : Nat) : SEv → Nat
-  | .commit => s
-  | .okArm => 0
-  | .settleOk => s
-  | .timeout => s + 1
-
 /-- The streak after the fix: reset at the commit, in its critical section. -/
 def streakNew (s : Nat) : SEv → Nat
   | .commit => 0
   | .okArm => s
   | .settleOk => s
-  | .timeout => s + 1
-
-/-- Resets at the commit and the settle, which the fix does not keep. -/
-def streakBoth (s : Nat) : SEv → Nat
-  | .commit => 0
-  | .okArm => s
-  | .settleOk => 0
   | .timeout => s + 1
 
 /-- The documented count: the lookup timeouts since the last write applied. -/
@@ -924,43 +859,5 @@ abbrev Spec.timeout_after_commit_settlesW : Prop :=
       (.finish a (.err (heldErrW false ((pre ++ SEv.commit :: mid).foldl streakNew 0) .lookupTimeout)))
     ansOf st'.store j.key = some .failed ∧ (j, Answer.failed) ∈ st'.settled ∧
       st'.log = st.log ++ [[Mut.consume j.key .failed]]
-
-/-- **#346: the streak before the fix counts a timeout that follows a
-commit.** Two lookup timeouts, then another lane's write commits; before
-that write's settle block resets the streak, a third first-attempt timeout
-takes the lanes lock. The old streak reads 2 and holds it as the third of a
-run; nothing was timed out since the commit (`runSince` is 0), so the rule
-says it is a first timeout, and the fixed streak settles it `failed`. Rust
-test `a_lookup_timeout_between_a_commit_and_its_settle_settles_failed`. -/
-abbrev Spec.streak_old_counts_across_commit : Prop :=
-  let pre := [SEv.timeout, .timeout, .commit]
-  holdsS (heldErrW false (pre.foldl streakOld 0) .lookupTimeout) = true ∧
-    runSince pre = 0 ∧
-    holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = false
-
-/-- **#346's first fix still counted a timeout that follows a commit.** It
-reset the streak in the worker's `Ok` arm, which runs after `WriteCtx::run`
-returns: after the index mirroring, which waits for the graph read and index
-write locks. Two lookup timeouts, then another lane's write commits; before
-its `Ok` arm runs, a third first-attempt timeout takes the lanes lock. The
-`Ok`-arm streak reads 2 and holds it; `runSince` is 0, and the fixed streak,
-reset inside the commit, settles it `failed`. Rust test
-`a_lookup_timeout_between_a_commit_and_its_ok_arm_settles_failed`. -/
-abbrev Spec.streak_okArm_counts_across_commit : Prop :=
-  let pre := [SEv.timeout, .timeout, .commit]
-  holdsS (heldErrW false (pre.foldl streakOkArm 0) .lookupTimeout) = true ∧
-    runSince pre = 0 ∧
-    holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = false
-
-/-- **Keeping the settle's reset as well is wrong the other way.** A write
-commits, two timeouts follow, then its settle runs: with both resets the
-streak reads 0 and the third timeout settles `failed`, though it is the third
-with nothing applied between (`runSince` is 2) and the rule holds it, as the
-fixed streak does. -/
-abbrev Spec.streak_both_forgets_run : Prop :=
-  let pre := [SEv.commit, .timeout, .timeout, .settleOk]
-  holdsS (heldErrW false (pre.foldl streakBoth 0) .lookupTimeout) = false ∧
-    runSince pre = 2 ∧
-    holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = true
 
 end Lambo.Drain

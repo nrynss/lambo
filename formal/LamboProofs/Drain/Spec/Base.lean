@@ -442,39 +442,8 @@ structure ROut where
 
 def ROut.empty : ROut := ⟨[], [], [], [], none⟩
 
-/-- The replay loop over the pending intents, strictly one at a time. An
-applied intent is consumed `applied_after_restart` in the same commit
-(`WriteCtx::run` with a `ConsumeStamp`); a failed one is consumed `failed` on
-its own hold; a skipped one is left unconsumed; a stop leaves it and every
-later one unconsumed. -/
-def loop (rout : Job → RR) : Streaks → List Intent → ROut
-  | _, [] => ROut.empty
-  | s, i :: rest =>
-    match replayStep i.job.image (rout i.job) s with
-    | (.applied, s') =>
-      let o := loop rout s' rest
-      { o with
-        answers := (i.job.key, .appliedAfterRestart) :: o.answers
-        log := [.write i.job.key, .consume i.job.key .appliedAfterRestart] :: o.log
-        applied := i.job :: o.applied }
-    | (.failed, s') =>
-      let o := loop rout s' rest
-      { o with
-        answers := (i.job.key, .failed) :: o.answers
-        log := [.consume i.job.key .failed] :: o.log
-        failed := i.job :: o.failed }
-    | (.skip, s') => loop rout s' rest
-    | (.stop b, _) => { ROut.empty with block := some b }
-
 /-- The unconsumed rows: `intents.filter(|i| i.outcome.is_none())`. -/
 def pendingOf (intents : List Intent) : List Intent := intents.filter (fun i => i.outcome.isNone)
-
-/-- `spawn_replay` after seeding: nothing owed, nothing to do; otherwise the
-liveness embed gates the loop, and a failed one consumes nothing. -/
-def replay (live : Bool) (rout : Job → RR) (intents : List Intent) : ROut :=
-  match pendingOf intents with
-  | [] => ROut.empty
-  | p => if live then loop rout ⟨0, 0⟩ p else { ROut.empty with block := some .embedder }
 
 /-- The rows after the replay's own consumes have landed. -/
 def applyLog (intents : List Intent) (log : List Batch) : List Intent :=
@@ -495,60 +464,15 @@ counterparts are `shutdown_no_silent_lossW`, `held_at_closeW` and
 
 /-! ## Load order -/
 
-/-- **With issue times in sequence order, the load is sequence order.** If,
-among the rows, a higher sequence number never has an earlier issue time, the
-(`issued_ms`, `lane_seq`) order is `lane_seq` order, the admission order the
-`WriteIntent::lane_seq` doc promises. A monotone clock alone does not give the
-hypothesis: `next_receipt` takes the sequence number before it reads the clock
-and before admission takes its lock, so two concurrent admissions can read
-the clock in the other order. It holds for sequential admissions under a
-clock that does not step back. `clock_step_reorders` is the other side. -/
-abbrev Spec.load_seq_order : Prop :=
-  ∀ (l : List Intent),
-    (∀ a ∈ l, ∀ b ∈ l, a.job.rid < b.job.rid → a.job.ms ≤ b.job.ms) →
-    (loadOrder l).Pairwise (fun a b => a.job.rid ≤ b.job.rid)
-
 /-! ## Draining a lane to completion
 
 `drainLane` pops a lane until its queue is empty. What it takes is the lane's order, which the lane worker, before #295 and since, takes its writes in (`Receipts.lane_fifo`). -/
-
-/-- Drain a lane to completion: pop until the queue is empty. -/
-def drainLane {α : Type} : Nat → Lane α → Lane α
-  | 0, l => l
-  | n + 1, l => drainLane n l.pop
-
-def drain {α : Type} (l : Lane α) : Lane α := drainLane l.queue.length l
-
-/-- **Drain applies each lane's writes in submission order, all of them.**
-However admissions and worker steps interleaved (`Receipts.run`), a lane
-drained to completion has taken exactly the submitted jobs, in submission
-order: the completion of `Receipts.lane_fifo`, whose prefix is what the
-worker had taken when the drain began. -/
-abbrev Spec.drain_fifo : Prop :=
-  ∀ (ops : List (Lambo.Receipts.Op Job)),
-    (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).queue = [] ∧
-      (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).taken = Lambo.Receipts.submitted ops
 
 /-! ## `settle_deferred` settles every set-aside entry -/
 
 /-! ## The restart map's seed (`spawn_replay`)
 
 Before a replay runs, `spawn_replay` seeds the restart map with one answer per stored row: `pending_replay` for an unconsumed one, `failed` or `applied_after_restart` for a consumed one, by its tag. -/
-
-/-- The seeded cross-restart answer of one row (the stale-row skip is not
-modelled). -/
-def seedAnswer (i : Intent) : Answer :=
-  match i.outcome with
-  | none => .pendingReplay
-  | some .failed => .failed
-  | some _ => .appliedAfterRestart
-
-def seed (intents : List Intent) : List (Key × Answer) :=
-  intents.map (fun i => (i.job.key, seedAnswer i))
-
-/-- The restart map after a list of `insert`s: the last insert wins. -/
-def lookupLast (m : List (Key × Answer)) (r : Key) : Option Answer :=
-  (m.reverse.find? (fun p => p.1 = r)).map (·.2)
 
 /-! ## The replay step's arms
 

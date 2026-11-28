@@ -454,14 +454,6 @@ theorem loadOrder_sorted : ∀ (l : List Intent),
   | nil => exact List.Pairwise.nil
   | cons x xs ih => exact pairwise_insertK x _ ih
 
-theorem load_seq_order : Spec.load_seq_order := by
-  intro l hmono
-  apply List.Pairwise.imp_of_mem _ (loadOrder_sorted l)
-  intro a b ha hb hab
-  rw [keyLe_iff] at hab
-  have hm := hmono b (mem_loadOrder.mp hb) a (mem_loadOrder.mp ha)
-  omega
-
 /-- `load_seq_order` for a backlog of several processes: the hypothesis and
 the conclusion compare only rows of the same epoch. Across epochs the load
 order is issue-time order; sequence numbers of different processes are not
@@ -489,37 +481,6 @@ theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
   exact ⟨j, List.mem_singleton.mp hmb⟩
 
 /-! ## Draining a lane to completion -/
-
-theorem drainLane_spec {α : Type} :
-    ∀ (n : Nat) (l : Lane α), l.queue.length = n →
-      (drainLane n l).queue = [] ∧ (drainLane n l).taken = l.history := by
-  intro n
-  induction n with
-  | zero =>
-    intro l h
-    refine ⟨List.eq_nil_of_length_eq_zero h, ?_⟩
-    show l.taken = l.taken ++ l.queue
-    rw [List.eq_nil_of_length_eq_zero h, List.append_nil]
-  | succ n ih =>
-    intro l h
-    show (drainLane n l.pop).queue = [] ∧ (drainLane n l.pop).taken = l.history
-    obtain ⟨queue, taken⟩ := l
-    cases queue with
-    | nil => simp at h
-    | cons x q =>
-      have hl : (Lane.pop ⟨x :: q, taken⟩).queue.length = n := by
-        simp [Lane.pop] at h ⊢
-        exact h
-      obtain ⟨h1, h2⟩ := ih _ hl
-      exact ⟨h1, h2.trans (Lane.pop_history _)⟩
-
-theorem drain_fifo : Spec.drain_fifo := by
-  intro ops
-  obtain ⟨h1, h2⟩ := drainLane_spec _ (Lambo.Receipts.run ⟨[], []⟩ ops) rfl
-  refine ⟨h1, ?_⟩
-  unfold drain
-  rw [h2, Lambo.Receipts.run_history]
-  rfl
 
 /-! ## `settle_deferred` settles every set-aside entry -/
 

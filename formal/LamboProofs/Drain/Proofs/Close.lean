@@ -1224,12 +1224,6 @@ theorem closeD_setAside {c : Caps} {sz : Job → Nat} {now : Int} {all : List Jo
 
 /-! ### The rule before #345 is wrong -/
 
-theorem closeW_vouches_dead_letteredW : Spec.closeW_vouches_dead_letteredW := by
-  intro c sz now all evs st hst hnd hall hkeys hist now' j hj hd
-  obtain ⟨a, h1, h2⟩ := setAside_unsettled hst hnd hall hj
-  exact ⟨(ansOf_closeW_unsettled h1 h2).2,
-    fun hc => keysLanded_disjoint _ hist (sessLog_puts_nodup hst hkeys) _ hc hd⟩
-
 /-! ### The fixed rule -/
 
 theorem shutdown_no_silent_lossD : Spec.shutdown_no_silent_lossD := by
@@ -1316,9 +1310,6 @@ theorem closeD_retryD : Spec.closeD_retryD := by
     exact hr
 
 /-! ## Worker panics and the dead-lettered set (#345 review) -/
-
-theorem keptAtConsume_vouches_after_panic : Spec.keptAtConsume_vouches_after_panic := by
-  decide
 
 /-- The current rule's invariant. -/
 structure PInv (s : DS) : Prop where
@@ -1466,14 +1457,5 @@ theorem timeout_after_commit_settlesW : Spec.timeout_after_commit_settlesW := by
   intro c sz now all evs st hst hnd hall a j t hrun pre mid hmid
   exact lookupTimeout_settlesW hst hnd hall a j t hrun false _
       (Or.inr (by rw [streakNew_after_commit pre mid hmid]; decide))
-
-theorem streak_old_counts_across_commit : Spec.streak_old_counts_across_commit := by
-  decide
-
-theorem streak_okArm_counts_across_commit : Spec.streak_okArm_counts_across_commit := by
-  decide
-
-theorem streak_both_forgets_run : Spec.streak_both_forgets_run := by
-  decide
 
 end Lambo.Drain

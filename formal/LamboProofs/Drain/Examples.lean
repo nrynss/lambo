@@ -5,29 +5,36 @@ Concrete cases, checked by `decide`, over every layer of the drain model,
 the history layer included: what the model shows about the Rust, and the
 fixes on the issues' scenarios.
 
-**Every theorem in this file is a finding about the Rust before a fix**
-(#294, #295, #345); the current behaviour on the same scenarios is in its
-`example`s. So a docs page may not cite this file: the anchor check
-(`scripts/docs/check-doc-anchors.py`) refuses it, as it refuses
-`History.lean`, and a page cites the propositions of the specification
-(`Drain/Spec/`) instead.
+**Every theorem in this file is a finding**: about the Rust before a fix
+(#294, #295, #345, #346), or about a rule that was considered and not taken.
+The current behaviour on the same scenarios is in its `example`s and in the
+specification (`Drain/Spec/`). So a docs page may not cite this file: the
+anchor check (`scripts/docs/check-doc-anchors.py`) refuses it, as it refuses
+`History.lean`.
 
 ## Results
 
-`transient_skip_reorders` and `outage_then_replay_reorders` (a transient
-embed answer breaks the per-agent order across serves; both halves fixed by
-#295: the replay defers the agent, the worker holds its later writes),
-`clock_step_reorders` (the load order trusts the wall clock; fixed by #295),
-`outage_failed_then_applied` (before #295, a doc fix: `ReceiptAnswer::Failed`
-said the write did not happen, and after an outage it later did; since #295
-an outage answers `pending_replay`, not `failed`),
-`store_error_blocks_backlog` (a graph-dependent refusal raised as a plain
-`Invariant` stops the replay on every serve; fixed by #294),
-`bad_id_never_settled` (fixed by #295), `closeW_vouches_dead_lettered` (the
-close before #345 vouches for a dead-lettered put; fixed by #345).
+* `transient_skip_reorders`, `outage_then_replay_reorders`: a transient
+  embed answer broke the per-agent order across serves (fixed by #295).
+* `clock_step_reorders`: the load order trusted the wall clock (#295).
+* `outage_failed_then_applied`: `failed` after an outage was not final, and
+  the write later applied (#295 answers `pending_replay`).
+* `store_error_blocks_backlog`: a graph-dependent refusal raised as a plain
+  `Invariant` stopped the replay on every serve (#294).
+* `bad_id_never_settled`: an unparseable receipt id was never settled (#295).
+* `closeW_vouches_dead_lettered`: the close vouched for a dead-lettered put
+  (#345).
+* `keptAtConsume_vouches_after_panic`: forgetting a dead-lettered receipt at
+  its consume (the rule at `1b4d89e4`, `stepK`) vouches for a dropped put
+  after a worker panic; the Rust forgets it at the settle (`stepP`).
+* `streak_old_counts_across_commit`, `streak_okArm_counts_across_commit`:
+  the lookup-timeout streak reset at the settle, then in the `Ok` arm,
+  counted a timeout after a commit (#346; `streakOld`, `streakOkArm`).
+* `streak_both_forgets_run`: a rule not taken, resetting at the commit and
+  at the settle, forgets a run (`streakBoth`).
 
-Boundary: each case is one concrete run over the earlier layers; the general
-statements are in the other drain files.
+Boundary: each case is one concrete run; the general statements are in the
+specification and in `History.lean`.
 -/
 
 import LamboProofs.Drain.Proofs.Close
@@ -36,6 +43,21 @@ import LamboProofs.Drain.History
 namespace Lambo.Drain
 
 open Lambo.Receipts (Answer Entry settle Lane)
+
+/-- The seeded cross-restart answer of one row (the stale-row skip is not
+modelled). -/
+def seedAnswer (i : Intent) : Answer :=
+  match i.outcome with
+  | none => .pendingReplay
+  | some .failed => .failed
+  | some _ => .appliedAfterRestart
+
+def seed (intents : List Intent) : List (Key × Answer) :=
+  intents.map (fun i => (i.job.key, seedAnswer i))
+
+/-- The restart map after a list of `insert`s: the last insert wins. -/
+def lookupLast (m : List (Key × Answer)) (r : Key) : Option Answer :=
+  (m.reverse.find? (fun p => p.1 = r)).map (·.2)
 
 /-! ## What the model shows about the Rust: concrete cases -/
 
@@ -598,6 +620,105 @@ example :
       [j1.key, j2.key].map
         (ansOf (settleDeferred .durable 2 (deferredW st) (closeW .incomplete 1 st))) =
         [some .intentRecorded, some .intentRecorded] := by
+  decide
+
+/-! ### Pruning the dead-lettered set at the consume (#345 review)
+
+The rule of `1b4d89e4`, over `Drain/Spec/Close.lean`'s panic model
+(`DEv`, `DS`, `stepP`). -/
+
+/-- The rule at `1b4d89e4`: prune at the consume, skip a consumed put at the
+note. -/
+def stepK (s : DS) : DEv → DS
+  | .consume k => { s with consumed := k :: s.consumed, dl := s.dl.filter (· ≠ k) }
+  | .settle k => { s with settled := k :: s.settled }
+  | .deadLetter ks =>
+    { s with dropped := ks ++ s.dropped, dl := ks.filter (fun k => k ∉ s.consumed) ++ s.dl }
+
+def kP : Key := (0, 1000, 1)
+
+/-- **#345 review: pruning at the consume vouches for a dropped put after a
+worker panic.** The write's put is dead-lettered while it is queued; it
+commits (its consume is appended, which forgets it); its worker panics
+before the settle. At close it is set aside and out of the set, so the close
+answers `intent_durable`, though its put was dropped. Second case: the put
+and the consume ride the dropped batch together, and the note skips it. The
+current rule keeps both in the set. Rust test
+`a_worker_that_panics_after_its_commit_does_not_get_intent_durable`. -/
+theorem keptAtConsume_vouches_after_panic :
+    let t1 := [DEv.deadLetter [kP], .consume kP]
+    let t2 := [DEv.consume kP, .deadLetter [kP]]
+    (t1.foldl stepK DS.init).dropped = [kP] ∧ vouches (t1.foldl stepK DS.init) kP = true ∧
+      (t2.foldl stepK DS.init).dropped = [kP] ∧ vouches (t2.foldl stepK DS.init) kP = true ∧
+      vouches (t1.foldl stepP DS.init) kP = false ∧ vouches (t2.foldl stepP DS.init) kP = false := by
+  decide
+
+/-! ### Where the lookup-timeout streak resets (#346)
+
+The resets the fix did not keep, over `Drain/Spec/Close.lean`'s events
+(`SEv`, `streakNew`, `runSince`). -/
+
+/-- The streak before #346: reset in the settle block. -/
+def streakOld (s : Nat) : SEv → Nat
+  | .commit => s
+  | .okArm => s
+  | .settleOk => 0
+  | .timeout => s + 1
+
+/-- #346's first fix: reset in the worker's `Ok` arm, after `WriteCtx::run`
+returned. -/
+def streakOkArm (s : Nat) : SEv → Nat
+  | .commit => s
+  | .okArm => 0
+  | .settleOk => s
+  | .timeout => s + 1
+
+/-- Resets at the commit and the settle, which the fix does not keep. -/
+def streakBoth (s : Nat) : SEv → Nat
+  | .commit => 0
+  | .okArm => s
+  | .settleOk => 0
+  | .timeout => s + 1
+
+/-- **#346: the streak before the fix counts a timeout that follows a
+commit.** Two lookup timeouts, then another lane's write commits; before
+that write's settle block resets the streak, a third first-attempt timeout
+takes the lanes lock. The old streak reads 2 and holds it as the third of a
+run; nothing was timed out since the commit (`runSince` is 0), so the rule
+says it is a first timeout, and the fixed streak settles it `failed`. Rust
+test `a_lookup_timeout_between_a_commit_and_its_settle_settles_failed`. -/
+theorem streak_old_counts_across_commit :
+    let pre := [SEv.timeout, .timeout, .commit]
+    holdsS (heldErrW false (pre.foldl streakOld 0) .lookupTimeout) = true ∧
+      runSince pre = 0 ∧
+      holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = false := by
+  decide
+
+/-- **#346's first fix still counted a timeout that follows a commit.** It
+reset the streak in the worker's `Ok` arm, which runs after `WriteCtx::run`
+returns: after the index mirroring, which waits for the graph read and index
+write locks. Two lookup timeouts, then another lane's write commits; before
+its `Ok` arm runs, a third first-attempt timeout takes the lanes lock. The
+`Ok`-arm streak reads 2 and holds it; `runSince` is 0, and the fixed streak,
+reset inside the commit, settles it `failed`. Rust test
+`a_lookup_timeout_between_a_commit_and_its_ok_arm_settles_failed`. -/
+theorem streak_okArm_counts_across_commit :
+    let pre := [SEv.timeout, .timeout, .commit]
+    holdsS (heldErrW false (pre.foldl streakOkArm 0) .lookupTimeout) = true ∧
+      runSince pre = 0 ∧
+      holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = false := by
+  decide
+
+/-- **Keeping the settle's reset as well is wrong the other way.** A write
+commits, two timeouts follow, then its settle runs: with both resets the
+streak reads 0 and the third timeout settles `failed`, though it is the third
+with nothing applied between (`runSince` is 2) and the rule holds it, as the
+fixed streak does. -/
+theorem streak_both_forgets_run :
+    let pre := [SEv.commit, .timeout, .timeout, .settleOk]
+    holdsS (heldErrW false (pre.foldl streakBoth 0) .lookupTimeout) = false ∧
+      runSince pre = 2 ∧
+      holdsS (heldErrW false (pre.foldl streakNew 0) .lookupTimeout) = true := by
   decide
 
 end Lambo.Drain

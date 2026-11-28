@@ -32,10 +32,10 @@ Precedence: a same-statement twin (b); a review verdict (a); a superseding count
 | `Contract/Store.lean` | 20 | 11 | 1 | 1 | 0 | 0 |
 | `Discovery.lean` | 15 | 9 | 0 | 0 | 0 | 0 |
 | `Dispatch.lean` | 85 | 46 | 9 | 9 | 0 | 0 |
-| `Drain/Examples.lean` | 7 | 0 | 0 | 0 | 0 | 0 |
-| `Drain/History.lean` | 35 | 21 | 1 | 1 | 0 | 0 |
-| `Drain/Proofs/Base.lean` | 43 | 41 | 0 | 0 | 0 | 0 |
-| `Drain/Proofs/Close.lean` | 88 | 69 | 0 | 0 | 0 | 0 |
+| `Drain/Examples.lean` | 11 | 0 | 0 | 0 | 0 | 0 |
+| `Drain/History.lean` | 39 | 24 | 1 | 1 | 0 | 0 |
+| `Drain/Proofs/Base.lean` | 40 | 38 | 0 | 0 | 0 | 0 |
+| `Drain/Proofs/Close.lean` | 83 | 69 | 0 | 0 | 0 | 0 |
 | `Drain/Proofs/Replay.lean` | 50 | 43 | 0 | 0 | 0 | 0 |
 | `Drain/Proofs/Worker.lean` | 26 | 20 | 0 | 0 | 0 | 0 |
 | `Expand.lean` | 25 | 20 | 2 | 2 | 0 | 0 |
@@ -222,7 +222,7 @@ Other references, theorems with at least one: named 1395, simp 37, example 6, an
 
 ## `Drain/History.lean`
 
-- (a) `close_final` (line 264): reviewed against the rule: `Entry::settle` after the close before #295: no later settle changes a receipt (history).
+- (a) `close_final` (line 331): reviewed against the rule: `Entry::settle` after the close before #295: no later settle changes a receipt (history).
 
 ## `Expand.lean`
 

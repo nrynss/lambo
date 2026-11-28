@@ -1,80 +1,151 @@
 /-
-# Write-queue drain: the history layer (before #294 and #295)
+# Write-queue drain: the history layer (before #294, #295 and #345)
 
 **Nothing in this file describes the current Rust.** It holds the lane worker
-loop as it was before #295 (`work`, and `close` over it), under which an
-in-session embedder outage (or lookup timeout) answered `failed`, left the
-intent owed and let the agent's next write run; and the theorems over the
-replay loop before #294 and #295 (`replay`, `loop` over `replayStep`). The
-pieces the current model shares with them (`workerStep`, the receipt store,
-`settleDeferred`, the lane drain, the `Drop` path, the restart map's seed,
-`replayStep` and its arms, `loop`, `replay`) are defined, with their
-theorems, in `Base.lean`. The file is built and its theorems are in the axiom
-audit, but `formal/models.toml` does not check it against the Rust for drift,
-and the docs do not cite it. Its theorems were the evidence for the original
-findings (`Examples.lean`), so they stay. The current counterparts are named
-in each doc comment.
+loop before #295 (`work`, and `close` over it), under which an in-session
+embedder outage or lookup timeout answered `failed`, left the intent owed and
+let the agent's next write run, with the lane drain it ran to completion
+(`drainLane`, `drain`); the replay loop before #294 (`loop`, `replay`, over
+`replayStep`); and the close before #345 over the current worker. It is built
+and in the axiom audit, but `formal/models.toml` does not check it for drift
+and the docs do not cite it. Its theorems are the evidence for the findings
+in `Examples.lean`; each doc comment names the current counterpart.
 
-## Results (before #295)
+## Results
 
-* `drain_settles_each`, `work_log`, `drained_final`: every admitted write is
-  settled once with the worker's answer (`applied` or `failed`), one batch per
-  job, and no later settle changes it.
+* `drain_fifo`, `drain_settles_each`, `work_log`, `drained_final`: a lane
+  drained to completion took exactly its submitted writes, in order, and
+  every admitted write was settled once with the worker's answer.
 * `crash_never_reapplies`: a write in the durable log has its consume beside
-  it (`workerStep_atomic`), so no replay after a crash applies it again
-  (`Graph::consume_write_intent`: "the double-apply this design excludes").
-  Proved for logs shaped "all puts, then worker batches": the Rust relies on
-  the admission lock order (graph write, then lanes) to put each job's put
-  before its consume, and the model takes that shape as given. A crash in the
-  middle of a replay is not proved (the replay's own batches have the same
-  write-with-consume shape, `loop_facts`). Like `shutdown_no_silent_loss`, it
-  is about one process's log over an empty intent table: an earlier epoch's
-  backlog is not in the statement. Current counterpart:
+  it, so no replay after a crash applies it again, for logs shaped "all puts,
+  then worker batches" over an empty intent table. Current:
   `crash_never_reappliesW`.
 * `close_settles_all`, `close_answer`, `shutdown_no_silent_loss`: after
-  `close()` every receipt is settled, and each admitted write is drained,
-  `intent_durable` and owed by the next replay, or `close_unflushed`
-  ("deferred, not lost", `quiesce`). Current counterparts:
-  `shutdown_no_silent_lossW`, `held_at_closeW`.
+  `close()` each admitted write was drained, `intent_durable` and owed, or
+  `close_unflushed`. Current: `shutdown_no_silent_lossD`, `held_at_closeW`.
 * `outage_failed_but_owed`: an in-session `EmbedUnavailable` answered
-  `failed` and left the write owed. The current Rust holds the write
-  (`pending_replay`), `outage_holdsW`.
+  `failed` and left the write owed. Current: `outage_holdsW`.
 * `replay_applied_pending`, `replay_drained`, `replay_idempotent`,
-  `replay_complete_idem`: the replay before #294 applied only unconsumed
-  rows; replaying a fully drained queue changed nothing; a replayed write was
-  never applied by a later replay. Current counterpart:
-  `serveR_applied_pending`.
-* `replay_order`, `replay_seq_order`, `replay_epoch_seq_order`: one serve
-  applied in load order, which within one process is sequence (admission)
-  order as long as no later admission carries an earlier issue time.
-* `inputFact_goes_on`: a refusal that is a fact about the intent's input
-  (`Embed`, `ImageIdTaken`, `Reference`, a cycle refusal, an undecodable
-  payload) settled `failed` and the replay went on (`StoreError::is_cycle_refusal`
-  doc; test `a_cycle_refused_at_replay_settles_failed_and_the_replay_goes_on`).
-  `sessionWide_stops`: any other non-transient error stopped it, the intent
-  and the rest left unconsumed. `replayStep_inputRefusal_stops`: the
-  graph-dependent refusal #294 fixed, and `replayStep_sessionWide`, the step
-  arm that stopped on it. The step's other arms (`replayStep_cycle`,
-  `replayStep_decode`, `unavailable_skips`, ...) are still the current
-  step's and are in `Base.lean`. Current counterparts: `fixed_input_goes_on`,
-  `fixed_sessionWide_stops` (#294) and `fixedD_input_goes_on` (#295).
+  `replay_complete_idem`: the replay applied only unconsumed rows and never
+  re-applied a replayed write. Current: `serveR_applied_pending`.
+* `replay_order`, `load_seq_order`, `replay_seq_order`,
+  `replay_epoch_seq_order`: one serve applied in load order, sequence order
+  within a process while no later admission carried an earlier issue time.
+  Current: `fixedLoad_sorted`.
+* `inputFact_goes_on`, `sessionWide_stops`, `replayStep_sessionWide`,
+  `replayStep_inputRefusal_stops`: a fact about the input settled `failed`
+  and the replay went on; any other non-transient error, the graph-dependent
+  refusals #294 fixed included, stopped it. Current: `fixedD_input_goes_on`,
+  `fixed_sessionWide_stops`.
+* `closeW_vouches_dead_letteredW`: before #345 the close vouched for a
+  set-aside write whose put a dead letter dropped. Current:
+  `closeD_never_vouches_dropped`.
 
-Boundary: this is the Rust before #294 and #295, not checked for drift.
-`crash_never_reapplies` is proved for logs shaped "all puts, then worker
-batches" over an empty intent table; a crash in the middle of a replay is not
-proved.
+Boundary: a crash in the middle of a replay is not proved.
 -/
 
-import LamboProofs.Drain.Proofs.Base
+import LamboProofs.Drain.Proofs.Close
 
 namespace Lambo.Drain
 
 open Lambo.Receipts (Answer Entry settle Lane)
 
+/-- The replay loop over the pending intents, strictly one at a time. An
+applied intent is consumed `applied_after_restart` in the same commit
+(`WriteCtx::run` with a `ConsumeStamp`); a failed one is consumed `failed` on
+its own hold; a skipped one is left unconsumed; a stop leaves it and every
+later one unconsumed. -/
+def loop (rout : Job → RR) : Streaks → List Intent → ROut
+  | _, [] => ROut.empty
+  | s, i :: rest =>
+    match replayStep i.job.image (rout i.job) s with
+    | (.applied, s') =>
+      let o := loop rout s' rest
+      { o with
+        answers := (i.job.key, .appliedAfterRestart) :: o.answers
+        log := [.write i.job.key, .consume i.job.key .appliedAfterRestart] :: o.log
+        applied := i.job :: o.applied }
+    | (.failed, s') =>
+      let o := loop rout s' rest
+      { o with
+        answers := (i.job.key, .failed) :: o.answers
+        log := [.consume i.job.key .failed] :: o.log
+        failed := i.job :: o.failed }
+    | (.skip, s') => loop rout s' rest
+    | (.stop b, _) => { ROut.empty with block := some b }
+
+/-- `spawn_replay` after seeding: nothing owed, nothing to do; otherwise the
+liveness embed gates the loop, and a failed one consumes nothing. -/
+def replay (live : Bool) (rout : Job → RR) (intents : List Intent) : ROut :=
+  match pendingOf intents with
+  | [] => ROut.empty
+  | p => if live then loop rout ⟨0, 0⟩ p else { ROut.empty with block := some .embedder }
+
+/-- Drain a lane to completion: pop until the queue is empty. -/
+def drainLane {α : Type} : Nat → Lane α → Lane α
+  | 0, l => l
+  | n + 1, l => drainLane n l.pop
+
+def drain {α : Type} (l : Lane α) : Lane α := drainLane l.queue.length l
+
+theorem drainLane_spec {α : Type} :
+    ∀ (n : Nat) (l : Lane α), l.queue.length = n →
+      (drainLane n l).queue = [] ∧ (drainLane n l).taken = l.history := by
+  intro n
+  induction n with
+  | zero =>
+    intro l h
+    refine ⟨List.eq_nil_of_length_eq_zero h, ?_⟩
+    show l.taken = l.taken ++ l.queue
+    rw [List.eq_nil_of_length_eq_zero h, List.append_nil]
+  | succ n ih =>
+    intro l h
+    show (drainLane n l.pop).queue = [] ∧ (drainLane n l.pop).taken = l.history
+    obtain ⟨queue, taken⟩ := l
+    cases queue with
+    | nil => simp at h
+    | cons x q =>
+      have hl : (Lane.pop ⟨x :: q, taken⟩).queue.length = n := by
+        simp [Lane.pop] at h ⊢
+        exact h
+      obtain ⟨h1, h2⟩ := ih _ hl
+      exact ⟨h1, h2.trans (Lane.pop_history _)⟩
+
+/-- **The worker before #295 drained each lane in submission order, all of
+it.** However admissions and worker steps interleaved (`Receipts.run`), a
+lane drained to completion has taken exactly the submitted jobs, in
+submission order: the completion of `Receipts.lane_fifo`. The current worker
+takes each lane in that order too (`Receipts.lane_fifo`, `runW_ord`). -/
+theorem drain_fifo (ops : List (Lambo.Receipts.Op Job)) :
+    (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).queue = [] ∧
+      (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).taken = Lambo.Receipts.submitted ops := by
+  obtain ⟨h1, h2⟩ := drainLane_spec _ (Lambo.Receipts.run ⟨[], []⟩ ops) rfl
+  refine ⟨h1, ?_⟩
+  unfold drain
+  rw [h2, Lambo.Receipts.run_history]
+  rfl
+
+/-- **With issue times in sequence order, the load is sequence order.** If,
+among the rows, a higher sequence number never has an earlier issue time, the
+(`issued_ms`, `lane_seq`) order is `lane_seq` order, the admission order the
+`WriteIntent::lane_seq` doc promises. A monotone clock alone does not give the
+hypothesis: `next_receipt` takes the sequence number before it reads the clock
+and before admission takes its lock, so two concurrent admissions can read
+the clock in the other order. It holds for sequential admissions under a
+clock that does not step back. `clock_step_reorders` is the other side. -/
+theorem load_seq_order (l : List Intent)
+    (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.rid < b.job.rid → a.job.ms ≤ b.job.ms) :
+    (loadOrder l).Pairwise (fun a b => a.job.rid ≤ b.job.rid) := by
+  apply List.Pairwise.imp_of_mem _ (loadOrder_sorted l)
+  intro a b ha hb hab
+  rw [keyLe_iff] at hab
+  have hm := hmono b (mem_loadOrder.mp hb) a (mem_loadOrder.mp ha)
+  omega
+
 /-! ## The worker loop and the close before #295
 
-`work` runs `Base.lean`'s `workerStep` over the jobs a worker takes; `close`
-composes it with `settle_deferred`'s set-aside. -/
+`work` runs `workerStep` (`Drain/Proofs/Base.lean`) over the jobs a worker
+takes; `close` composes it with `settle_deferred`'s set-aside. -/
 
 /-- The worker loop **before #295** over the jobs it takes, in the order it
 takes them: run, settle, next (current worker: `runW`). `fence` and `out` are the lease state and the run result at that
@@ -104,9 +175,7 @@ def close (done : List Job) (fence : Job → Bool) (out : Job → RunResult) (no
 Every theorem in this section is about `workerStep`/`work`, the worker
 **before #295** (in-session outage answered `failed`). The current worker's
 counterparts: `InvW` and `sessionW_inv` (what each write's receipt holds),
-`runW_log_refines` (its batches are `workerStep`'s). `workerStep_keys` and
-`workerStep_atomic`, which the current worker's theorems use, are in
-`Base.lean`. -/
+`runW_log_refines` (its batches are `workerStep`'s), in `Drain/Proofs/`. -/
 
 /-- The worker **before #295** only ever settles with a settled answer. The
 current worker also answers `pending_replay` (unsettled) for a held write:
@@ -196,9 +265,7 @@ theorem work_lookup (fence : Job → Bool) (out : Job → RunResult) (now : Int)
       rw [lookup_update_ne s _ hne]
       exact he
 
-/-! ## Draining a lane through the worker before #295
-
-`drain` and `drain_fifo` (the lane's own order) are in `Base.lean`. -/
+/-! ## Draining a lane through the worker before #295 -/
 
 /-- **Every admitted write is settled, once, with the worker's answer.** A
 lane drained to completion (no write outstanding) settles every job it was
@@ -237,9 +304,9 @@ theorem drained_final (fence : Bool) (j : Job) (r : RunResult) (e : Entry)
 
 The theorems about `close` (`close_settles_all`, `close_final`,
 `close_answer`) are over the worker **before #295**; their current
-counterparts are `shutdown_no_silent_lossW`, `held_at_closeW` and
-`closeW_retry_upgradesW`. The lemmas about `deferEntry` and
-`settleDeferred` they share with the current close are in `Base.lean`. -/
+counterparts are `shutdown_no_silent_lossD`, `held_at_closeW` and
+`closeD_retryD`. The lemmas about `deferEntry` and `settleDeferred` they
+share with the current close are in `Drain/Proofs/Base.lean`. -/
 
 /-- **No receipt is left pending by a close.** Whatever the drain finished
 before its budget, every receipt in the store is settled afterwards: the drain
@@ -324,9 +391,8 @@ theorem close_answer (all done : List Job) (fence : Job → Bool) (out : Job →
 
 /-! ## Replay (before #294 and #295)
 
-`loop` and `replay` over `replayStep` (`Base.lean`): the replay as it was
-before #294 and #295. The current replay is `serveR` over `fixedLoad`
-(`Replay.lean`, `Worker.lean`). -/
+`loop` and `replay` over `replayStep`: the replay as it was before #294 and
+#295. The current replay is `serveR` over `fixedLoad` (`Drain/Spec/Worker.lean`). -/
 
 theorem loop_nil (rout : Job → RR) (s : Streaks) : loop rout s [] = ROut.empty := rfl
 
@@ -538,7 +604,7 @@ theorem replay_epoch_seq_order (live : Bool) (rout : Job → RR) (l : List Inten
 /-! ## How the replay before #294 settles a refusal
 
 Over the old `loop`; the step's arms that are still current are in
-`Base.lean`. -/
+`Drain/Spec/Base.lean`. -/
 
 /-- **Before #294**, any other error that was neither transient nor a fact
 about the input stopped `spawn_replay`: a non-cycle store error (another
@@ -651,8 +717,8 @@ theorem crash_never_reapplies (all done : List Job) (fence : Job → Bool)
 /-! ## Shutdown: drained or persisted, never silently lost (worker before #295)
 
 Over `work` and `close`, the worker **before #295**. The current
-counterparts are in `Close.lean`: `shutdown_no_silent_lossW`, `held_at_closeW`,
-`outage_holdsW`. -/
+counterparts are in `Drain/Spec/Close.lean`: `shutdown_no_silent_lossD`,
+`held_at_closeW`, `outage_holdsW`. -/
 
 /-- A job whose own batch consumes nothing, and whose number no other
 finished job shares, is still owed in the log: its row is unconsumed. Over
@@ -760,5 +826,22 @@ theorem outage_failed_but_owed (all done : List Job) (fence : Job → Bool)
     subst hdj
     rw [hws] at hm
     simp at hm
+
+/-- **#345, in general: the close before the fix vouches for a dead-lettered
+put.** In every reachable session, a set-aside write (running, held or
+queued when the close began) whose put the history dead-lettered answers
+`intent_durable` at a `closeW` whose flush completed, though its put is not
+committed. Current: `closeD_never_vouches_dropped`. -/
+theorem closeW_vouches_dead_letteredW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (hkeys : (all.map (·.key)).Nodup) (hist : List Landed) (now' : Int)
+    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue)
+    (hd : j.key ∈ droppedPuts (sessLog all st) hist) :
+    ansOf (closeW .durable now' st) j.key = some .intentRecorded ∧
+      j.key ∉ committedPuts (sessLog all st) hist := by
+  obtain ⟨a, h1, h2⟩ := setAside_unsettled hst hnd hall hj
+  exact ⟨(ansOf_closeW_unsettled h1 h2).2,
+    fun hc => keysLanded_disjoint _ hist (sessLog_puts_nodup hst hkeys) _ hc hd⟩
 
 end Lambo.Drain
