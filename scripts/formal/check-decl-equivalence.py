@@ -28,7 +28,10 @@ not the source text), and compares the two by fully qualified name:
   the theorem at HEAD that states the same thing or more (`-` when there is
   none, as for a dead helper). A definition (or other non-theorem) can be
   listed only when no declaration left at HEAD mentions it in its type or
-  value, so its deletion changes nothing the others state;
+  value, so its deletion changes nothing the others state. FILE keeps every
+  deletion, so a NAME declared neither at the base nor at HEAD was deleted
+  before the base: it is counted, not compared, and only its KEPT must still
+  be declared at HEAD;
 * no declaration is added at HEAD other than a NEW of FILE;
 * every theorem at HEAD rests on `propext`, `Quot.sound` and
   `Classical.choice` at most.
@@ -375,8 +378,12 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
     targets = set(renames.values())
     for name, (reason, kept) in sorted(deletions.items()):
         b = base.get(name)
-        if b is None:
+        if b is None and name in head:
             errors.append(f"{name}: listed as deleted, but not declared at the base")
+        elif b is None:
+            # Deleted before the base: the file keeps every deletion, so a
+            # later base has some already gone. Only its KEPT is checked.
+            pass
         elif b["kind"] != "theorem":
             users = mentioned_by(hd, name)
             if users:
@@ -540,10 +547,13 @@ def main(argv=None):
             print(f"  renamed {len(renames)} (moved helpers):")
             for old, new in sorted(renames.items()):
                 print(f"    {old} -> {new}")
-        if deletions:
-            print(f"  deleted {len(deletions)}:")
-            for name, (reason, kept) in sorted(deletions.items()):
+        now = {n: v for n, v in deletions.items() if n in base}
+        if now:
+            print(f"  deleted {len(now)}:")
+            for name, (reason, kept) in sorted(now.items()):
                 print(f"    {name}: {reason}" + (f" (kept: {kept})" if kept else ""))
+        if len(now) < len(deletions):
+            print(f"  {len(deletions) - len(now)} listed deletion(s) predate the base")
         if restated:
             by_model = Counter(".".join(n.split(".")[:2]) for n in restated)
             print(f"  restated {len(restated)} in Spec form, each unfolding to its old statement: "

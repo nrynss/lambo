@@ -153,6 +153,24 @@ class Equivalence(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Lambo.A.t: theorem at the base, not declared at HEAD", out)
 
+    def test_a_deletion_before_the_base_is_counted_not_compared(self):
+        # The deletions file keeps every deletion; against a later base, a
+        # row declared on neither side was deleted before it.
+        listed = "Lambo.Old.gone\tdeleted long ago\tLambo.A.helper\n"
+        code, out = self.run_check(BASE, BASE, deletions=listed)
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 listed deletion(s) predate the base", out)
+        self.assertNotIn("deleted 1:", out)
+        # Its KEPT must still be declared.
+        head = [d for d in BASE if d["name"] != "Lambo.A.helper"]
+        code, out = self.run_check(head, head, deletions=listed)
+        self.assertEqual(code, 1)
+        self.assertIn("listed as deleted for Lambo.A.helper, which is not declared at HEAD", out)
+        # Declared at HEAD and not at the base is still an error.
+        code, out = self.run_check(BASE, BASE + [decl("Lambo.Old.gone")], deletions=listed)
+        self.assertEqual(code, 1)
+        self.assertIn("Lambo.Old.gone: listed as deleted, but not declared at the base", out)
+
     def test_listed_deletion_must_be_gone_unused_and_keep_its_counterpart(self):
         code, out = self.run_check(BASE, BASE, deletions="Lambo.B.helper\tr\t-\n")
         self.assertEqual(code, 1)
