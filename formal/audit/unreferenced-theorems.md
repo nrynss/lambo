@@ -33,10 +33,10 @@ Precedence: a same-statement twin (b); a review verdict (a); a superseding count
 | `Discovery.lean` | 15 | 9 | 0 | 0 | 0 | 0 |
 | `Dispatch.lean` | 85 | 46 | 9 | 9 | 0 | 0 |
 | `Drain/Examples.lean` | 11 | 0 | 0 | 0 | 0 | 0 |
-| `Drain/History.lean` | 39 | 24 | 1 | 1 | 0 | 0 |
+| `Drain/History.lean` | 40 | 24 | 1 | 1 | 0 | 0 |
 | `Drain/Proofs/Base.lean` | 40 | 38 | 0 | 0 | 0 | 0 |
 | `Drain/Proofs/Close.lean` | 83 | 69 | 0 | 0 | 0 | 0 |
-| `Drain/Proofs/Replay.lean` | 50 | 43 | 0 | 0 | 0 | 0 |
+| `Drain/Proofs/Replay.lean` | 49 | 43 | 0 | 0 | 0 | 0 |
 | `Drain/Proofs/Worker.lean` | 26 | 20 | 0 | 0 | 0 | 0 |
 | `Expand.lean` | 25 | 20 | 2 | 2 | 0 | 0 |
 | `Fit.lean` | 73 | 54 | 4 | 4 | 0 | 0 |
@@ -222,7 +222,7 @@ Other references, theorems with at least one: named 1395, simp 37, example 6, an
 
 ## `Drain/History.lean`
 
-- (a) `close_final` (line 331): reviewed against the rule: `Entry::settle` after the close before #295: no later settle changes a receipt (history).
+- (a) `close_final` (line 336): reviewed against the rule: `Entry::settle` after the close before #295: no later settle changes a receipt (history).
 
 ## `Expand.lean`
 
@@ -550,7 +550,7 @@ Each row's reason says why it went, and its group: found unreferenced by this au
 - `Drain.replayWith`: #350 Spec review: replay with its step as a parameter, used only by replayWith_replayStep; the examples run loopWith.
 - `Drain.stepInput_agrees`: #350 Spec review: compares the #294 fix step with the step before #294, which the Rust no longer runs.
 - `Drain.stepInput_inputRefusal`: #350 Spec review: an rfl unfolding of stepInput's first arm; stepInput_refusesInput states that every input refusal settles failed.
-- `Drain.fixed_input_goes_on`: #350 Spec review: stated over the #294 loop (loopWith stepInput), which the Rust no longer runs; fixedD_input_goes_on states it over loopD.
+- `Drain.fixed_input_goes_on`: #350 Spec review: stated over the #294 loop (loopWith stepInput), which the Rust no longer runs; fixedD_input_goes_on (Drain/History.lean) states it over loopD stepFixed.
 - `Drain.fixed_agrees_with_worker`: #350 Spec review: proved by rfl, about the worker before #295 (workerStep); the current worker's batches are runW_log_refines's.
 - `Drain.stepFixed_badId`: #350 Spec review: an rfl unfolding of stepFixed's badId arm, which the definition states.
 - `Drain.fixed_badId_settled`: #350 Spec review: describes the #295 fix as first committed (stepFixed under loopD, settling every unparseable id); the current step is stepQ.

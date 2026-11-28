@@ -311,13 +311,6 @@ theorem mem_eq_of_key {L : List Intent} (hnd : (L.map (·.job.key)).Nodup) {a b 
         exact absurd (h.symm ▸ List.mem_map_of_mem (f := (·.job.key)) ha') hnd.1
       | inr hb' => exact ih hnd.2 ha' hb'
 
-theorem fixedD_input_goes_on : Spec.fixedD_input_goes_on := by
-  intro rout s d i rest e he hf hd
-  have h := stepFixed_refusesInput i.job.image e s hf
-  refine ⟨(stepFixed i.job.image (rout i.job) s).2, loopD_failed hd ?_⟩
-  rw [he]
-  exact Prod.ext h rfl
-
 /-! ### The load order -/
 
 theorem minE_spec : ∀ (l : List Intent) (x : Intent),

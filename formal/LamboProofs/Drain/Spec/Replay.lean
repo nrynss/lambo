@@ -23,7 +23,6 @@ Results:
 * `replay_dead_letter_two_restarts`: a rejected mixed batch settles the bad intent and
   leaves its neighbour owed once.
 * `fixed_sessionWide_stops`: a non-transient error that is not an input refusal stops the replay.
-* `fixedD_input_goes_on`: an input refusal settles `failed` and the replay goes on.
 
 Boundary: each replay step is atomic and a run's result is an input per
 write. A deferred agent stays deferred for the rest of the serve, and the
@@ -31,10 +30,10 @@ retry pass is one more attempt, not a timer. A deferred agent's intent is
 passed over before its run result is read, where the Rust checks the lease
 and the seal first: that moves only where a halting replay stops. `fixedLoad`
 regroups a row whose id does not parse with its process, where
-`replay_order` leaves it in place; such a row is never applied. Two results
-are stated over an earlier step or loop whose arms the current ones keep for
-those answers: `fixed_sessionWide_stops` over `loopWith stepInput`, and
-`fixedD_input_goes_on` over `loopD stepFixed`; neither is stated over `stepQ`.
+`replay_order` leaves it in place; such a row is never applied.
+`fixed_sessionWide_stops` is stated over an earlier loop
+(`loopWith stepInput`) whose arms the current step keeps for those answers,
+not over `stepQ`.
 -/
 
 import LamboProofs.Drain.Spec.Base
@@ -149,19 +148,6 @@ abbrev Spec.loopD_no_overtake : Prop :=
 /-- Per-epoch sequence order of a list of rows. -/
 abbrev EpochSorted (l : List Intent) : Prop :=
   l.Pairwise (fun a b => a.job.epoch = b.job.epoch → a.job.rid ≤ b.job.rid)
-
-/-- **An input refusal settles `failed` and the replay goes on**: its intent is
-consumed `failed`, and the loop continues with the next. -/
-abbrev Spec.fixedD_input_goes_on : Prop :=
-  ∀ (rout : Job → RR) (s : Streaks) (d : List Nat) (i : Intent) (rest : List Intent) (e : Err),
-    rout i.job = .run (.err e) →
-    e.refusesInput = true →
-    i.job.agent ∉ d →
-    ∃ s', loopD stepFixed rout s d (i :: rest) =
-      { loopD stepFixed rout s' d rest with
-        answers := (i.job.key, .failed) :: (loopD stepFixed rout s' d rest).answers
-        log := [.consume i.job.key .failed] :: (loopD stepFixed rout s' d rest).log
-        failed := i.job :: (loopD stepFixed rout s' d rest).failed }
 
 /-! ## The load order (`replay_order`) -/
 

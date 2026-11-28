@@ -6,10 +6,13 @@ loop before #295 (`work`, and `close` over it), under which an in-session
 embedder outage or lookup timeout answered `failed`, left the intent owed and
 let the agent's next write run, with the lane drain it ran to completion
 (`drainLane`, `drain`); the replay loop before #294 (`loop`, `replay`, over
-`replayStep`); and the close before #345 over the current worker. It is built
-and in the axiom audit, but `formal/models.toml` does not check it for drift
-and the docs do not cite it. Its theorems are the evidence for the findings
-in `Examples.lean`; each doc comment names the current counterpart.
+`replayStep`); the replay loop over #295's first step (`loopD stepFixed`,
+before an id in another receipt format was quarantined); and the close before
+#345 over the current worker. It is built and in the axiom audit, but
+`formal/models.toml` does not check it for drift and the docs do not cite it.
+Its theorems are the evidence for the findings in `Examples.lean`, or state
+an earlier layer's result; each doc comment names the current counterpart
+where there is one.
 
 ## Results
 
@@ -35,8 +38,10 @@ in `Examples.lean`; each doc comment names the current counterpart.
 * `inputFact_goes_on`, `sessionWide_stops`, `replayStep_sessionWide`,
   `replayStep_inputRefusal_stops`: a fact about the input settled `failed`
   and the replay went on; any other non-transient error, the graph-dependent
-  refusals #294 fixed included, stopped it. Current: `fixedD_input_goes_on`,
-  `fixed_sessionWide_stops`.
+  refusals #294 fixed included, stopped it. Current: `fixed_sessionWide_stops`.
+* `fixedD_input_goes_on`: over `stepFixed`, an input refusal settled `failed`
+  and the loop went on with that step, which consumed an id in another
+  receipt format `failed` where the current `stepQ` quarantines it.
 * `closeW_vouches_dead_letteredW`: before #345 the close vouched for a
   set-aside write whose put a dead letter dropped. Current:
   `closeD_never_vouches_dropped`.
@@ -649,6 +654,28 @@ theorem sessionWide_stops (rout : Job → RR) (s : Streaks) (i : Intent) (rest :
 before #294; `store_error_blocks_backlog` is the backlog it blocks). -/
 theorem replayStep_inputRefusal_stops (img : Bool) (s : Streaks) :
     replayStep img (.run (.err .inputRefusal)) s = (.stop .other, s) := rfl
+
+/-! ## How the replay over #295's first step settles an input refusal
+
+Over `loopD stepFixed`: the current step `stepQ` answers this intent the same
+way, but quarantines an id in another receipt format that `stepFixed`
+consumes `failed`, so the loop on the rest is not the current replay's. -/
+
+/-- **#294 still held in the loop over `stepFixed`**: an input refusal is
+consumed `failed` and the loop goes on with `stepFixed`. No current statement
+over `stepQ` yet. -/
+theorem fixedD_input_goes_on (rout : Job → RR) (s : Streaks) (d : List Nat) (i : Intent)
+    (rest : List Intent) (e : Err) (he : rout i.job = .run (.err e)) (hf : e.refusesInput = true)
+    (hd : i.job.agent ∉ d) :
+    ∃ s', loopD stepFixed rout s d (i :: rest) =
+      { loopD stepFixed rout s' d rest with
+        answers := (i.job.key, .failed) :: (loopD stepFixed rout s' d rest).answers
+        log := [.consume i.job.key .failed] :: (loopD stepFixed rout s' d rest).log
+        failed := i.job :: (loopD stepFixed rout s' d rest).failed } := by
+  have h := stepFixed_refusesInput i.job.image e s hf
+  refine ⟨(stepFixed i.job.image (rout i.job) s).2, loopD_failed hd ?_⟩
+  rw [he]
+  exact Prod.ext h rfl
 
 /-! ## Crash: a durable write is never replayed (worker before #295)
 

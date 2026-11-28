@@ -137,7 +137,7 @@ Lambo.Drain.replayWith_replayStep	#350 Spec review: the model compared with itse
 Lambo.Drain.replayWith	#350 Spec review: replay with its step as a parameter, used only by replayWith_replayStep; the examples run loopWith	-
 Lambo.Drain.stepInput_agrees	#350 Spec review: compares the #294 fix step with the step before #294, which the Rust no longer runs	-
 Lambo.Drain.stepInput_inputRefusal	#350 Spec review: an rfl unfolding of stepInput's first arm; stepInput_refusesInput states that every input refusal settles failed	-
-Lambo.Drain.fixed_input_goes_on	#350 Spec review: stated over the #294 loop (loopWith stepInput), which the Rust no longer runs; fixedD_input_goes_on states it over loopD	-
+Lambo.Drain.fixed_input_goes_on	#350 Spec review: stated over the #294 loop (loopWith stepInput), which the Rust no longer runs; fixedD_input_goes_on (Drain/History.lean) states it over loopD stepFixed	-
 Lambo.Drain.fixed_agrees_with_worker	#350 Spec review: proved by rfl, about the worker before #295 (workerStep); the current worker's batches are runW_log_refines's	-
 Lambo.Drain.stepFixed_badId	#350 Spec review: an rfl unfolding of stepFixed's badId arm, which the definition states	-
 Lambo.Drain.fixed_badId_settled	#350 Spec review: describes the #295 fix as first committed (stepFixed under loopD, settling every unparseable id); the current step is stepQ	-

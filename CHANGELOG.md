@@ -10,17 +10,17 @@
   current Rust as a named proposition `Spec.<name>` with no proof, and
   `Drain/Proofs/<File>.lean` proves it as `theorem <name> : Spec.<name>`,
   beside the lemmas the proofs need. Of the drain model's 93 named results,
-  39 are now `Spec` propositions, each checked by
+  38 are now `Spec` propositions, each checked by
   `scripts/formal/check-decl-equivalence.py --spec-form` to state exactly
   what its theorem stated (the printed kernel terms are equal and every
   definition they reach is unchanged); 21 that a proof uses and a stronger
-  kept result covers are `Proofs` lemmas, stated in full as before; 7
-  findings and pre-fix results moved, unchanged, to `Drain/History.lean` (3)
-  and `Drain/Examples.lean` (4); and 26 were deleted, with 6 lemmas and 17
+  kept result covers are `Proofs` lemmas, stated in full as before; 8 findings
+  and results over earlier layers moved, unchanged, to `Drain/History.lean`
+  (4) and `Drain/Examples.lean` (4); and 26 were deleted, with 6 lemmas and 17
   definitions only they used, because they stated no guarantee about the
   current Rust: `rfl` unfoldings of a definition's arms, the model compared
-  with itself, and statements over the first in-session hold model, the
-  replay without its retry pass and rules the Rust no longer runs
+  with itself, and statements over the first in-session hold model, the replay
+  without its retry pass and rules the Rust no longer runs
   (`formal/audit/deleted-theorems.tsv`, "#350 Spec review"). The models now
   have 2,367 theorems, from 2,399, and the four `Spec` files are about 1,400
   lines, from 2,900. `--only-form-changes` runs the form comparison alone,
