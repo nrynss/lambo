@@ -145,10 +145,12 @@ subsystem files is now two: `Drain/Spec/<File>.lean` holds the definitions
 and every result as a proposition `Spec.<name>`, and
 `Drain/Proofs/<File>.lean` proves it as `theorem <name> : Spec.<name>`.
 Every theorem keeps its name, and `check-decl-equivalence.py --spec-form`
-confirmed that each proposition unfolds to the statement its theorem had, so
-no row's verdict changes. The rows name the `Spec` file, and the page's
-anchors cite the propositions (`lean: Drain.Spec.<name>`); the anchor check
-now refuses a theorem or a lemma of the proofs layer.
+confirmed that each proposition unfolds to the statement its theorem had.
+The rows name the `Spec` file, and the page's anchors cite the propositions
+(`lean: Drain.Spec.<name>`); the anchor check now refuses a theorem or a
+lemma of the proofs layer. Three rows change verdict, below; a row whose
+theorem was deleted or kept only as a proof's lemma now cites a kept result
+that entails its claim.
 
 **D-86 (2026-11-28, #350 review).** D-86 is TESTED, not PROVEN: the claim
 is that the server runs the retry in the background, and `retry_enabled` and
@@ -156,14 +158,20 @@ is that the server runs the retry in the background, and `retry_enabled` and
 since the timer is not modelled. The pipeline test that waits for the held
 writes to apply with no new write backs it.
 
+**S-136a, S-136d (2026-11-28, #350 review).** Both are TESTED, not PROVEN:
+their theorems, `stepQ_unknownFormat` and `stepQ_badId`, were `rfl`
+unfoldings of the definition `stepQ` and were deleted, and a definition
+proves nothing. The replay tests for a quarantined and a malformed receipt
+id back them.
+
 ## Summary
 
 726 claims.
 
 | Class | Rows |
 |---|---|
-| PROVEN | 126 |
-| TESTED | 307 |
+| PROVEN | 124 |
+| TESTED | 309 |
 | CODE-ONLY | 216 |
 | COMMENT-ONLY | 0 |
 | CONTRADICTED | 53 |
@@ -175,7 +183,7 @@ writes to apply with no new write backs it.
 | 149-218: recall legs, arguments, confidence, truncation (R) | 72 | 27 | 17 | 16 | 6 | 6 |
 | 219-360: recall warnings, duplicates, supersession, layers (Q) | 172 | 42 | 65 | 55 | 6 | 4 |
 | 361-590: derive, derive_image, record_action (D) | 186 | 24 | 105 | 40 | 11 | 6 |
-| 591-790: reserve, inspect, stale, saints, stats, limits (S) | 205 | 28 | 73 | 83 | 17 | 4 |
+| 591-790: reserve, inspect, stale, saints, stats, limits (S) | 205 | 26 | 75 | 83 | 17 | 4 |
 
 The re-check moved six rows out of PROVEN (T-02, Q-33, Q-53a, Q-63, D-33,
 S-17b: the theorem was related but did not entail the claim) and twelve
@@ -1252,10 +1260,10 @@ already in order.
 | S-134b | 700 | lambo_stats | "at the end the replay tries each waiting agent once more, from its oldest owed write." | CODE-ONLY | `replayP` (`Drain/Spec/Replay.lean`, definition); `replayP_progress` is conditional | Could pin: a theorem that the retry pass visits each deferred agent's oldest owed row. |
 | S-134c | 700 | lambo_stats | "What still waits after that is left, in the order you sent it, for the next start" | PROVEN | `replayP_preserves` in `Drain/Spec/Replay.lean` | Per agent, within one issuing process: no write the serve applies is later than one it leaves owed. |
 | S-135 | 700 | lambo_stats | "it is `null` only while the replay runs or once nothing is owed" | PROVEN | `serveR_reported` in `Drain/Spec/Worker.lean`; `replay_blocked_names_the_reason_or_is_none` in `src/writeq/tests/receipts.rs` | The code also emits `image_config` in `src/writeq/counters.rs:113`, which the doc does not mention and the model lacks. |
-| S-136a | 700 | lambo_stats | "A replayed write whose receipt id is in another version of the receipt format (`lwr2.` and on)" | PROVEN | the definition `stepQ` in `Drain/Spec/Replay.lean` (its `unknownFormat` arm defers the agent); `src/writeq/receipts.rs:313` (`is_other_version`) | Covers the claim that such a write is left owed with the agent's later writes behind it. |
+| S-136a | 700 | lambo_stats | "A replayed write whose receipt id is in another version of the receipt format (`lwr2.` and on)" | TESTED | `an_intent_in_another_receipt_format_is_quarantined_not_settled` in `src/memory/tests/replay.rs`; `src/writeq/receipts.rs:313` (`is_other_version`) | Covers the claim that such a write is left owed with the agent's later writes behind it. Was PROVEN by `stepQ_unknownFormat`, an `rfl` unfolding of the definition `stepQ` (`Drain/Spec/Replay.lean`), since deleted. |
 | S-136b | 700 | lambo_stats | "the server log names it at every start." | CODE-ONLY | `src/writeq/replay.rs:236-252` | Could pin: a log-capture test. |
 | S-136c | 700 | lambo_stats | "`DELETE FROM write_intents WHERE session_id = '<session>' AND receipt = '<receipt>';`, the same in SQLite and Postgres" | CODE-ONLY | `migrations/sqlite/001_init.sql:240`, `migrations/postgres/001_init.sql:242`, `migrations/cockroach/001_init.sql:334` (PK `session_id, receipt`) | Could pin: run the statement in an adapter test. |
-| S-136d | 700 | lambo_stats | "A receipt id that is simply malformed settles its write `failed`." | PROVEN | the definition `stepQ` in `Drain/Spec/Replay.lean` (`badId` settles `failed`, through `stepFixed`) |  |
+| S-136d | 700 | lambo_stats | "A receipt id that is simply malformed settles its write `failed`." | TESTED | `an_intent_with_an_unparseable_receipt_id_is_settled_failed` in `src/memory/tests/replay.rs` | Was PROVEN by `stepQ_badId`, an `rfl` unfolding of the definition `stepQ` (`Drain/Spec/Replay.lean`), since deleted. |
 | S-137 | 700 | lambo_stats | "Order across a restart holds among the writes an earlier server left owed, not between them and new ones" | CODE-ONLY | `src/writeq/replay.rs:spawn_replay` (owed rows replay in order in one task; new writes are admitted beside it) | New admissions interleaved with the replay are not modelled. Could pin: a test admitting during replay. |
 
 ### lambo_stats: ledger keys
