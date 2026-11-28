@@ -55,6 +55,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Two commits deep: on a pull request HEAD is the merge commit, and
+          # the form-change check below builds its first parent, the base.
+          fetch-depth: 2
 
       - name: Install pinned Lean
         run: |
@@ -101,6 +104,18 @@ jobs:
       - name: Every theorem is used or documented
         run: python3 -I scripts/formal/audit-theorems.py --check
 
+      # A change that moves a theorem's statement into a Spec proposition, or
+      # out of one, must leave the statement as it was (formal/README.md,
+      # "Restructuring the models without changing what they prove"). On a pull
+      # request HEAD is the merge commit and HEAD^1 the base: this builds the
+      # base's models from a copy of formal/.lake, so only the modules that
+      # differ are rebuilt, and compares each theorem whose form changed with
+      # what it stated. A theorem added, deleted or restated without changing
+      # form is not this check's business, so a model change passes it.
+      - name: Theorems restated in Spec form state what they stated
+        if: github.event_name == 'pull_request'
+        run: python3 -I scripts/formal/check-decl-equivalence.py --base 'HEAD^1' --only-form-changes
+
       # The differential oracle (#291): rebuild the exporter, regenerate
       # formal/oracle/*.json from the models and fail if the committed vectors
       # are stale, so a model change cannot ship with vectors the Rust test
@@ -119,8 +134,8 @@ jobs:
           python3 -I scripts/formal/test_count_theorems.py
           python3 -I scripts/formal/count-theorems.py --check-readme
 
-      # The restructuring check (scripts/formal/check-decl-equivalence.py) and
-      # the theorem audit (audit-theorems.py) are run by hand; their own tests
+      # The full restructuring check (check-decl-equivalence.py without
+      # --only-form-changes) is run by hand. Its tests and the theorem audit's
       # need no Lean.
       - name: Equivalence checker's and theorem audit's tests
         run: |
