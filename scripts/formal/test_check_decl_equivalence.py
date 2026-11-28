@@ -240,6 +240,15 @@ class Equivalence(unittest.TestCase):
                       "at the base", out)
         self.assertIn("Lambo.A.sneak: theorem added at HEAD", out)
 
+    def test_a_name_both_moved_and_deleted_fails(self):
+        # Moved, OLD would admit NEW; deleted, OLD would skip the comparison:
+        # together they let NEW be added unchecked.
+        head = [d for d in BASE if d["name"] != "Lambo.A.t"] + [decl("Lambo.A.fake", type_="False")]
+        code, out = self.run_check(BASE, head, "Lambo.A.t\tLambo.A.fake\n", "Lambo.A.t\twhy\t-\n")
+        self.assertEqual(code, 1, out)
+        self.assertIn("Lambo.A.t: listed both as moved to Lambo.A.fake and as deleted", out)
+        self.assertIn("Lambo.A.fake: theorem added at HEAD", out)
+
     def test_listed_move_must_keep_the_statement(self):
         lib = decl("Lambo.Lib.List.helper", type_="True", module="LamboProofs.Lib.List")
         head = [d for d in BASE if d["name"] != "Lambo.A.helper"] + [lib]

@@ -35,7 +35,8 @@ not the source text), and compares the two by fully qualified name:
   value, so its deletion changes nothing the others state. FILE keeps every
   deletion, so a NAME declared neither at the base nor at HEAD was deleted
   before the base: it is counted, not compared, and only its KEPT must still
-  be declared at HEAD;
+  be declared at HEAD. A name listed both here and as an OLD of the renames
+  FILE is an error;
 * no declaration is added at HEAD other than a NEW of FILE;
 * every theorem at HEAD rests on `propext`, `Quot.sound` and
   `Classical.choice` at most.
@@ -386,8 +387,11 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
     errors, notes = [], []
     restated = [] if restated is None else restated
     # Only a move made in this diff may add its NEW; a move made before the
-    # base has its NEW declared there already.
-    targets = {new for old, new in renames.items() if old in base}
+    # base has its NEW declared there already. A deleted OLD is not compared,
+    # so it admits no NEW, and listing it as both is an error.
+    targets = {new for old, new in renames.items() if old in base and old not in deletions}
+    for old in sorted(set(renames) & set(deletions)):
+        errors.append(f"{old}: listed both as moved to {renames[old]} and as deleted")
     for name, (reason, kept) in sorted(deletions.items()):
         b = base.get(name)
         if b is None and name in head:
