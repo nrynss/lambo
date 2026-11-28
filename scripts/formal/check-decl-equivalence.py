@@ -17,19 +17,21 @@ not the source text), and compares the two by fully qualified name:
 * every definition, inductive, constructor and structure keeps its type, and
   a definition its body, so the theorems still speak of the same things;
 * a declaration may change name only when FILE lists it, one `OLD<TAB>NEW`
-  per line (a line starting with `#` is a comment), as a helper moved to the shared library:
-  NEW must exist at HEAD with OLD's kind and type, and several OLD names may
-  map to one NEW (duplicates merged), though one OLD may not map to two. A
-  row whose OLD is declared at the base is a move made in this diff: it alone
-  may add its NEW, and it renames OLD to NEW wherever a base statement or body
-  mentions it (as a whole name, never the start of a longer one). FILE keeps
-  every move, so a row whose OLD is
-  declared neither at the base nor at HEAD, with its NEW declared at both, was
-  moved before the base: it is not compared and renames nothing. With its NEW
-  declared at HEAD only it is an error, since it would let NEW be added
-  unchecked, and so is an OLD that names a generated constant or a
-  namespace. A line whose OLD and NEW are the same name lists a declaration
-  that went private or public, which otherwise fails (below);
+  per line (a line starting with `#` is a comment), as a helper moved to the
+  shared library: NEW must exist at HEAD with OLD's kind and type, and
+  several OLD names may map to one NEW (duplicates merged), though one OLD
+  may not map to two. A row whose OLD is declared at the base is a move made
+  in this diff: it alone may add its NEW, and it renames OLD to NEW wherever
+  a base statement or body mentions it, in OLD itself and in each longer name
+  under `OLD.` that Lean generates for it (`OLD.casesOn`), never in a user
+  declaration under it or in a name that merely starts with OLD's text.
+  FILE keeps every move, so a row whose OLD is declared neither at the base
+  nor at HEAD, with its NEW declared at both, was moved before the base: it
+  is not compared and renames nothing. With its NEW declared at HEAD only it
+  is an error, since it would let NEW be added unchecked, and so is an OLD
+  that names a generated constant or a namespace. A line whose OLD and NEW
+  are the same name lists a declaration that went private or public, which
+  otherwise fails (below);
 * a theorem may be missing at HEAD only when `--deletions FILE` lists it,
   one `NAME<TAB>REASON<TAB>KEPT` per line (a line starting with `#` is a
   comment; a reason may contain `#`, as in an issue number): NAME is a
@@ -189,14 +191,24 @@ class Dump:
                     self.user[d["name"]] = d
         # The moves made in this diff: the rows whose OLD is declared here. A
         # row older than the base names no declaration of it, so it renames
-        # nothing. An OLD matches a whole name only, never the start of a
-        # longer one (`Lambo.A` in `Lambo.A.f`), though a universe
-        # instantiation may follow it (`Lambo.A.f.{1}`).
+        # nothing. A match is a whole dotted name that is OLD or starts with
+        # `OLD.` (the longest such OLD), a universe instantiation after it
+        # left out (`Lambo.A.f.{1}`); see `_moved`.
         self.renames = {old: new for old, new in renames.items() if old in self.user}
         alts = sorted(self.renames, key=len, reverse=True)
-        self._rename = re.compile(r"(?<![\w.'])(?:" + "|".join(re.escape(a) for a in alts)
-                                  + r")(?![\w']|\.(?!\{))") if alts else None
+        self._rename = re.compile(r"(?<![\w.'])(" + "|".join(re.escape(a) for a in alts)
+                                  + r")((?:\.[^\s()\[\]{},:@.]+)*)(?![\w'])") if alts else None
         self._aux = {}
+
+    def _moved(self, m):
+        """A name under OLD (`Lambo.A.S.casesOn`, which Lean generates for
+        `Lambo.A.S`) moves with OLD, unless it is, or lies under, a user
+        declaration of its own below OLD (`Lambo.A.f.lem`), which stays."""
+        old, rest = m.group(1), m.group(2)
+        parts = rest.split(".")
+        if any(old + ".".join(parts[:k]) in self.user for k in range(2, len(parts) + 1)):
+            return m.group(0)
+        return self.renames[old] + rest
 
     def aux(self, name):
         if name not in self._aux:
@@ -212,7 +224,7 @@ class Dump:
         s = PRIVATE.sub("", s)
         s = AUX.sub(lambda m: self.aux(PRIVATE.sub("", m.group(0))), s)
         if self._rename:
-            s = self._rename.sub(lambda m: self.renames[m.group(0)], s)
+            s = self._rename.sub(self._moved, s)
         return s
 
 

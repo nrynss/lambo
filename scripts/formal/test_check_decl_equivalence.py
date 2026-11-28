@@ -296,6 +296,45 @@ class Equivalence(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("Lambo.A.f.match_1: listed as moved, but a constant Lean generates", out)
 
+    def test_a_moved_inductive_takes_its_generated_constants_along(self):
+        # `S.casesOn` and `S.rec` are Lean's, not user declarations, so they
+        # have no row: the row for `S` renames them where `g` names them.
+        def side(ns, s_type="Type", zero="0"):
+            mod = "LamboProofs." + ns.rsplit(".", 1)[1]
+            g = (f"fun (s : {ns}.S) => {ns}.S.casesOn.{{1}} (fun (s : {ns}.S) => Nat) s "
+                 f"({ns}.S.rec.{{1}} (fun (s : {ns}.S) => Nat) {zero} s)")
+            stmt = f"forall (s : {ns}.S), Eq.{{1}} Nat (Lambo.A.g s) (Lambo.A.g s)"
+            rows = BASE + [
+                decl(f"{ns}.S", kind="inductive", type_=s_type, module=mod),
+                decl(f"{ns}.S.a", kind="ctor", type_=f"{ns}.S", module=mod),
+                decl(f"{ns}.S.casesOn", kind="def", user=False, type_="C", value="c", module=mod),
+                decl(f"{ns}.S.rec", kind="recursor", user=False, type_="R", module=mod),
+                dict(decl("Lambo.A.g", kind="def", type_=f"{ns}.S -> Nat", value=g),
+                     uses=[f"{ns}.S", f"{ns}.S.casesOn", f"{ns}.S.rec"])]
+            return [dict(d, type=stmt) if d["name"] == "Lambo.A.t" else d for d in rows], stmt
+        rows = "Lambo.A.S\tLambo.Lib.S\nLambo.A.S.a\tLambo.Lib.S.a\n"
+        base, _ = side("Lambo.A")
+        for head_args, want in (({}, None), ({"s_type": "Type 1"}, "Lambo.A.S -> Lambo.Lib.S"),
+                                ({"zero": "1"}, "Lambo.A.g")):
+            head, stmt = side("Lambo.Lib", **head_args)
+            for flags, spelled in (((), head), (("--only-form-changes",), in_spec_form(head, stmt=stmt))):
+                with self.subTest(head=head_args, flags=flags):
+                    code, out = self.run_check(base, spelled, rows, flags=flags)
+                    self.assertEqual(code, 1 if want else 0, out)
+                    if want:
+                        self.assertIn(want, out)
+
+    def test_a_user_declaration_under_a_moved_old_stays(self):
+        # `f` moves; `f.aux`, a user declaration of its own, stays, and so does
+        # `f.aux.eq_1`, which Lean generates for it.
+        aux = decl("Lambo.A.f.aux", kind="def", type_="Nat -> Nat", value="fun (x : Nat) => x")
+        stmt = "Eq.{1} Nat (Lambo.A.f.aux (Lambo.{0} 0)) (Lambo.A.f.aux.eq_1 0)"
+        base = BASE + [aux, decl("Lambo.A.u", type_=stmt.replace("{0}", "A.f"))]
+        head = [dict(d, name="Lambo.Lib.f") if d["name"] == "Lambo.A.f" else d for d in BASE] + [
+            aux, decl("Lambo.A.u", type_=stmt.replace("{0}", "Lib.f"))]
+        code, out = self.run_check(base, head, "Lambo.A.f\tLambo.Lib.f\n")
+        self.assertEqual(code, 0, out)
+
     def test_a_name_both_moved_and_deleted_fails(self):
         # Moved, OLD would admit NEW; deleted, OLD would skip the comparison:
         # together they let NEW be added unchecked.
