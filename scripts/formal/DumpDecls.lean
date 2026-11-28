@@ -12,7 +12,7 @@ whose module is under `LamboProofs` is written, auxiliary ones included, as
 
 `user` is true when the declaration has a source range: the elaborator gives
 one to every declaration written in the source, and none to the constants it
-generates (`foo.proof_1`, `foo.match_1`, `foo.eq_1`, `_auxLemma`, recursors,
+generates (`foo._proof_1`, `foo.match_1`, `foo.eq_1`, `_auxLemma`, recursors,
 ...). `line` is the line of its name in its module's source, and `span` the
 first and last lines of its declaration, doc comment included. `type` is the
 kernel type as `Expr.dbgToString` prints it, so binder names count; `value`
@@ -28,8 +28,12 @@ only) is what `#print axioms` would answer. A theorem stated in Spec form
 name component `Spec`) also has `spec`, that definition's name; `stmt` and
 `stmt_shape`, the definition's body printed as `type` and `shape` are, which
 is the statement the theorem proves, spelled out; and `spec_rfl`, whether the
-kernel accepts `Spec.foo` and that body as definitionally equal (it unfolds
-one definition, so it always should). After the constants comes one
+kernel accepts `Spec.foo` and that body as definitionally equal. That body is
+`Spec.foo`'s own value in this environment, so the kernel check guards only
+the inlining of abstracted proofs (`inlineAuxProofs`), not the statement:
+that a restated theorem states what it stated rests on
+`check-decl-equivalence.py` finding the printed body equal to the base's
+printed statement, with every definition it reaches unchanged. After the constants comes one
 `{"record": "module", "module", "fnv1a64"}` line per module: the FNV-1a hash
 of the source file it was dumped from (run from `formal/`). Names are printed as Lean prints
 them; a private name is printed as its user-facing name, with "private":

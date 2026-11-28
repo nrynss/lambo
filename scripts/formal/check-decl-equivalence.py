@@ -38,7 +38,7 @@ compared, so splitting a model file into several is allowed. A private name
 is compared as its user-facing name (a declaration that goes private or
 public fails: that changes its kernel name), and a binder name without its macro
 scopes (a hygienic name records the module it was elaborated in). Only declarations written in the source
-are compared; the constants Lean generates for them (`foo.proof_1`,
+are compared; the constants Lean generates for them (`foo._proof_1`,
 `foo.match_1`, `_auxLemma.N`, ...) are not, as their numbering follows the
 file layout. Nor are the syntax extensions a file declares (a `local
 notation`'s parser and unexpander, a `macro`'s rules: declarations whose type
@@ -56,13 +56,16 @@ thing:
 * its type at HEAD is exactly the definition `Lambo.<Model>.Spec.<name>`, for
   the theorem `Lambo.<Model>.<name>`, of type `Prop`;
 * that definition's body, with the proofs Lean abstracted out of it
-  (`foo._proof_1`) put back, is the base's statement, as the kernel term
-  (`DumpDecls.lean` does the unfolding in Lean, and has the kernel confirm
-  that `Spec.foo` and the body are definitionally equal). So `Spec.foo`
-  unfolds to the old statement by `rfl`: nothing was weakened, no hypothesis
-  added, no conclusion dropped. The printed term names a bound variable only
-  where something refers to it, so a hypothesis written `(h : P)` before and
-  `P →` now compares equal;
+  (`foo._proof_1`) put back, prints as the base's statement, as the kernel
+  term, and every definition that body reaches (transitively through
+  definition bodies) is unchanged. `DumpDecls.lean` does the unfolding in
+  Lean; its kernel check (`spec_rfl`) compares `Spec.foo` with that body in
+  the same environment, so it guards only the putting back of the proofs.
+  What makes `Spec.foo` say exactly what the old statement said is the equal
+  printed terms over unchanged definitions: nothing was weakened, no
+  hypothesis added, no conclusion dropped. The printed term names a bound
+  variable only where something refers to it, so a hypothesis written
+  `(h : P)` before and `P →` now compares equal;
 * the definition `Spec.foo` may be added at HEAD, but only as the statement
   of the theorem of its name.
 
