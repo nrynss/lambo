@@ -6,9 +6,12 @@ namespace Lambo.Drain
 
 open Lambo.Receipts (Answer Entry settle Lane)
 
-/-- The answer and batch of one job through `spawn_worker`'s arms (`fenced`:
-the lease-lost fence), an `EmbedUnavailable` answering `failed` with nothing
-appended; the current worker's batches are these (`runW_log_refines`). -/
+/-- The answer and batch of one job through the lane worker before #295
+(`fenced`: the lease-lost fence), where a transient error (an outage or a
+lookup timeout) answers `failed` with nothing appended. The current worker
+holds an outage and settles a lookup timeout below the limit `failed` with its
+intent consumed; `runW_log_refines` says only that each batch it appends is
+`workerStep`'s batch for some job and run result. -/
 def workerStep (fenced : Bool) (j : Job) (r : RunResult) : Answer × Batch :=
   if fenced then (.failed, [])
   else
