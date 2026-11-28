@@ -166,8 +166,8 @@ Lambo.Drain.settleList	#350 Spec review: a definition of the workH hold model, d
 Lambo.Drain.holdList	#350 Spec review: a definition of the workH hold model, deleted with it	-
 Lambo.Drain.arriveH	#350 Spec review: a definition of the workH hold model, deleted with it	-
 Lambo.Drain.workH	#350 Spec review: a definition of the workH hold model, deleted with it	-
-Lambo.Drain.stepQ_badId	#350 Spec review: an rfl unfolding of stepQ's badId arm; the docs cite the definition Drain.stepQ	-
-Lambo.Drain.stepQ_unknownFormat	#350 Spec review: an rfl unfolding of stepQ's unknownFormat arm; the docs cite the definition Drain.stepQ	-
+Lambo.Drain.stepQ_badId	#350 Spec review: an rfl unfolding of stepQ's badId arm, which the definition states; ledger row S-136d is TESTED by the replay test	-
+Lambo.Drain.stepQ_unknownFormat	#350 Spec review: an rfl unfolding of stepQ's unknownFormat arm, which the definition states; ledger row S-136a is TESTED by the replay test	-
 Lambo.Drain.stepW_caps_free	#350 Spec review: holds by definition (only admission reads the caps); that a retry needs no admission is retry_settles_head and retry_enabled	-
 Lambo.Drain.refused_wakes	#350 Spec review: describes the Rust at 30b79824, where a refused admission woke the retry at once; the current Rust starts no retry before its backoff (src/writeq/admission.rs, WritePipeline::admit)	-
 Lambo.Drain.closeD_keptDropped	#350 Spec review: about the consume-time pruning of 1b4d89e4, which the Rust no longer does, and sound only in a model with no worker panic; the current rule is settlePrune_never_vouches_dropped	-

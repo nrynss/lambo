@@ -171,8 +171,8 @@ id back them.
 | Class | Rows |
 |---|---|
 | PROVEN | 124 |
-| TESTED | 309 |
-| CODE-ONLY | 216 |
+| TESTED | 310 |
+| CODE-ONLY | 215 |
 | COMMENT-ONLY | 0 |
 | CONTRADICTED | 53 |
 | NOT CHECKABLE | 24 |
@@ -181,7 +181,7 @@ id back them.
 |---|---|---|---|---|---|---|
 | 1-147: transports, forwarding, what every tool expects, errors (T) | 91 | 5 | 47 | 22 | 13 | 4 |
 | 149-218: recall legs, arguments, confidence, truncation (R) | 72 | 27 | 17 | 16 | 6 | 6 |
-| 219-360: recall warnings, duplicates, supersession, layers (Q) | 172 | 42 | 65 | 55 | 6 | 4 |
+| 219-360: recall warnings, duplicates, supersession, layers (Q) | 172 | 42 | 66 | 54 | 6 | 4 |
 | 361-590: derive, derive_image, record_action (D) | 186 | 24 | 105 | 40 | 11 | 6 |
 | 591-790: reserve, inspect, stale, saints, stats, limits (S) | 205 | 26 | 75 | 83 | 17 | 4 |
 

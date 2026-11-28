@@ -161,7 +161,7 @@ def finishW (now : Int) (a : Nat) (r : RunResult) (st : WS) : WS :=
 def stepW (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) : Ev → WS
   | .submit j =>
     if fits c sz st j then { st with queue := st.queue ++ [j], admitted := st.admitted ++ [j] }
-    -- A refused write of an agent with held writes wakes its retry.
+    -- A refused write of an agent with held writes unparks it (see the boundary).
     else if ofAgent j.agent st.held ≠ [] then { st with parked := st.parked.filter (· ≠ j.agent) }
     else st
   | .start a => startW now a st

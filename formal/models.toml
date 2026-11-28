@@ -476,15 +476,17 @@ rust = [
 # (Drain/Spec/) and its proofs (Drain/Proofs/). Each Spec file is listed
 # against the Rust it reads; the Proofs files read none of their own and have
 # no entry. Drain/History.lean (the worker before #295, the replay before
-# #294) and Drain/Examples.lean (concrete cases evaluated by `decide` over the
+# #294, the replays over #294's step and #295's first step, the close before
+# #345) and Drain/Examples.lean (concrete cases evaluated by `decide` over the
 # other files' definitions) model no Rust of their own and have no entry.
 #
-# Base: the worker step's batch shape (the consume under the commit's lock
-# hold, and which failures consume the intent), receipt ids (epoch, sequence)
-# and the intent rows they key, the replay's block reasons, the receipt store's settle, `settle_deferred`'s set-aside, the
-# `Drop` path (`abort_all_sync`, from `Memory`'s `Drop`), the intent log, the
-# adapters' load order, the error classes, the replay's step, its constants
-# and the restart map's seed (`spawn_replay`).
+# Base: the write-behind log's mutations and batches (a consume in the
+# commit's batch), receipt ids (epoch, sequence) and the intent rows they
+# key, the replay's block reasons, the receipt store's settle,
+# `settle_deferred`'s set-aside, the intent log, the adapters' load order, the
+# error classes, the replay's step, its constants and the restart map's seed
+# (`spawn_replay`), and in its boundary the `Drop` path (`abort_all_sync`,
+# from `Memory`'s `Drop`), which settles nothing.
 [[model]]
 lean = "formal/LamboProofs/Drain/Spec/Base.lean"
 read_against = "e9b647cf"
