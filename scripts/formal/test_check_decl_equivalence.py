@@ -276,6 +276,21 @@ class Equivalence(unittest.TestCase):
         code, out = self.run_check(moved, head, "Lambo.Old.f\tLambo.A.f\n")
         self.assertEqual(code, 0, out)
 
+    def test_a_malformed_or_conflicting_row_is_refused(self):
+        lib = decl("Lambo.Lib.List.helper", type_=BASE[1]["type"], module="LamboProofs.Lib.List")
+        head = [d for d in BASE if d["name"] != "Lambo.A.helper"] + [lib]
+        for rows, msg in (("Lambo.A.helper\tLambo.Lib.List.helper\tx\n", "want OLD<TAB>NEW"),
+                          ("Lambo.A.helper\n", "want OLD<TAB>NEW"),
+                          ("Lambo.A.helper\tLambo.Lib.List.helper\nLambo.A.helper\tLambo.B.helper\n",
+                           "Lambo.A.helper is listed as moved to both Lambo.Lib.List.helper and "
+                           "Lambo.B.helper")):
+            with self.subTest(rows=rows), self.assertRaises(SystemExit) as cm:
+                self.run_check(BASE, head, rows)
+            self.assertIn(msg, str(cm.exception))
+        # The same row twice is one move.
+        rows = "Lambo.A.helper\tLambo.Lib.List.helper\n" * 2
+        self.assertEqual(self.run_check(BASE, head, rows)[0], 0)
+
     def test_a_generated_constant_is_not_an_old_name(self):
         code, out = self.run_check(BASE, BASE, "Lambo.A.f.match_1\tLambo.A.f\n")
         self.assertEqual(code, 1, out)

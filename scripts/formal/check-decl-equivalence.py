@@ -19,10 +19,11 @@ not the source text), and compares the two by fully qualified name:
 * a declaration may change name only when FILE lists it, one `OLD<TAB>NEW`
   per line (a line starting with `#` is a comment), as a helper moved to the shared library:
   NEW must exist at HEAD with OLD's kind and type, and several OLD names may
-  map to one NEW (duplicates merged). A row whose OLD is declared at the base
-  is a move made in this diff: it alone may add its NEW, and it renames OLD to
-  NEW wherever a base statement or body mentions it (as a whole name, never
-  the start of a longer one). FILE keeps every move, so a row whose OLD is
+  map to one NEW (duplicates merged), though one OLD may not map to two. A
+  row whose OLD is declared at the base is a move made in this diff: it alone
+  may add its NEW, and it renames OLD to NEW wherever a base statement or body
+  mentions it (as a whole name, never the start of a longer one). FILE keeps
+  every move, so a row whose OLD is
   declared neither at the base nor at HEAD, with its NEW declared at both, was
   moved before the base: it is not compared and renames nothing. With its NEW
   declared at HEAD only it is an error, since it would let NEW be added
@@ -223,8 +224,13 @@ def read_renames(path):
         line = "" if raw.lstrip().startswith("#") else raw.strip()
         if not line:
             continue
-        old, new = line.split("\t") if "\t" in line else line.split()
-        renames[old.strip()] = new.strip()
+        parts = [x.strip() for x in (line.split("\t") if "\t" in line else line.split())]
+        if len(parts) != 2 or not all(parts):
+            raise SystemExit(f"{path}: want OLD<TAB>NEW, got {raw!r}")
+        old, new = parts
+        if renames.get(old, new) != new:
+            raise SystemExit(f"{path}: {old} is listed as moved to both {renames[old]} and {new}")
+        renames[old] = new
     return renames
 
 
