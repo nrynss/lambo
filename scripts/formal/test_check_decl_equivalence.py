@@ -386,6 +386,24 @@ class SpecForm(unittest.TestCase):
                                    flags=["--only-form-changes"])
         self.assertEqual(code, 0, out)
 
+    def test_a_move_before_the_base_does_not_rename_a_reached_definition(self):
+        # `Old.f -> A.f` predates the base, so both sides declare `A.f`: the
+        # restated `t`, which reaches `A.f`, compares it with itself.
+        stmt = "forall (n : Nat), Eq.{1} Nat (Lambo.A.f n) n"
+        base = [dict(d, type=stmt) if d["name"] == "Lambo.A.t" else d for d in BASE]
+        code, out = self.run_check(base, in_spec_form(base, stmt=stmt), "Lambo.Old.f\tLambo.A.f\n",
+                                   flags=["--spec-form"])
+        self.assertEqual(code, 0, out)
+        # A move made in this diff still compares OLD with NEW.
+        base2 = [dict(d, name="Lambo.Old.f") if d["name"] == "Lambo.A.f" else
+                 dict(d, type=stmt.replace("Lambo.A.f", "Lambo.Old.f")) if d["name"] == "Lambo.A.t" else d
+                 for d in base]
+        changed = [dict(d, value="fun (x : Nat) => x") if d["name"] == "Lambo.A.f" else d for d in base]
+        code, out = self.run_check(base2, in_spec_form(changed, stmt=stmt), "Lambo.Old.f\tLambo.A.f\n",
+                                   flags=["--spec-form"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("Lambo.A.f (body changed)", out)
+
     def test_each_sides_proposition_contributes_its_own_uses(self):
         # The printed statement names no definition (a generated constant is
         # normalised to a hash), but the proposition's body uses `g`. Whichever

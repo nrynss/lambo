@@ -327,7 +327,9 @@ def changed_definitions(bd, hd, bstmt, hstmt, b, h):
     head = reached_definitions(hd, statement_roots(hd, hstmt, (hprop or {}).get("uses") or ()))
     out = []
     for n in sorted({bd.renames.get(x, x) for x in base} | head):
-        old = next((x for x, y in bd.renames.items() if y == n), n)
+        # Only a move made in this diff renames: one made before the base has
+        # no OLD there, and its NEW is declared on both sides.
+        old = next((x for x, y in bd.renames.items() if y == n and x in bd.all), n)
         b, a = bd.all.get(old), hd.all.get(n)
         if (b or a) and not (b or a)["user"]:
             # A generated constant (a matcher, an equation lemma) is compared
