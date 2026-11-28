@@ -281,7 +281,7 @@ def replayStep (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
     | .imageIdTaken => (.failed, { s with transient := 0 })
     | .reference => (.failed, s)
     | .cycle => (.failed, s)
-    -- The "anything else" arm: the current step (`stepInput`) answers it first.
+    -- The "anything else" arm: `stepInput`, a layer of `stepQ`, answers it first.
     | .inputRefusal => (.stop .other, s)
     -- An image derive this configuration cannot apply.
     | .config => (.stop (if image then .imageConfig else .other), s)
