@@ -26,20 +26,13 @@ theorem stepInput_sessionWide : Spec.stepInput_sessionWide := by
 
 /-! ## Deferring an agent -/
 
-/-- On everything but an unparseable id `stepFixed` is `stepInput`. -/
-theorem stepFixed_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .badId)
-    (h' : rr ≠ .unknownFormat) : stepFixed img rr s = stepInput img rr s := by
+theorem stepFixed_agrees : Spec.stepFixed_agrees := by
+  intro img rr s h h'
   unfold stepFixed
   split
   · exact absurd rfl h
   · exact absurd rfl h'
   · rfl
-
-/-- Every input refusal settles `failed` under `stepFixed` too. -/
-theorem stepFixed_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
-    (stepFixed img (.run (.err e)) s).1 = .failed := by
-  rw [stepFixed_agrees img _ s (by simp) (by simp)]
-  exact stepInput_refusesInput img e s h
 
 /-- The only result `stepFixed` leaves unsettled without stopping is a
 transient embedder answer: so only it defers an agent. -/

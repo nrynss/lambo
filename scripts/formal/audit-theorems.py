@@ -72,9 +72,10 @@ broken: a `Spec` proposition that the theorem of its name does not prove (a
 result stated and not proved), a theorem stated as another name's
 proposition, a theorem declared in a `Spec` file, a `Spec` proposition
 declared in a `Proofs` file, or a lemma of a `Proofs` file that no proof
-uses (formal/README.md's rule: a `Spec` proposition exists only for a
-guarantee about the Rust, and anything else a proof does not use is
-deleted). CI runs it.
+outside `History.lean` and `Examples.lean` uses (formal/README.md's rule: a
+`Spec` proposition exists only for a guarantee about the Rust, a lemma only
+history or examples use goes beside them, and anything else a proof does
+not use is deleted). CI runs it.
 
 `--duplicates` lists theorems that state the same thing (the same `shape`:
 binders named by depth, universe parameters by position) in more than one
@@ -135,6 +136,16 @@ def is_proofs_module(module):
     """Whether a module is a `Proofs` file (`LamboProofs.Drain.Proofs.Base`,
     `LamboProofs.Score.Proofs`)."""
     return "Proofs" in module.split(".")[1:]
+
+
+HISTORY_FILES = ("History.lean", "Examples.lean")
+
+
+def is_history_module(module):
+    """Whether a module is a history layer or an examples file
+    (`LamboProofs.Drain.History`, `LamboProofs.Drain.Examples`): neither
+    layer of a model in Spec and Proofs form."""
+    return module.split(".")[-1] + ".lean" in HISTORY_FILES
 
 
 def build_dump(repo, out):
@@ -583,6 +594,12 @@ def check(m, reviewed, deleted):
     had that doc comment reviewed (`reviewed`, the review file's verdicts)."""
     refs = all_refs(m)
     used = set(refs["proof"]) | set(refs["named"]) | set(refs["simp"])
+    # What a `Proofs` lemma needs: a use outside the history layers and the
+    # examples, which are not specification and need no lemma of the proofs.
+    used_by_model = set(refs["simp"])
+    used_by_model |= {n for n, us in refs["proof"].items()
+                      if any(not is_history_module(m.user[o]["module"]) for o in us)}
+    used_by_model |= {n for n, files in refs["named"].items() if any(f not in HISTORY_FILES for f in files)}
     bad, unreviewed, stale = [], [], []
     for n, d in m.theorems.items():
         if n in used:
@@ -610,9 +627,10 @@ def check(m, reviewed, deleted):
         if is_spec_module(d["module"]):
             form.append(f"{where}: {local_name(n)} is a theorem in a Spec file: a Spec file states, "
                         f"its Proofs file proves")
-        if is_proofs_module(d["module"]) and not d.get("spec") and n not in used:
-            form.append(f"{where}: {local_name(n)} is a lemma of a Proofs file that no proof uses: state it "
-                        f"in Spec form, if it is a guarantee about the Rust, or delete it")
+        if is_proofs_module(d["module"]) and not d.get("spec") and n not in used_by_model:
+            form.append(f"{where}: {local_name(n)} is a lemma of a Proofs file that no proof outside "
+                        f"{' and '.join(HISTORY_FILES)} uses: state it in Spec form, if it is a guarantee about "
+                        f"the Rust, move it beside the history or examples that use it, or delete it")
         if d.get("spec"):
             if d["spec"] != spec_name(n):
                 form.append(f"{where}: {local_name(n)} is stated as {local_name(d['spec'])}, not as its own "
@@ -754,8 +772,8 @@ def main(argv=None):
     w("* **(c)** not settled: an undocumented lemma or a documented theorem not yet reviewed, which "
       "`--check` fails on, or a `@[simp]` lemma `simp` may use without naming it.\n")
     w("Precedence: a same-statement twin (b); a review verdict (a); a superseding counterpart (b); a "
-      "`@[simp]` lemma (c); a dead helper (b); the rest (c). `Drain/History.lean` describes no current Rust "
-      "and is kept as the evidence for its findings. Names are given below their model's namespace "
+      "`@[simp]` lemma (c); a dead helper (b); the rest (c). `Drain/History.lean` holds the layers the Rust "
+      "has left behind, kept as the evidence for its findings. Names are given below their model's namespace "
       "(`Reach.trans` is `Lambo.Cite.Reach.trans`).\n")
     w("## Summary\n")
     w(f"{total['total']} theorems in {len(files)} model files; {total['a'] + total['b'] + total['c']} "

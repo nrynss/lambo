@@ -325,6 +325,35 @@ counterparts are `shutdown_no_silent_lossD`, `held_at_closeW` and
 `closeD_retryD`. The lemmas about `deferEntry` and `settleDeferred` they
 share with the current close are in `Drain/Proofs/Base.lean`. -/
 
+theorem mem_update {s : RStore} {r : Key} {f : Entry → Entry} {p : Key × Entry}
+    (hp : p ∈ update s r f) :
+    ∃ q ∈ s, p = (if q.1 = r then (q.1, f q.2) else q) := by
+  unfold update at hp
+  obtain ⟨q, hq, he⟩ := List.mem_map.mp hp
+  exact ⟨q, hq, he.symm⟩
+
+theorem settleDeferred_all_settled (flush : CloseFlush) (now : Int) :
+    ∀ (ids : List Key) (s : RStore), (∀ p ∈ s, p.1 ∉ ids → p.2.answer.isSettled = true) →
+      ∀ p ∈ settleDeferred flush now ids s, p.2.answer.isSettled = true := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro s h p hp
+    exact h p hp (by simp)
+  | cons r ids ih =>
+    intro s h
+    apply ih
+    intro p hp hpi
+    obtain ⟨q, hq, rfl⟩ := mem_update hp
+    by_cases hqr : q.1 = r
+    · rw [ite_eq_left hqr]; exact deferEntry_settled flush now q.2
+    · rw [ite_eq_right hqr] at hpi ⊢
+      apply h q hq
+      intro hm
+      cases List.mem_cons.mp hm with
+      | inl h' => exact hqr h'
+      | inr h' => exact hpi h'
+
 /-- **No receipt is left pending by a close.** Whatever the drain finished
 before its budget, every receipt in the store is settled afterwards: the drain
 settled some, and `abort_workers` set aside every other one for
@@ -714,6 +743,12 @@ theorem fixed_sessionWide_stops (rout : Job → RR) (s : Streaks) (i : Intent) (
 Over `loopD stepFixed`: the current step `stepQ` answers this intent the same
 way, but quarantines an id in another receipt format that `stepFixed`
 consumes `failed`, so the loop on the rest is not the current replay's. -/
+
+/-- Every input refusal settles `failed` under `stepFixed` too. -/
+theorem stepFixed_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
+    (stepFixed img (.run (.err e)) s).1 = .failed := by
+  rw [stepFixed_agrees img _ s (by simp) (by simp)]
+  exact stepInput_refusesInput img e s h
 
 /-- **#294 still held in the loop over `stepFixed`**: an input refusal is
 consumed `failed` and the loop goes on with `stepFixed`. No current statement

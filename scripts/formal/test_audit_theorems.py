@@ -311,9 +311,8 @@ class SpecForm(unittest.TestCase):
         self.write_dump(LDECLS)
 
     def write_dump(self, decls):
-        records = [{"record": "module", "module": f"LamboProofs.L.{f}",
-                    "fnv1a64": at.fnv1a64((self.root / "formal" / "LamboProofs" / "L" / f"{f}.lean").read_bytes())}
-                   for f in ("Spec", "Proofs")]
+        records = [{"record": "module", "module": f"LamboProofs.L.{p.stem}", "fnv1a64": at.fnv1a64(p.read_bytes())}
+                   for p in sorted((self.root / "formal" / "LamboProofs" / "L").glob("*.lean"))]
         self.dump.write_text("".join(json.dumps(d) + "\n" for d in decls + records), encoding="utf-8")
 
     def check(self):
@@ -379,7 +378,7 @@ class SpecForm(unittest.TestCase):
         self.write_dump(LDECLS + [helper])
         code, out = self.check()
         self.assertEqual(code, 1)
-        self.assertIn("L/Proofs.lean:8: helper is a lemma of a Proofs file that no proof uses", out)
+        self.assertIn("L/Proofs.lean:8: helper is a lemma of a Proofs file that no proof outside", out)
         # A proof that uses it settles it.
         decls = [dict(d, uses=["Lambo.L.helper"]) if d["name"] == "Lambo.L.g_id" else d for d in LDECLS]
         self.write_dump(decls + [helper])
@@ -387,6 +386,26 @@ class SpecForm(unittest.TestCase):
         self.assertNotIn("helper is a lemma", out)
         # A theorem in Spec form needs no proof to use it.
         self.assertNotIn("g_id is a lemma", out)
+
+    def test_a_proofs_lemma_only_history_or_examples_uses_fails(self):
+        proofs = PROOFS.replace("end Lambo.L", "/-- One is one. -/\ntheorem helper : g 1 = 1 := rfl\n\nend Lambo.L")
+        (self.root / "formal" / "LamboProofs" / "L" / "Proofs.lean").write_text(proofs, encoding="utf-8")
+        helper = ldecl("helper", 8, "Eq (g 1) 1", "LamboProofs.L.Proofs", span=[7, 8])
+        for layer in ("History", "Examples"):
+            (self.root / "formal" / "LamboProofs" / "L" / f"{layer}.lean").write_text(
+                f"namespace Lambo.L\n\ntheorem old : g 1 = 1 := helper\n\nend Lambo.L\n", encoding="utf-8")
+            old = ldecl("old", 3, "Eq (g 1) 1", f"LamboProofs.L.{layer}", uses=["Lambo.L.helper"])
+            self.write_dump(LDECLS + [helper, old])
+            code, out = self.check()
+            self.assertEqual(code, 1)
+            self.assertIn("L/Proofs.lean:8: helper is a lemma of a Proofs file that no proof outside "
+                          "History.lean and Examples.lean uses", out)
+            (self.root / "formal" / "LamboProofs" / "L" / f"{layer}.lean").unlink()
+        # A proof of the Proofs layer that uses it settles it.
+        decls = [dict(d, uses=["Lambo.L.helper"]) if d["name"] == "Lambo.L.g_id" else d for d in LDECLS]
+        self.write_dump(decls + [helper])
+        code, out = self.check()
+        self.assertNotIn("helper is a lemma", out)
 
     def test_theorems_proving_one_statement_through_two_propositions_are_duplicates(self):
         # Each type names its own proposition, so the two `shape`s differ;

@@ -25,7 +25,8 @@ Results:
   leaves its neighbour owed once.
 * `stepInput_refusesInput`, `stepInput_sessionWide`: an input refusal settles `failed`, and
   any other non-transient error stops the replay.
-* `stepInput_agrees`: outside an input refusal, `stepInput` is `replayStep`.
+* `stepInput_agrees`, `stepFixed_agrees`: outside an input refusal `stepInput` is `replayStep`,
+  and outside a `badId` or `unknownFormat` id `stepFixed` is `stepInput`.
 
 Boundary: each replay step is atomic and a run's result is an input per
 write. A deferred agent stays deferred for the rest of the serve, and the
@@ -90,6 +91,14 @@ def stepFixed (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
   | .badId => (.failed, s)
   | .unknownFormat => (.failed, s)
   | rr => stepInput image rr s
+
+/-- **On every result but an id that does not parse or is of another format,
+`stepFixed` is `stepInput`.** -/
+abbrev Spec.stepFixed_agrees : Prop :=
+  ∀ (img : Bool) (rr : RR) (s : Streaks),
+    rr ≠ .badId →
+    rr ≠ .unknownFormat →
+    stepFixed img rr s = stepInput img rr s
 
 /-- `spawn_replay`'s loop: `d` holds the deferred agents, whose intents are
 passed over unconsumed; a `skip` defers the intent's agent. -/

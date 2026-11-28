@@ -49,13 +49,6 @@ theorem lookup_update_ne (s : RStore) {r q : Key} (f : Entry → Entry) (h : q �
     lookup (update s r f) q = lookup s q := by
   rw [lookup_update, ite_eq_right h]
 
-theorem mem_update {s : RStore} {r : Key} {f : Entry → Entry} {p : Key × Entry}
-    (hp : p ∈ update s r f) :
-    ∃ q ∈ s, p = (if q.1 = r then (q.1, f q.2) else q) := by
-  unfold update at hp
-  obtain ⟨q, hq, he⟩ := List.mem_map.mp hp
-  exact ⟨q, hq, he.symm⟩
-
 /-- Admission's entries are all `Pending`. -/
 theorem lookup_admit {js : List Job} {j : Job} (hj : j ∈ js) :
     ∃ e, lookup (admitStore js) j.key = some e ∧ e.answer = .pending := by
@@ -441,28 +434,6 @@ theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
   obtain ⟨b, hb, hmb⟩ := List.mem_flatten.mp hm
   obtain ⟨j, _, rfl⟩ := List.mem_map.mp ((List.take_sublist n _).subset hb)
   exact ⟨j, List.mem_singleton.mp hmb⟩
-
-theorem settleDeferred_all_settled (flush : CloseFlush) (now : Int) :
-    ∀ (ids : List Key) (s : RStore), (∀ p ∈ s, p.1 ∉ ids → p.2.answer.isSettled = true) →
-      ∀ p ∈ settleDeferred flush now ids s, p.2.answer.isSettled = true := by
-  intro ids
-  induction ids with
-  | nil =>
-    intro s h p hp
-    exact h p hp (by simp)
-  | cons r ids ih =>
-    intro s h
-    apply ih
-    intro p hp hpi
-    obtain ⟨q, hq, rfl⟩ := mem_update hp
-    by_cases hqr : q.1 = r
-    · rw [ite_eq_left hqr]; exact deferEntry_settled flush now q.2
-    · rw [ite_eq_right hqr] at hpi ⊢
-      apply h q hq
-      intro hm
-      cases List.mem_cons.mp hm with
-      | inl h' => exact hqr h'
-      | inr h' => exact hpi h'
 
 /-! ## The replay step's arms -/
 
