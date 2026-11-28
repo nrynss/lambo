@@ -583,7 +583,7 @@ Each row's reason says why it went, and its group: found unreferenced by this au
 - `Drain.stepQ_unknownFormat`: #350 Spec review: an rfl unfolding of stepQ's unknownFormat arm, which the definition states; ledger row S-136a is TESTED by the replay test.
 - `Drain.stepW_caps_free`: #350 Spec review: holds by definition (only admission reads the caps); that a retry needs no admission is retry_settles_head and retry_enabled.
 - `Drain.refused_wakes`: #350 Spec review: describes the Rust at 30b79824, where a refused admission woke the retry at once; the current Rust starts no retry before its backoff (src/writeq/admission.rs, WritePipeline::admit).
-- `Drain.closeD_keptDropped`: #350 Spec review: about the consume-time pruning of 1b4d89e4, which the Rust no longer does, and sound only in a model with no worker panic; the current rule is settlePrune_never_vouches_dropped.
+- `Drain.closeD_keptDropped`: #350 Spec review: about the consume-time pruning of 1b4d89e4, which the Rust no longer does, and sound only in a model with no worker panic; the current rule is settlePrune_exact.
 - `Drain.setAside_untouched`: #350 Spec review: a lemma only closeD_keptDropped used.
 - `Drain.consumedIn_false`: #350 Spec review: a lemma only closeD_keptDropped used.
 - `Drain.keptDropped`: #350 Spec review: a definition only closeD_keptDropped used.
