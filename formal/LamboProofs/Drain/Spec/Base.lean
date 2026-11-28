@@ -319,8 +319,8 @@ abbrev Spec.replayStep_inputFact : Prop :=
     e.inputFact = true →
     (replayStep img (.run (.err e)) s).1 = .failed
 
-/-- A transient embed answer below the threshold is a `skip`: the intent is
-left unconsumed. -/
+/-- A transient embed answer below the threshold is a `skip`, and adds one to
+the transient streak. -/
 abbrev Spec.unavailable_skips : Prop :=
   ∀ (img : Bool) (s : Streaks),
     s.transient + 1 < sickThreshold →

@@ -72,8 +72,9 @@ abbrev Spec.stepInput_refusesInput : Prop :=
     e.refusesInput = true →
     (stepInput img (.run (.err e)) s).1 = .failed
 
-/-- **Any other non-transient error stops the replay**: a store error that can
-mean an inconsistent graph or store, `Config`, a lost lease, anything else. -/
+/-- **On any other non-transient error the step is a `stop`**: a store error
+that can mean an inconsistent graph or store, `Config`, a lost lease, anything
+else. -/
 abbrev Spec.stepInput_sessionWide : Prop :=
   ∀ (img : Bool) (e : Err) (s : Streaks),
     e.refusesInput = false →

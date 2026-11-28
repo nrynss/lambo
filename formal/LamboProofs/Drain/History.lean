@@ -9,14 +9,11 @@ next write run, with the lane drain it ran to completion (`drainLane`,
 the replay loop over #294's step (`loopWith stepInput`); the replay loop over
 #295's first step (`loopD stepFixed`, before an id in another receipt format
 was quarantined); and the close before #345, which read no dead letter: the
-current worker's `closeW`, in a session where a put was dead-lettered. Two
-results are about parts the current model keeps, and are here because only
-those layers used them: `drain_fifo` (a lane, named by no worker) and
-`load_seq_order` (`loadOrder`, the first stage of `fixedLoad`). It is built
-and in the axiom audit, but `formal/models.toml` does not check it for drift
-and the docs do not cite it. Its theorems are the evidence for the findings
-in `Examples.lean`, or state an earlier layer's result; each doc comment
-names the current counterpart where there is one.
+current worker's `closeW`, in a session where a put was dead-lettered. It
+is built and in the axiom audit, but `formal/models.toml` does not check it
+for drift and the docs do not cite it. Its theorems are the evidence for the
+findings in `Examples.lean`, or state an earlier layer's result; each doc
+comment names the current counterpart where there is one.
 
 ## Results
 
@@ -127,9 +124,8 @@ theorem drainLane_spec {α : Type} :
 /-- **A lane drained to completion took its submitted jobs in order, all of
 them.** However admissions and worker steps interleaved (`Receipts.run`), a
 lane drained to completion has taken exactly the submitted jobs, in
-submission order: the completion of `Receipts.lane_fifo`. It names no worker;
-only the worker before #295 drained a lane to completion, where the current
-one can hold an agent's writes. The current worker takes each lane in
+submission order: the completion of `Receipts.lane_fifo`. Only the worker
+before #295 drained a lane to completion; the current one takes each lane in
 submission order (`Receipts.lane_fifo`, `runW_ord`). -/
 theorem drain_fifo (ops : List (Lambo.Receipts.Op Job)) :
     (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).queue = [] ∧
