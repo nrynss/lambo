@@ -6,19 +6,32 @@
 
 - Formal models: the drain model is in Spec and Proofs form (#350). Each
   subsystem file under `formal/LamboProofs/Drain/` is now two:
-  `Drain/Spec/<File>.lean` holds the definitions and each result as a named
-  proposition `Spec.<name>` with no proof, and `Drain/Proofs/<File>.lean`
-  proves it as `theorem <name> : Spec.<name>`, beside the lemmas the proofs
-  need. No theorem is added, deleted or restated:
-  `scripts/formal/check-decl-equivalence.py --spec-form` checks that each of
-  the 93 propositions unfolds to the statement its theorem had, and
-  `--only-form-changes` runs that comparison alone on any change.
-  `scripts/formal/audit-theorems.py --check` now also fails on a `Spec`
-  proposition that the theorem of its name does not prove. Docs anchors cite
-  the propositions (`lean: Drain.Spec.<name>`), and the anchor check refuses
-  a theorem or lemma of the proofs layer. `formal/README.md`, "Reading a Spec
-  file", describes the form; the other models are not in it yet. Earlier
-  entries below name the drain files as they were.
+  `Drain/Spec/<File>.lean` holds the definitions and each guarantee about the
+  current Rust as a named proposition `Spec.<name>` with no proof, and
+  `Drain/Proofs/<File>.lean` proves it as `theorem <name> : Spec.<name>`,
+  beside the lemmas the proofs need. Of the drain model's 93 named results,
+  39 are now `Spec` propositions, each checked by
+  `scripts/formal/check-decl-equivalence.py --spec-form` to state exactly
+  what its theorem stated (the printed kernel terms are equal and every
+  definition they reach is unchanged); 21 that a proof uses and a stronger
+  kept result covers are `Proofs` lemmas, stated in full as before; 7
+  findings and pre-fix results moved, unchanged, to `Drain/History.lean` (3)
+  and `Drain/Examples.lean` (4); and 26 were deleted, with 6 lemmas and 17
+  definitions only they used, because they stated no guarantee about the
+  current Rust: `rfl` unfoldings of a definition's arms, the model compared
+  with itself, and statements over the first in-session hold model, the
+  replay without its retry pass and rules the Rust no longer runs
+  (`formal/audit/deleted-theorems.tsv`, "#350 Spec review"). The models now
+  have 2,367 theorems, from 2,399, and the four `Spec` files are about 1,400
+  lines, from 2,900. `--only-form-changes` runs the form comparison alone,
+  definitions each statement reaches included, on every pull request, and
+  skips it when `formal/lean-toolchain` changes. `scripts/formal/audit-theorems.py --check` now also fails on a
+  `Spec` proposition that the theorem of its name does not prove. Docs
+  anchors cite the propositions (`lean: Drain.Spec.<name>`) or definitions,
+  and the anchor check refuses a theorem or lemma of the proofs layer.
+  `formal/README.md`, "Reading a Spec file", describes the form and when a
+  theorem gets a proposition; the other models are not in it yet. Earlier
+  entries below name the drain files and theorems as they were.
 
 ### Fixed
 
