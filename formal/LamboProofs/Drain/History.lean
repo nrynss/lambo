@@ -6,7 +6,8 @@ loop before #295 (`work`, and `close` over it), under which an in-session
 embedder outage or lookup timeout answered `failed`, left the intent owed and
 let the agent's next write run, with the lane drain it ran to completion
 (`drainLane`, `drain`); the replay loop before #294 (`loop`, `replay`, over
-`replayStep`); the replay loop over #295's first step (`loopD stepFixed`,
+`replayStep`); the replay loop over #294's step (`loopWith stepInput`); the
+replay loop over #295's first step (`loopD stepFixed`,
 before an id in another receipt format was quarantined); and the close before
 #345 over the current worker. It is built and in the axiom audit, but
 `formal/models.toml` does not check it for drift and the docs do not cite it.
@@ -38,7 +39,11 @@ where there is one.
 * `inputFact_goes_on`, `sessionWide_stops`, `replayStep_sessionWide`,
   `replayStep_inputRefusal_stops`: a fact about the input settled `failed`
   and the replay went on; any other non-transient error, the graph-dependent
-  refusals #294 fixed included, stopped it. Current: `fixed_sessionWide_stops`.
+  refusals #294 fixed included, stopped it. Current: `stepInput_refusesInput`,
+  `stepInput_sessionWide`.
+* `fixed_sessionWide_stops`: over #294's loop (`loopWith stepInput`), any
+  other non-transient error still stopped the replay. Current:
+  `stepInput_sessionWide`.
 * `fixedD_input_goes_on`: over `stepFixed`, an input refusal settled `failed`
   and the loop went on with that step, which consumed an id in another
   receipt format `failed` where the current `stepQ` quarantines it.
@@ -616,8 +621,7 @@ about the input stopped `spawn_replay`: a non-cycle store error (another
 `Invariant`, a `NotFound`, a backend error), `Config`, a lost lease
 (`Conflict`), anything else, and a graph-dependent input refusal
 (`Err.inputRefusal`) with them. Since #294 `stepInput` settles that refusal
-`failed`; the current statement is `stepInput_sessionWide` and, over the
-loop, `fixed_sessionWide_stops`. -/
+`failed`; the current statement is `stepInput_sessionWide`. -/
 theorem replayStep_sessionWide (img : Bool) (e : Err) (s : Streaks) (h1 : e.inputFact = false)
     (h2 : e.transient = false) : ∃ b, (replayStep img (.run (.err e)) s).1 = .stop b := by
   cases e <;> simp_all [Err.inputFact, Err.transient, replayStep]
@@ -654,6 +658,49 @@ theorem sessionWide_stops (rout : Job → RR) (s : Streaks) (i : Intent) (rest :
 before #294; `store_error_blocks_backlog` is the backlog it blocks). -/
 theorem replayStep_inputRefusal_stops (img : Bool) (s : Streaks) :
     replayStep img (.run (.err .inputRefusal)) s = (.stop .other, s) := rfl
+
+/-! ## How the replay loop over #294's step stops
+
+Over `loopWith stepInput`, which has no deferral and no retry pass; the
+current statement is `stepInput_sessionWide`, at the step. -/
+
+/-- `loop` with its step as a parameter, so a fixed step can be run through
+the same loop. -/
+def loopWith (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR) :
+    Streaks → List Intent → ROut
+  | _, [] => ROut.empty
+  | s, i :: rest =>
+    match step i.job.image (rout i.job) s with
+    | (.applied, s') =>
+      let o := loopWith step rout s' rest
+      { o with
+        answers := (i.job.key, .appliedAfterRestart) :: o.answers
+        log := [.write i.job.key, .consume i.job.key .appliedAfterRestart] :: o.log
+        applied := i.job :: o.applied }
+    | (.failed, s') =>
+      let o := loopWith step rout s' rest
+      { o with
+        answers := (i.job.key, .failed) :: o.answers
+        log := [.consume i.job.key .failed] :: o.log
+        failed := i.job :: o.failed }
+    | (.skip, s') => loopWith step rout s' rest
+    | (.stop b, _) => { ROut.empty with block := some b }
+
+/-- **The fixed replay still stops on every other non-transient error**, the
+intent and every later one left unconsumed. -/
+theorem fixed_sessionWide_stops (rout : Job → RR) (s : Streaks) (i : Intent) (rest : List Intent)
+    (e : Err) (he : rout i.job = .run (.err e)) (h1 : e.refusesInput = false)
+    (h2 : e.transient = false) :
+    ∃ b, loopWith stepInput rout s (i :: rest) = { ROut.empty with block := some b } := by
+  obtain ⟨b, hb⟩ := stepInput_sessionWide i.job.image e s h1 h2
+  refine ⟨b, ?_⟩
+  simp only [loopWith, he]
+  cases hs : stepInput i.job.image (.run (.err e)) s with
+  | mk st s' =>
+    rw [hs] at hb
+    simp only at hb
+    subst hb
+    rfl
 
 /-! ## How the replay over #295's first step settles an input refusal
 

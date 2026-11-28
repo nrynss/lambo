@@ -23,7 +23,8 @@ Results:
 * `replayP_preserves`: a serve applies each agent's writes in order, none after one left owed.
 * `replay_dead_letter_two_restarts`: a rejected mixed batch settles the bad intent and
   leaves its neighbour owed once.
-* `fixed_sessionWide_stops`: a non-transient error that is not an input refusal stops the replay.
+* `stepInput_refusesInput`, `stepInput_sessionWide`: an input refusal settles `failed`, and
+  any other non-transient error stops the replay.
 * `stepInput_agrees`: outside an input refusal, `stepInput` is `replayStep`.
 
 Boundary: each replay step is atomic and a run's result is an input per
@@ -32,10 +33,8 @@ retry pass is one more attempt, not a timer. A deferred agent's intent is
 passed over before its run result is read, where the Rust checks the lease
 and the seal first: that moves only where a halting replay stops. `fixedLoad`
 regroups a row whose id does not parse with its process, where
-`replay_order` leaves it in place; such a row is never applied.
-`fixed_sessionWide_stops` is stated over an earlier loop
-(`loopWith stepInput`) whose arms the current step keeps for those answers,
-not over `stepQ`.
+`replay_order` leaves it in place; such a row is never applied. On a run
+result `stepQ` is `stepInput` (`stepQ_agrees`, `stepFixed_agrees`).
 -/
 
 import LamboProofs.Drain.Spec.Base
@@ -64,36 +63,20 @@ abbrev Spec.stepInput_agrees : Prop :=
     rr ≠ .run (.err .inputRefusal) →
     stepInput img rr s = replayStep img rr s
 
-/-- The replay loop with its step as a parameter and no deferral: the loop
-`fixed_sessionWide_stops` is stated over. -/
-def loopWith (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR) :
-    Streaks → List Intent → ROut
-  | _, [] => ROut.empty
-  | s, i :: rest =>
-    match step i.job.image (rout i.job) s with
-    | (.applied, s') =>
-      let o := loopWith step rout s' rest
-      { o with
-        answers := (i.job.key, .appliedAfterRestart) :: o.answers
-        log := [.write i.job.key, .consume i.job.key .appliedAfterRestart] :: o.log
-        applied := i.job :: o.applied }
-    | (.failed, s') =>
-      let o := loopWith step rout s' rest
-      { o with
-        answers := (i.job.key, .failed) :: o.answers
-        log := [.consume i.job.key .failed] :: o.log
-        failed := i.job :: o.failed }
-    | (.skip, s') => loopWith step rout s' rest
-    | (.stop b, _) => { ROut.empty with block := some b }
+/-- **Every input refusal settles `failed`**: a fact about the input, or a
+graph-dependent refusal (`StoreError::is_input_refusal`). -/
+abbrev Spec.stepInput_refusesInput : Prop :=
+  ∀ (img : Bool) (e : Err) (s : Streaks),
+    e.refusesInput = true →
+    (stepInput img (.run (.err e)) s).1 = .failed
 
-/-- **A non-transient error that is not an input refusal stops the replay**,
-the intent and every later one left unconsumed. -/
-abbrev Spec.fixed_sessionWide_stops : Prop :=
-  ∀ (rout : Job → RR) (s : Streaks) (i : Intent) (rest : List Intent) (e : Err),
-    rout i.job = .run (.err e) →
+/-- **Any other non-transient error stops the replay**: a store error that can
+mean an inconsistent graph or store, `Config`, a lost lease, anything else. -/
+abbrev Spec.stepInput_sessionWide : Prop :=
+  ∀ (img : Bool) (e : Err) (s : Streaks),
     e.refusesInput = false →
     e.transient = false →
-    ∃ b, loopWith stepInput rout s (i :: rest) = { ROut.empty with block := some b }
+    ∃ b, (stepInput img (.run (.err e)) s).1 = .stop b
 
 /-! ## Deferring an agent
 

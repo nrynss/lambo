@@ -2102,11 +2102,12 @@ async fn attach_planted(
 /// (block reason `Other`): it and everything behind it stayed
 /// `pending_replay`, on every serve.
 ///
-/// Mirrors the Lean theorem `Drain.fixed_sessionWide_stops` (any other
-/// non-transient error still stops the replay). `Drain.fixedD_input_goes_on`
-/// (`Drain/History.lean`) states that an input refusal settles `failed` and
-/// the replay goes on, over the loop with #295's first step (`stepFixed`),
-/// not the current one. The code before the fix is
+/// Mirrors the Lean theorems `Drain.stepInput_refusesInput` (an input
+/// refusal settles `failed`) and `Drain.stepInput_sessionWide` (any other
+/// non-transient error still stops the replay), stated over a layer of the
+/// current step `Drain.stepQ`, which agrees with it on every run result.
+/// That the loop goes on is `Drain.fixedD_input_goes_on` (`Drain/History.lean`),
+/// over #295's first step. The code before the fix is
 /// `Drain.store_error_blocks_backlog` and
 /// `Drain.replayStep_inputRefusal_stops`.
 #[cfg(feature = "fixtures")]

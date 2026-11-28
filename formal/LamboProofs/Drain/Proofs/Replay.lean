@@ -16,29 +16,13 @@ theorem stepInput_agrees : Spec.stepInput_agrees := by
   · exact absurd rfl h
   · rfl
 
-/-- Every input refusal settles `failed`. -/
-theorem stepInput_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
-    (stepInput img (.run (.err e)) s).1 = .failed := by
+theorem stepInput_refusesInput : Spec.stepInput_refusesInput := by
+  intro img e s h
   cases e <;> simp_all [Err.refusesInput, Err.inputFact, stepInput, replayStep]
 
-/-- **And still stops on everything else that is not transient**: a store
-error that can mean an inconsistent graph or store, `Config`, a lost lease,
-anything else. -/
-theorem stepInput_sessionWide (img : Bool) (e : Err) (s : Streaks) (h1 : e.refusesInput = false)
-    (h2 : e.transient = false) : ∃ b, (stepInput img (.run (.err e)) s).1 = .stop b := by
+theorem stepInput_sessionWide : Spec.stepInput_sessionWide := by
+  intro img e s h1 h2
   cases e <;> simp_all [Err.refusesInput, Err.inputFact, Err.transient, stepInput, replayStep]
-
-theorem fixed_sessionWide_stops : Spec.fixed_sessionWide_stops := by
-  intro rout s i rest e he h1 h2
-  obtain ⟨b, hb⟩ := stepInput_sessionWide i.job.image e s h1 h2
-  refine ⟨b, ?_⟩
-  simp only [loopWith, he]
-  cases hs : stepInput i.job.image (.run (.err e)) s with
-  | mk st s' =>
-    rw [hs] at hb
-    simp only at hb
-    subst hb
-    rfl
 
 /-! ## Deferring an agent -/
 
