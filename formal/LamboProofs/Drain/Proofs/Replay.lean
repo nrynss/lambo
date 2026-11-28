@@ -634,8 +634,8 @@ theorem pairwise_of_agent_filters {P : Job → Job → Prop} :
 
 /-! ## Quarantine, the retry pass and the block reason -/
 
-theorem stepQ_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .unknownFormat) :
-    stepQ img rr s = stepFixed img rr s := by
+theorem stepQ_agrees : Spec.stepQ_agrees := by
+  intro img rr s h
   unfold stepQ
   split
   · exact absurd rfl h

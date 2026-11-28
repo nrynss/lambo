@@ -7,7 +7,7 @@
 - Formal models: the drain model is in Spec and Proofs form (#350). Each
   subsystem file under `formal/LamboProofs/Drain/` is now two:
   `Drain/Spec/<File>.lean` holds the definitions and each guarantee about the
-  current Rust as a named proposition `Spec.<name>` with no proof (41 of
+  current Rust as a named proposition `Spec.<name>` with no proof (42 of
   them), and `Drain/Proofs/<File>.lean` proves it as
   `theorem <name> : Spec.<name>`, beside the lemmas the proofs need, which
   are stated in full as before. `scripts/formal/check-decl-equivalence.py
