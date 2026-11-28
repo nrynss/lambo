@@ -20,7 +20,8 @@ not the source text), and compares the two by fully qualified name:
   per line (a line starting with `#` is a comment), as a helper moved to the shared library:
   NEW must exist at HEAD with OLD's kind and type, and several OLD names may
   map to one NEW (duplicates merged). Names in FILE rewrite references in the
-  compared bodies too;
+  compared bodies too. A line whose OLD and NEW are the same name lists a
+  declaration that went private or public, which otherwise fails (below);
 * a theorem may be missing at HEAD only when `--deletions FILE` lists it,
   one `NAME<TAB>REASON<TAB>KEPT` per line (a line starting with `#` is a
   comment; a reason may contain `#`, as in an issue number): NAME is a
@@ -39,7 +40,8 @@ not the source text), and compares the two by fully qualified name:
 Which module a declaration lives in is reported (a summary of the moves), not
 compared, so splitting a model file into several is allowed. A private name
 is compared as its user-facing name (a declaration that goes private or
-public fails: that changes its kernel name), and a binder name without its macro
+public fails unless `--renames` lists it under its own name: that changes
+its kernel name, not what it is), and a binder name without its macro
 scopes (a hygienic name records the module it was elaborated in). Only declarations written in the source
 are compared; the constants Lean generates for them (`foo._proof_1`,
 `foo.match_1`, `_auxLemma.N`, ...) are not, as their numbering follows the
@@ -398,7 +400,7 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
             continue
         new = renames.get(name, name)
         h = head.get(new)
-        if name in renames and name in head:
+        if name in renames and name in head and new != name:
             errors.append(f"{name}: listed as moved to {new}, but still declared")
             continue
         if h is None:
@@ -425,7 +427,7 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
                                  "a Spec proposition)" if changed_form else ""))
         if b["kind"] != "theorem" and bd.norm(b["value"]) != hd.norm(h["value"]):
             errors.append(f"{name}: definition body changed")
-        if b["private"] != h["private"]:
+        if b["private"] != h["private"] and renames.get(name) != name:
             # A private name is `_private.<module>.0.<name>` in the kernel, so
             # going private or public renames the declaration.
             errors.append(f"{name}: {'private' if b['private'] else 'public'} at the base, "

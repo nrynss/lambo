@@ -197,6 +197,14 @@ class Equivalence(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Lambo.A.p: public at the base, private at HEAD", out)
         self.assertEqual(self.run_check(head, base)[0], 1)
+        # Listed under its own name, the change of visibility passes; its
+        # statement and body are still compared.
+        code, out = self.run_check(head, base, "Lambo.A.p\tLambo.A.p\n")
+        self.assertEqual(code, 0, out)
+        changed = BASE + [decl("Lambo.A.p", kind="def", type_="Nat", value="1")]
+        code, out = self.run_check(head, changed, "Lambo.A.p\tLambo.A.p\n")
+        self.assertEqual(code, 1)
+        self.assertIn("Lambo.A.p: definition body changed", out)
 
     def test_listed_moves_merge_duplicates(self):
         lib = decl("Lambo.Lib.List.helper", type_=BASE[1]["type"], module="LamboProofs.Lib.List")
