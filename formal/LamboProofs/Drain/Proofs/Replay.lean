@@ -1,18 +1,4 @@
-/-
-# Write-queue drain: proofs for `Spec/Replay.lean`
-
-Proofs of the propositions `Drain/Spec/Replay.lean` states (the replay after
-#294 and #295, the order invariant across passes, the in-session hold and the
-retry pass), each as `theorem <name> : Spec.<name>`, and the lemmas those
-proofs need. A lemma here is stated in full and is there because a proof uses
-it: it is not part of the specification, and a docs anchor may not cite it. A
-definition here is one only the proofs use.
-
-Boundary: this file states nothing about the Rust that
-`Drain/Spec/Replay.lean` does not, so what the model covers and what it leaves
-out are in that file's header. A theorem's doc comment is on its `Spec`
-proposition.
--/
+/- Proofs of `Drain/Spec/Replay.lean`. -/
 
 import LamboProofs.Drain.Spec.Replay
 import LamboProofs.Drain.Proofs.Base
@@ -29,11 +15,9 @@ def OrderInv (rows : List Intent) (applied : List Job) : Prop :=
   ∀ x ∈ applied, ∀ i ∈ rows, i.outcome = none → x.agent = i.job.agent →
     x.epoch = i.job.epoch → x.rid ≤ i.job.rid
 
-/-! ## The fix for #294: graph-dependent input refusals settle `failed` -/
+/-! ## Input refusals -/
 
-/-- **The fixed replay settles every input refusal `failed`**: `Embed`,
-`ImageIdTaken`, `Reference`, a cycle refusal, and the graph-dependent
-refusals #294 names. -/
+/-- Every input refusal settles `failed`. -/
 theorem stepInput_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
     (stepInput img (.run (.err e)) s).1 = .failed := by
   cases e <;> simp_all [Err.refusesInput, Err.inputFact, stepInput, replayStep]
@@ -57,11 +41,9 @@ theorem fixed_sessionWide_stops : Spec.fixed_sessionWide_stops := by
     subst hb
     rfl
 
-/-! ## The fix for #295: per-agent order, a clock-free load order, bad ids -/
+/-! ## Deferring an agent -/
 
-/-! ### The steps -/
-
-/-- On everything but an unparseable id the step is #294's. -/
+/-- On everything but an unparseable id `stepFixed` is `stepInput`. -/
 theorem stepFixed_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .badId)
     (h' : rr ≠ .unknownFormat) : stepFixed img rr s = stepInput img rr s := by
   unfold stepFixed
@@ -70,13 +52,13 @@ theorem stepFixed_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .badId
   · exact absurd rfl h'
   · rfl
 
-/-- #294 still holds: every input refusal settles `failed`. -/
+/-- Every input refusal settles `failed` under `stepFixed` too. -/
 theorem stepFixed_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
     (stepFixed img (.run (.err e)) s).1 = .failed := by
   rw [stepFixed_agrees img _ s (by simp) (by simp)]
   exact stepInput_refusesInput img e s h
 
-/-- The only result the fixed step leaves unsettled without stopping is a
+/-- The only result `stepFixed` leaves unsettled without stopping is a
 transient embedder answer: so only it defers an agent. -/
 theorem stepFixed_skip {img : Bool} {rr : RR} {s : Streaks} (h : (stepFixed img rr s).1 = .skip) :
     rr = .run (.err .unavailable) := by
@@ -132,8 +114,8 @@ theorem loopD_stop {step : Bool → RR → Streaks → Step × Streaks} {rout : 
     loopD step rout s d (i :: rest) = { ROut.empty with block := some b } := by
   simp only [loopD, hd, h, ite_false]
 
-/-- `loop_facts` for the fixed loop, plus: no job of a deferred agent is
-applied. -/
+/-- What `loopD` applies and fails comes from its rows, its log has no put and
+consumes each, and no job of a deferred agent is applied. -/
 theorem loopD_facts (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR) :
     ∀ (l : List Intent) (s : Streaks) (d : List Nat),
     (loopD step rout s d l).applied.Sublist (l.map (·.job)) ∧
@@ -298,7 +280,7 @@ theorem replayD_facts (step : Bool → RR → Streaks → Step × Streaks) (live
   · obtain ⟨h1, h2, h3, h4, _⟩ := loopD_facts step rout _ ⟨0, 0⟩ []
     exact ⟨h1, h2, h3, h4⟩
 
-/-- The fixed replay, too, applies only unconsumed rows. -/
+/-- `replayD`, too, applies only unconsumed rows. -/
 theorem replayD_applied_pending {step : Bool → RR → Streaks → Step × Streaks} {live : Bool}
     {rout : Job → RR} {intents : List Intent} {x : Job}
     (hx : x ∈ (replayD step live rout intents).applied) :
@@ -527,7 +509,7 @@ theorem loadOrder_perm : ∀ (l : List Intent), (loadOrder l).Perm l := by
   | nil => exact List.Perm.refl _
   | cons x xs ih => exact (insertK_perm x _).trans (ih.cons x)
 
-/-- The fixed load holds the same rows. -/
+/-- `fixedLoad` holds the same rows. -/
 theorem fixedLoad_perm (l : List Intent) : (fixedLoad l).Perm l :=
   (regroupN_perm _ _).trans (loadOrder_perm l)
 
@@ -543,7 +525,7 @@ theorem fixedLoad_agrees : Spec.fixedLoad_agrees := by
   intro l hmono
   exact regroupN_of_sorted _ _ (load_epoch_seq_order l hmono)
 
-/-! ## Order across passes: the invariant the order proofs carry -/
+/-! ## The order invariant across passes -/
 
 /-- Reloading the rows in another order keeps the invariant. -/
 theorem orderInv_perm {rows rows' : List Intent} {A : List Job} (hp : rows'.Perm rows)
@@ -573,7 +555,7 @@ theorem foldl_jobs : ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
     rw [ih _ (fun x hx => hnp x (List.mem_cons_of_mem _ hx)),
       applyMut_jobs acc m (hnp m List.mem_cons_self)]
 
-/-- **One pass of the fixed loop keeps the invariant**, for any step, any
+/-- **One pass of `loopD` keeps the invariant**, for any step, any
 streaks and any run results, over rows keyed by receipt id and loaded in
 per-process sequence order. -/
 theorem loopD_preserves (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR)
@@ -646,7 +628,7 @@ theorem loopD_preserves (step : Bool → RR → Streaks → Step × Streaks) (ro
           rw [hixj] at hrel
           exact hrel hep
 
-/-- The same for a whole serve of the fixed replay (the liveness gate
+/-- The same for a whole `replayD` serve (the liveness gate
 included). -/
 theorem replayD_preserves (step : Bool → RR → Streaks → Step × Streaks) (live : Bool)
     (rout : Job → RR) (rows : List Intent) (A : List Job) (hnd : (rows.map (·.job.key)).Nodup)
@@ -658,7 +640,7 @@ theorem replayD_preserves (step : Bool → RR → Streaks → Step × Streaks) (
   · simpa [ROut.empty, applyLog] using hI
   · exact loopD_preserves step rout ⟨0, 0⟩ rows A hnd hs hI
 
-/-! ## The in-session hold (#295) -/
+/-! ## Agents' sub-lists -/
 
 /-- A list whose every agent's sub-list is ordered is ordered for each agent. -/
 theorem pairwise_of_agent_filters {P : Job → Job → Prop} :
@@ -681,7 +663,7 @@ theorem pairwise_of_agent_filters {P : Job → Job → Prop} :
         exact (List.pairwise_cons.mp hx).2
       · simpa [List.filter_cons, hxa] using hx
 
-/-! ## The replay's retry pass, quarantine and block reason (#295) -/
+/-! ## Quarantine, the retry pass and the block reason -/
 
 theorem stepQ_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .unknownFormat) :
     stepQ img rr s = stepFixed img rr s := by
@@ -740,7 +722,7 @@ theorem applyLog_sorted (rows : List Intent) (log : List Batch) (hnp : NoPut log
   exact List.pairwise_map.mp hs'
 
 /-- **A serve with the retry pass keeps the order invariant**: both passes
-are runs of the fixed loop over per-process-sorted rows. -/
+are runs of `loopD` over per-process-sorted rows. -/
 theorem replayP_preserves (step : Bool → RR → Streaks → Step × Streaks) (live : Bool)
     (rout rout' : Job → RR) (s' : Streaks) (rows : List Intent) (A : List Job)
     (hnd : (rows.map (·.job.key)).Nodup) (hs : EpochSorted rows) (hI : OrderInv rows A) :
@@ -760,7 +742,7 @@ theorem replayP_preserves (step : Bool → RR → Streaks → Step × Streaks) (
     rw [applyLog_append, ← List.append_assoc]
     exact h2
 
-/-- With no step skipping or stopping, the fixed loop consumes every row it
+/-- With no step skipping or stopping, `loopD` consumes every row it
 is given. -/
 theorem loopD_settles (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR)
     (hret : ∀ j s, (step j.image (rout j) s).1 = .applied ∨ (step j.image (rout j) s).1 = .failed) :

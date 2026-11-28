@@ -1,41 +1,41 @@
 /-
-# Write-queue drain: the current lane worker (#295 review)
+# Write-queue drain: the lane worker
 
-The lane worker as the Rust runs it since #295's review (`stepW`, `runW`),
-with admission, the caps, drain-only retries and the lease-lost fence; the
-serve that follows a session (`serveR`). It builds on `Replay.lean`'s order
-invariant and retry pass. Its close is in `Close.lean`.
+The lane worker as events (`Ev`, `stepW`, `runW`): an admission against the
+caps (`submit`), a worker taking one write (`start`: its agent's oldest held
+write unless parked, else its next queued write, which joins the held ones if
+any are left), that write's run ending (`finish`), a drain-only retry ending
+the parking (`wake`), and the latched lease-lost fence (`fence`); then the
+serve that follows a session (`serveR`).
 
-This is the specification layer: the definitions and each result as a
-proposition `Spec.<name>` (`Spec/Base.lean` describes the two layers). The
-proofs are in `Drain/Proofs/Worker.lean`.
+Rust: `src/writeq/execution.rs` (`WritePipeline::spawn_worker`, the hold
+arm, `held_retry_backoff`); `Lanes` and `WritePipeline::admit`
+(`src/writeq/admission.rs`); `settle_one`, `hold_one`
+(`src/writeq/receipts.rs`); `WritePipeline::spawn_replay`
+(`src/writeq/replay.rs`).
 
-## Results
+Results:
+* `runW_ord`: per agent, settled, running, held and queued writes are its admitted writes in order.
+* `runW_caps`: the lane, queue and byte caps hold over queued, running and held writes.
+* `retry_settles_head`, `retry_enabled`: a retry needs no admission, is available while
+  writes are held, and settles the oldest held write once the embedder answers.
+* `fence_stops_applies`: after the fence nothing taken is applied.
+* `serveR_reported`: the reported block reason is never `null` while intents are owed.
+* `sessionW_then_serve_order`: per-agent order from the session through the next serve.
 
-* Every event is a step (an admission, one write taken, one write finished, a
-  drain-only retry, the fence). `stepW_ord`, `runW_ord`: per agent, settled,
-  running, held and queued writes are its admitted writes in order;
-  `stepW_caps`, `runW_caps`: the lane, queue and byte caps hold over queued,
-  running and held writes at every step; `retry_settles_head`,
-  `retry_enabled`: a retry needs no admission, is always available while
-  writes are held, and settles the oldest held write once the embedder
-  answers (that the retry comes due is the Rust's timer, not modelled);
-  `stepW_caps_free`: a retry does not read the caps, by definition;
-  `refused_wakes`: the commit at which a refused write woke the retry at
-  once; `fence_stops_applies`: after the fence nothing taken is applied;
-  `sessionW_orderInv`, `sessionW_then_serve_order`: per-agent order from the
-  session through the next serve. `serveR_reported`: a halt that leaves
-  intents owed reports `other`, never `null` (`serveQ_block` read `unset` as
-  a reason; the stats print it as `null`).
-
-Boundary: each event is atomic, as in `Base.lean`; when a retry comes due is
-the Rust's timer, not modelled; a run's result is an input per write. A
-worker that panics after its commit is `Close.lean`'s (`stepK`, `stepP`), not
-`stepW`'s.
-Startup replay admission and restart-required parking are outside the lane
-events below. The writer refuses fresh admissions while replay is staging or
-unconfirmed, and a lane parked for restart keeps its intents owed without
-timed retries.
+Boundary: each event is atomic and a run's result is an input per write.
+When a retry comes due is the Rust's backoff timer, which is not modelled:
+`wake` and `start` are free events, so the retry results state enabledness,
+not that a retry happens. A refused admission unparks its agent in `stepW`,
+which the Rust does only at the backoff; the Rust's refusal changes nothing,
+which is the model's trace without that event. The hold decision is an input:
+a run of lookup timeouts that holds a write is handed over as `unavailable`
+(`Close.lean`'s `heldErrW`). A write running when the fence lands can still
+commit, and the store refuses that flush. A worker that panics after its
+commit is `Close.lean`'s panic model, not `stepW`'s. Startup replay
+admission and restart-required parking are outside these events: the writer
+refuses fresh admissions while replay is staging or unconfirmed, and a lane
+parked for restart keeps its intents owed without timed retries.
 -/
 
 import LamboProofs.Drain.Spec.Replay
@@ -44,48 +44,7 @@ namespace Lambo.Drain
 
 open Lambo.Receipts (Answer Entry settle Lane)
 
-/-! ## The hold with admission, caps, retries and the fence (#295 review)
-
-`workH` treats a worker's whole pass as one step and has no admission, so it
-could not show two faults review found: held writes counted against
-admission while the only retry trigger was a new admitted write (they could
-be stranded), and a retry ran several held writes after one lease check.
-This model has the events themselves. `submit j`: admission, against the
-caps, counting queued, running and held writes and their bytes. `start a`:
-agent `a`'s worker takes one write: its oldest held write unless it is
-parked after an outage, else its next queued write, which joins the held
-ones if any are left. `finish a r`: that write's run returns `r`. `wake a`:
-a drain-only retry (the backoff timer, a new write, or a refused admission
-for an agent with held writes) ends the parking. `fence`: the lease is lost
-(latched, as #293 makes it). Every step is atomic; a write in flight is
-counted in `running`.
-
-The fence is checked when a write is taken, before it runs: a write taken
-after the fence is refused (`failed`, its intent left to the next holder)
-and never run; a write already running when the fence lands can still
-commit, which the store's fenced flush then refuses (`Flush/Loop.lean`).
-
-Which errors hold a write (`holdsS`): an embedder outage. A lookup timeout
-settles `failed`, as the replay settles a single one; the worker's run of
-them that says the store is slow is handed to the model as `unavailable`
-(the class the worker acts on, not its cause). The run counts first attempts
-only: a held write's retry that times out again is handed over as
-`lookupTimeout`, and settles.
-
-**What the retry theorems cover, and what they do not.** `wake` and `start`
-are free events of the environment, so `retry_settles_head` and
-`retry_enabled` say that a retry needs no admission and is never blocked by
-the caps (`stepW_caps_free`, which holds because only admission reads them),
-and that it is always available while an agent has held writes and nothing
-running. They do not say that a retry ever happens: that is the Rust's
-backoff timer, which a worker keeps while its agent has held writes
-(`execution::held_retry_backoff`), and timing is not modelled. Nor do they
-bound how often it happens: in the Rust, neither a new write nor a refused
-admission starts a retry before the backoff since the last attempt has
-passed. Such a refusal is therefore no event in the model at all: it changes
-nothing but the parking, which in the Rust it leaves alone. `refused_wakes`
-describes the commit before that (`30b79824`), where a refusal woke the
-retry at once. -/
+/-! ## The workers' state and events -/
 
 /-- The admission bounds: per agent (`WRITE_QUEUE_LANE_MAX`), the whole queue
 (`WRITE_QUEUE_MAX`), payload bytes (`WRITE_QUEUE_MAX_BYTES`). -/
@@ -102,9 +61,8 @@ def dropFirst (a : Nat) : List Job → List Job
   | [] => []
   | x :: xs => if x.agent = a then xs else x :: dropFirst a xs
 
-/-- The workers' state: receipts, queued, running and held writes, the
-parked agents, the latched fence, the batches appended, what was settled (in
-order), and every admitted write (in admission order). -/
+/-- The workers' state (`Lanes`): receipts, queued, running and held writes,
+parked agents, the fence, batches appended, what was settled and admitted. -/
 structure WS where
   store : RStore
   queue : List Job
@@ -131,15 +89,15 @@ inductive Ev where
   | fence
   deriving DecidableEq, Repr
 
-/-- Admission's three checks, every one counting held writes. -/
+/-- `WritePipeline::admit`'s three checks, every one counting held writes. -/
 def fits (c : Caps) (sz : Job → Nat) (st : WS) (j : Job) : Bool :=
   decide ((ofAgent j.agent st.load).length < c.lane) && decide (st.load.length < c.total) &&
     decide ((st.load.map sz).sum + sz j ≤ c.bytes)
 
-/-- The errors that hold a write in session. -/
+/-- The errors that hold a write in session (`spawn_worker`'s hold arm). -/
 def holdsS (e : Err) : Bool := e == .unavailable
 
-/-! The worker's moves, one write each. -/
+/-! ## The worker's moves (`spawn_worker`), one write each -/
 
 /-- Take the oldest held write `h` to run. -/
 def takeHeld (a : Nat) (h : Job) (st : WS) : WS :=
@@ -215,41 +173,34 @@ def runW (c : Caps) (sz : Job → Nat) (now : Int) : WS → List Ev → WS
   | st, [] => st
   | st, e :: es => runW c sz now (stepW c sz now st e) es
 
-/-! ### Per-agent order -/
+/-! ## Results -/
 
-/-- For every agent: what it settled, then the write it has running (at most
-one), then its held writes, then its queued writes, are exactly its admitted
-writes in admission order. -/
+/-- Per agent: settled, then running (at most one), held and queued writes are
+its admitted writes in admission order. -/
 def OrdW (st : WS) : Prop :=
   ∀ b, ofAgent b (st.settled.map (·.1)) ++ ofAgent b st.running ++ ofAgent b st.held ++
       ofAgent b st.queue = ofAgent b st.admitted ∧ (ofAgent b st.running).length ≤ 1
 
-/-- Any sequence of worker events keeps `OrdW`, so an agent's writes are
-settled in admission order, held writes and retries included. -/
+/-- **An agent's writes settle in admission order**, held writes and retries
+included. Rust test `an_outage_in_session_holds_the_agents_later_writes_behind_the_owed_one`. -/
 abbrev Spec.runW_ord : Prop :=
   ∀ (c : Caps) (sz : Job → Nat) (now : Int),
     ∀ (evs : List Ev) (st : WS), OrdW st → OrdW (runW c sz now st evs)
-
-/-! ### Caps: held writes stay counted, bytes included -/
 
 /-- Admission's bounds hold over everything it counts. -/
 def CapsW (c : Caps) (sz : Job → Nat) (st : WS) : Prop :=
   (∀ b, (ofAgent b st.load).length ≤ c.lane) ∧ st.load.length ≤ c.total ∧
     (st.load.map sz).sum ≤ c.bytes
 
-/-- The lane, queue and byte caps of `Lanes` hold over queued, running and
-held writes after any sequence of worker events, and a retry never reads them
-(#295). -/
+/-- **The lane, queue and byte caps hold over queued, running and held
+writes**, bytes included. Rust test `held_writes_keep_their_bytes_counted_until_they_settle`. -/
 abbrev Spec.runW_caps : Prop :=
   ∀ (c : Caps) (sz : Job → Nat) (now : Int),
     ∀ (evs : List Ev) (st : WS), CapsW c sz st → CapsW c sz (runW c sz now st evs)
 
-/-! ### Held writes are retried without any new admission -/
-
-/-- **A retry needs no admission**: an agent with held writes and nothing
-running, once its retry is due (`wake`), settles its oldest held write when
-the embedder answers it, with no admission among the events. That the retry
-comes due is the Rust's timer, not this theorem. -/
+/-- **A retry needs no admission**: once due, it settles the agent's oldest held
+write when the embedder answers. Rust test
+`held_writes_are_retried_without_a_new_write_even_when_the_lane_is_full`. -/
 abbrev Spec.retry_settles_head : Prop :=
   ∀ (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (a : Nat) (h : Job) (t : List Job)
     (r : RunResult),
@@ -261,11 +212,8 @@ abbrev Spec.retry_settles_head : Prop :=
       (runW c sz now st [.wake a, .start a, .finish a r]).settled =
         st.settled ++ [(h, if r = .ok then .applied else .failed)]
 
-/-- **A retry is always available while writes are held**: for an agent
-with held writes, nothing running and the lease held, the events `wake` then
-`start` take its oldest held write to run, whatever the parking, the caps or
-the rest of the state. (Enabledness, not fairness: that the environment
-delivers `wake` is the Rust's timer.) -/
+/-- **A retry is available while writes are held**: with nothing running and
+the lease held, `wake` then `start` run the oldest held write, whatever the caps. -/
 abbrev Spec.retry_enabled : Prop :=
   ∀ (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (a : Nat) (h : Job) (t : List Job),
     ofAgent a st.held = h :: t →
@@ -274,30 +222,22 @@ abbrev Spec.retry_enabled : Prop :=
     (runW c sz now st [.wake a, .start a]).running = st.running ++ [h] ∧
       ofAgent a (runW c sz now st [.wake a, .start a]).held = t
 
-/-! ### The fence -/
-
-/-- **No write taken after the fence is applied.** Once the lease is lost
-(latched) and nothing is running, no later event applies or logs anything:
-every held or queued write is refused, oldest first, without being run. A
-write already running when the fence landed is the only one that can still
-commit, and the store refuses that flush. -/
+/-- **No write taken after the fence is applied**: once the lease is lost and
+nothing is running, no event applies or logs anything. -/
 abbrev Spec.fence_stops_applies : Prop :=
   ∀ (c : Caps) (sz : Job → Nat) (now : Int),
     ∀ (evs : List Ev) (st : WS), st.fenced = true → st.running = [] →
       (runW c sz now st evs).applied = st.applied ∧ (runW c sz now st evs).log = st.log
 
-/-! ### Order across the session and the next serve -/
+/-! ## The serve after a session -/
 
-/-! ### The replay's block reason after a halt -/
-
-/-- What `write_queue_replay_blocked` reports for a block reason: `unset` (a
-halt on a lost lease or a seal) reads `null`, like no block. -/
+/-- What `write_queue_replay_blocked` reports: `unset` (a halt on a lost lease
+or a seal) reads `null`. -/
 def reported : Option Block → Option Block
   | some .unset => none
   | b => b
 
-/-- The serve after the review: a halt that leaves intents owed reports
-`other`, as a lost lease is an `other` fault. -/
+/-- `spawn_replay`'s serve: a halt that leaves intents owed reports `other`. -/
 def serveR (live : Bool) (rout rout' : Job → RR) (s' : Streaks) (intents : List Intent) : ROut :=
   let r := serveQ live rout rout' s' intents
   if r.block = some .unset ∧ pendingOf (applyLog intents r.log) ≠ [] then
@@ -305,14 +245,14 @@ def serveR (live : Bool) (rout rout' : Job → RR) (s' : Streaks) (intents : Lis
   else r
 
 /-- **The reported block reason is never `null` while intents are owed**,
-halts included (`serveQ_block` holds only before `unset` is read as `null`). -/
+halts included. Rust test `replay_blocked_names_the_reason_or_is_none`. -/
 abbrev Spec.serveR_reported : Prop :=
   ∀ (live : Bool) (rout rout' : Job → RR) (s' : Streaks) (intents : List Intent),
     pendingOf (applyLog intents (serveR live rout rout' s' intents).log) ≠ [] →
     reported (serveR live rout rout' s' intents).block ≠ none
 
-/-- **Per-agent order from the session (admission, caps, retries) through
-the next serve (both passes)**, whatever the embedder answers. -/
+/-- **Each agent's writes of one process apply in admission order from the
+session through the next serve**, whatever the embedder answers. -/
 abbrev Spec.sessionW_then_serve_order : Prop :=
   ∀ (c : Caps) (sz : Job → Nat) (now : Int) (s : RStore) (evs : List Ev) (e : Nat),
     (∀ j ∈ (runW c sz now (WS.init s) evs).admitted, j.epoch = e) →

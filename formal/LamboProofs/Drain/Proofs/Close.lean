@@ -1,18 +1,4 @@
-/-
-# Write-queue drain: proofs for `Spec/Close.lean`
-
-Proofs of the propositions `Drain/Spec/Close.lean` states (the close, crash
-and shutdown over the current worker, dead-lettered batches at close (#345),
-worker panics and the dead-lettered set, and where the lookup-timeout streak
-resets (#346)), each as `theorem <name> : Spec.<name>`, and the lemmas those
-proofs need. A lemma here is stated in full and is there because a proof uses
-it: it is not part of the specification, and a docs anchor may not cite it. A
-definition here is one only the proofs use.
-
-Boundary: this file states nothing about the Rust that `Drain/Spec/Close.lean`
-does not, so what the model covers and what it leaves out are in that file's
-header. A theorem's doc comment is on its `Spec` proposition.
--/
+/- Proofs of `Drain/Spec/Close.lean`. -/
 
 import LamboProofs.Drain.Spec.Close
 import LamboProofs.Drain.Proofs.Worker
@@ -24,15 +10,9 @@ open Lambo.Receipts (Answer Entry settle Lane)
 /-- No batch of the log consumes `k`. -/
 def Untouched (k : Key) (log : List Batch) : Prop := ∀ t, Mut.consume k t ∉ log.flatten
 
-/-- What every reachable state of the current workers keeps: each settled
-write's receipt holds its answer and its batch (or, refused after the fence,
-no consume at all); each queued or running write's receipt is unsettled and
-its intent untouched; each held write answers `pending_replay` with its
-intent untouched; and a write of `all` not admitted is still `pending` and
-untouched (`fresh`). That last clause covers alike a write not yet submitted
-and one admission refused: the model gives both a `pending` receipt and a put,
-where the Rust answers a refused write `dropped` and records no intent for it
-(the gap in the section header). -/
+/-- What every reachable state of the workers keeps: each settled write's
+receipt holds its answer and the log its batch; each live or held write's is
+unsettled and untouched; a write not admitted is still `pending` (`fresh`). -/
 structure InvW (all : List Job) (st : WS) : Prop where
   settled : ∀ p ∈ st.settled, ansOf st.store p.1.key = some p.2 ∧
     ((p.2 = .applied ∧ [Mut.write p.1.key, .consume p.1.key .applied] ∈ st.log) ∨
@@ -44,7 +24,7 @@ structure InvW (all : List Job) (st : WS) : Prop where
   fresh : ∀ j ∈ all, j.key ∉ st.admitted.map (·.key) →
     ansOf st.store j.key = some .pending ∧ Untouched j.key st.log
 
-/-! ## The close, crash and shutdown over the current worker (#295 on) -/
+/-! ## The close -/
 
 /-- Every write the workers hold: settled, running, held, queued. -/
 def DW (st : WS) : List Job := st.settled.map (·.1) ++ st.running ++ st.held ++ st.queue
@@ -672,20 +652,9 @@ theorem owedW_of {all : List Job} {st : WS} {j : Job} (hj : j ∈ all) (hu : Unt
   rw [List.flatten_append, List.foldl_append, ← intentsOf, intentsOf_admit]
   exact foldl_keeps_owed _ _ (List.mem_map.mpr ⟨j, hj, rfl⟩) hu
 
-/-- **Shutdown accounting over the current worker.** After any session of the
-current workers (admission, holds, retries, the fence) and a `close()`, every
-admitted write is one of: applied (its write and consume in one batch);
-failed with its intent consumed `failed`; failed after the fence, never run,
-its intent left unconsumed (the session's current holder's to apply, if an
-earlier flush took it); `intent_durable` after a completed final flush, owed
-in the flushed log (its row is unconsumed, so the next serve's replay owes
-it), whether it was running, held or queued when the close began; or
-`close_unflushed` after an incomplete flush. None is left `pending` or
-`pending_replay`. `shutdown_exactly_oneW` adds that exactly one of these
-holds. "Applied" means in this process's graph, its batch in the log: the
-batch is durable only once a flush takes it, and one committed after the
-fence is refused at the flush (`Flush/Loop.lean`). The current counterpart of
-`shutdown_no_silent_loss`. -/
+/-- After a session and `closeW`, every admitted write is applied, failed and
+consumed, failed after the fence and owed, `intent_durable` and owed, or
+`close_unflushed`. -/
 theorem shutdown_no_silent_lossW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
     {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
     (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
@@ -793,11 +762,8 @@ theorem lookupTimeout_run_holdsW : Spec.lookupTimeout_run_holdsW := by
   simp only [he]
   exact outage_holdsW hst hnd hall a j t hrun
 
-/-- **A retried close upgrades `close_unflushed`.** A write the close set aside
-(running, held or queued) answers `close_unflushed` after an incomplete flush;
-a retried close whose flush completes settles the same set-aside ids
-(`close_deferred`, kept after an incomplete flush) and answers it
-`intent_durable`. `retry_upgrades` is the same fact for one entry. -/
+/-- A set-aside write answers `close_unflushed` after an incomplete flush, and
+`intent_durable` after a retried `closeW` whose flush completes. -/
 theorem closeW_retry_upgradesW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
     {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
     (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
@@ -872,13 +838,8 @@ theorem stepW_log (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (ev : Ev) 
   | wake a => exact Or.inl rfl
   | fence => exact Or.inl rfl
 
-/-- **The refinement.** Every batch the current workers append is a batch the
-old worker (`workerStep`, unfenced) appends for some write and run result: an
-applied write's is `workerStep`'s success batch, a consumed failure's is its
-`[consume failed]` (for a lookup timeout the old worker appended nothing; the
-batch is the one it appends for a content refusal), and a hold or a fenced
-refusal appends none. So `workerStep_atomic` and `workerStep_keys` hold of the
-current worker's batches, which is what the crash argument needs. -/
+/-- Every batch the workers append is one `workerStep` (unfenced) appends, so
+`workerStep_atomic` and `workerStep_keys` hold of them. -/
 theorem runW_log_refines (c : Caps) (sz : Job → Nat) (now : Int) :
     ∀ (evs : List Ev) (st : WS), (∀ b ∈ st.log, ∃ j r, b = (workerStep false j r).2) →
       ∀ b ∈ (runW c sz now st evs).log, ∃ j r, b = (workerStep false j r).2 := by
@@ -1012,7 +973,7 @@ theorem shutdown_exactly_oneW : Spec.shutdown_exactly_oneW := by
     · exact not_owed_of_consumed hnp hf.2.2 hg.2.2.2
     · exact not_owed_of_consumed hnp hg.2.2 hf.2.2.2
 
-/-! ## Dead-lettered batches at close (#345) -/
+/-! ## Dead-lettered batches -/
 
 /-! ### The history's puts -/
 
@@ -1140,7 +1101,7 @@ theorem dropped_iff_not_committed {c : Caps} {sz : Job → Nat} {now : Int} {all
     · exact absurd h hc
     · exact h
 
-/-! ### The fixed close's receipts -/
+/-! ### The close's receipts -/
 
 theorem lookup_settleDeferredD (flush : CloseFlush) (dropped : List Key) (now : Int) :
     ∀ (ids : List Key) (s : RStore) (q : Key),
@@ -1166,7 +1127,7 @@ theorem lookup_settleDeferredD (flush : CloseFlush) (dropped : List Key) (now : 
       · simp [hq, hr]
       · simp [hq, hr]
 
-/-- At each receipt the fixed close settles by its own `flushFor`. -/
+/-- At each receipt `closeD` settles by its own `flushFor`. -/
 theorem lookup_settleDeferredD_eq (flush : CloseFlush) (dropped : List Key) (now : Int)
     (ids : List Key) (s : RStore) (q : Key) :
     lookup (settleDeferredD flush dropped now ids s) q =
@@ -1210,7 +1171,7 @@ theorem setAside_mem_all {c : Caps} {sz : Job → Nat} {now : Int} {all : List J
   · exact Or.inl (Or.inr hj)
   · exact Or.inr hj
 
-/-- A set-aside write's answer under the fixed close. -/
+/-- A set-aside write's answer under `closeD`. -/
 theorem closeD_setAside {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
     {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
     (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
@@ -1222,9 +1183,7 @@ theorem closeD_setAside {c : Caps} {sz : Job → Nat} {now : Int} {all : List Jo
   rw [ansOf_closeD]
   exact (ansOf_closeW_unsettled h1 h2).2
 
-/-! ### The rule before #345 is wrong -/
-
-/-! ### The fixed rule -/
+/-! ### The rule -/
 
 theorem shutdown_no_silent_lossD : Spec.shutdown_no_silent_lossD := by
   intro c sz now all evs st hst hnd hall flush dropped now' j hj
@@ -1309,7 +1268,7 @@ theorem closeD_retryD : Spec.closeD_retryD := by
     rw [lookup_settleDeferred, ite_eq_left hm] at hr
     exact hr
 
-/-! ## Worker panics and the dead-lettered set (#345 review) -/
+/-! ## Worker panics and the dead-lettered set -/
 
 /-- The current rule's invariant. -/
 structure PInv (s : DS) : Prop where
@@ -1407,7 +1366,7 @@ theorem settlePrune_settled_forgotten : Spec.settlePrune_settled_forgotten := by
     exact hk hc
   · simp at hm
 
-/-! ## Where the lookup-timeout streak resets (#346) -/
+/-! ## The lookup-timeout streak -/
 
 theorem runSince_snoc (evs : List SEv) (e : SEv) :
     runSince (evs ++ [e]) = streakNew (runSince evs) e := by
@@ -1422,7 +1381,7 @@ theorem streakNew_eq_runSince_rev : ∀ (r : List SEv),
     rw [List.reverse_cons, List.foldl_append, runSince_snoc, ← streakNew_eq_runSince_rev r]
     rfl
 
-/-- **The fixed streak is the documented count**, over every trace. -/
+/-- **`streakNew` is the documented count**, over every trace. -/
 theorem streakNew_eq_runSince (evs : List SEv) : evs.foldl streakNew 0 = runSince evs := by
   have h := streakNew_eq_runSince_rev evs.reverse
   rwa [List.reverse_reverse] at h
@@ -1445,9 +1404,7 @@ theorem foldl_streakNew_zero : ∀ (mid : List SEv), (∀ e ∈ mid, e ≠ .time
     rw [List.foldl_cons, he]
     exact foldl_streakNew_zero mid (fun x hx => h x (List.mem_cons_of_mem _ hx))
 
-/-- **A timeout after an applied write counts as a first timeout** under the
-fixed streak, whatever came before the commit and whatever settles after it,
-as long as no other timeout came since. -/
+/-- After a commit with no timeout since, the streak is 0. -/
 theorem streakNew_after_commit (pre mid : List SEv) (hmid : ∀ e ∈ mid, e ≠ .timeout) :
     (pre ++ SEv.commit :: mid).foldl streakNew 0 = 0 := by
   rw [List.foldl_append, List.foldl_cons]

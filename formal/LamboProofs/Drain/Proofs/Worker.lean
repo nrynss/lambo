@@ -1,18 +1,4 @@
-/-
-# Write-queue drain: proofs for `Spec/Worker.lean`
-
-Proofs of the propositions `Drain/Spec/Worker.lean` states (the current lane
-worker: per-agent order, the caps, retries, the fence and the serve's block
-reason), each as `theorem <name> : Spec.<name>`, and the lemmas those proofs
-need. A lemma here is stated in full and is there because a proof uses it: it
-is not part of the specification, and a docs anchor may not cite it. A
-definition here is one only the proofs use.
-
-Boundary: this file states nothing about the Rust that
-`Drain/Spec/Worker.lean` does not, so what the model covers and what it leaves
-out are in that file's header. A theorem's doc comment is on its `Spec`
-proposition.
--/
+/- Proofs of `Drain/Spec/Worker.lean`. -/
 
 import LamboProofs.Drain.Spec.Worker
 import LamboProofs.Drain.Proofs.Replay
@@ -226,7 +212,7 @@ theorem runW_ord : Spec.runW_ord := by
   | nil => intro st h; exact h
   | cons e es ih => intro st h; exact ih _ (stepW_ord c sz now st e h)
 
-/-! ### Caps: held writes stay counted, bytes included -/
+/-! ### Caps -/
 
 /-- A move that never adds to what admission counts keeps the caps: per
 agent, in all, and in bytes. -/
@@ -391,7 +377,7 @@ theorem runW_caps : Spec.runW_caps := by
   | nil => intro st h; exact h
   | cons e es ih => intro st hC; exact ih _ (stepW_caps c sz now st e hC)
 
-/-! ### Held writes are retried without any new admission -/
+/-! ### Retries -/
 
 theorem retry_settles_head : Spec.retry_settles_head := by
   intro c sz now st a h t r hheld hrun hf hr
@@ -520,7 +506,7 @@ theorem sessionW_orderInv (c : Caps) (sz : Job → Nat) (now : Int) (s : RStore)
       · exact List.mem_append_right _ (List.mem_append_right _ (hm _ h))
     exact Nat.le_of_lt (hcross x hxa i.job hio')
 
-/-! ### The replay's block reason after a halt -/
+/-! ### The serve's block reason -/
 
 theorem serveR_reported : Spec.serveR_reported := by
   intro live rout rout' s' intents h

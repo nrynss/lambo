@@ -1,135 +1,45 @@
 /-
-# Write-queue drain and durable-intent replay: the base model (specification)
+# Write-queue drain: shared definitions
 
-Model of how the asynchronous write queue's admitted writes end: drained by
-the lane workers, set aside and settled at `close()`, or replayed from their
-durable intents by a later serve.
+How the write queue's admitted writes end: drained by the lane workers, set
+aside and settled at `close()`, or replayed from their durable intents by a
+later serve. This file holds what the other `Drain/Spec/` files share: jobs,
+run results and the mutation log, the receipt store, `settle_deferred`'s
+set-aside, durable intents and their load order, and the replay's step.
 
-The model is in two layers. `Drain/Spec/` is the specification: the
-definitions, which are the algorithm as the Rust runs it, and each result
-stated as a proposition `Spec.<name>`, with no proof. `Drain/Proofs/` proves
-them: `theorem <name> : Spec.<name>`, beside the lemmas the proofs need,
-which state nothing about the Rust that a `Spec` proposition does not. Read
-this layer to learn what the model says; a proposition here holds because
-the theorem of its name in `Drain/Proofs/` is checked by `lake build`, and
-`scripts/formal/audit-theorems.py --check` fails on one that has no such
-theorem. Each layer has one file per subsystem, with the same names, and
-everything is in the namespace `Lambo.Drain`, so a name does not say which
-file holds it. Below and in the other files, `Base.lean`, `Replay.lean`,
-`Worker.lean` and `Close.lean` name the subsystem: its `Spec/` file for a
-definition or a statement, its `Proofs/` file for a proof.
+Rust: `WriteCtx::run`, `ConsumeStamp` and the batches of
+`WritePipeline::spawn_worker` (`src/writeq/execution.rs`); `settle_one`,
+`ReceiptId`, `next_receipt` (`src/writeq/receipts.rs`); `ReplayBlockReason`
+(`src/writeq/counters.rs`); `WriteIntent`, `WriteIntentOutcome`,
+`is_cycle_refusal`, `is_input_refusal`, `is_lookup_timeout`
+(`src/types/mod.rs`); `CloseFlush`, `abort_workers`, `settle_deferred`,
+`abort_all_sync` (`src/writeq/drain.rs`) and `Memory`'s `Drop`; the step and
+constants of `spawn_replay` (`src/writeq/replay.rs`); `record_write_intent`,
+`consume_write_intent` (`src/graph/graph/mutation_log.rs`); the adapters'
+load order (`src/store/{sqlite,pg}/session_load.rs`).
 
-* `Base.lean` (this file): writes, run results and the mutation log;
-  the lane worker's batches (`workerStep`), the receipt store and the lane
-  drain (`drain`); `settle_deferred`'s set-aside (`CloseFlush`, `deferEntry`,
-  `settleDeferred`) and the `Drop` path (`abortAllSync`); durable intents,
-  the intent table and the load order; the replay's step, its arms,
-  streaks and constants (`replayStep`, `sickThreshold`,
-  `lookupTimeoutLimit`) and the restart map's seed (`seed`).
-* `Replay.lean`: the replay fixes (#294, #295), the order invariant
-  across passes, the in-session hold (`workH`) and the replay's retry pass.
-* `Worker.lean`: the current lane worker (`stepW`, `runW`), with
-  admission, the caps, retries and the fence.
-* `Close.lean`: the close, crash and shutdown over the current worker
-  (`closeW`), dead-lettered batches at close (#345), worker panics and the
-  dead-lettered set, and where the lookup-timeout streak resets (#346).
+Results:
+* `replayStep_inputFact`: a refusal that is a fact about the input settles `failed`.
+* `unavailable_skips`, `unavailable_stops`: a transient answer skips its
+  intent, and the third in a row stops the replay.
 
-Two files are in neither layer and are not specification. `Drain/Examples.lean`
-holds worked examples and the findings about the Rust before a fix.
-`Drain/History.lean` holds the lane worker loop before #295 (`work`, `close`)
-and the replay loop before #294 (`replay`'s theorems), kept as the evidence
-for the findings they show. It describes no current Rust: it is not checked
-against the Rust for drift, and the docs do not cite it. Both state their
-theorems in full, with the proofs.
-
-Rust items modelled across the files:
-
-* `src/writeq/execution.rs`: the lane worker `WritePipeline::spawn_worker`
-  (pop, the lease-lost fence, `WriteCtx::run`, which failures consume the
-  intent, `settle_one`; since #295 the held writes, `Lanes::held`), and `WriteCtx::run` as far as its `ConsumeStamp`
-  goes: the consume is appended under the same lock hold as the commit.
-* `src/writeq/drain.rs`: `quiesce`, `abort_workers` (every unsettled receipt
-  set aside), `settle_deferred` with `CloseFlush` (including the
-  `close_unflushed → intent_durable` upgrade on a retried close), and
-  `abort_all_sync`, which only `Memory`'s `Drop` calls; and which
-  `CloseFlush` `Memory::close` and `Memory::close_fenced`
-  (`src/memory/shutdown.rs`) pass to `settle_deferred`.
-* `src/writeq/replay.rs`: `spawn_replay` (seeding the restart map, the
-  unconsumed filter, the liveness gate, the loop's match arm by arm, both
-  streaks, `EMBEDDER_SICK_THRESHOLD`, `REPLAY_LOOKUP_TIMEOUT_LIMIT`; since
-  #295 the deferred agents and `replay_order`).
-* `Graph::record_write_intent` / `consume_write_intent`
-  (`src/graph/graph/mutation_log.rs`), the adapters' consume (an `UPDATE` by
-  receipt) and their load order `ORDER BY issued_ms, lane_seq`
-  (`src/store/{sqlite,pg}/session_load.rs`).
-* `StoreError::is_cycle_refusal`, `StoreError::is_input_refusal` (#294) and
-  `LamboError::is_lookup_timeout` (`src/types/mod.rs`) as error classes
-  (`Err`).
-
-It imports `Receipts.lean` and reuses its `Answer`, `Entry`, `settle`,
-`settleAll_fixed`, `Lane`, `run` and `submitted`.
-
-Writes are abstract: a run's result is an outcome function `Job → RunResult`
-(and `Job → RR` at replay); the model says what each result leads to, not why
-a run fails. There is no `f64` here; the drain budget and the probe budget
-are abstract (`done`, `live`).
-
-**Atomicity assumption.** Concurrency is out of scope. Each worker step (run,
-commit with its consume, settle) and each replay step is one atomic
-operation for the graph and mutation log; an aborted worker is a job that
-was not run. The replay steps model proposed answers. A successful replay's
-live receipt waits for the store to confirm the span. A crash leaves a
-prefix of the batch log durable, except on a deterministic rejection, where
-`Flush.replayRecoveryLog` describes the confirmed prefix and failed consume.
-
-Rows and consumes are keyed by the receipt id, modelled as its (epoch,
-sequence) pair (`Job.key`), as the adapters key them by the full receipt
-string: a backlog may hold several crashed processes' intents, and every
-process's sequence starts at 1.
-
-## Results
-
-* `drain_fifo`, `drain_extends_taken`: a lane drained to completion has taken
-  exactly the submitted jobs in submission order; what it had taken before is
-  a prefix (agrees with `Receipts.lane_fifo`).
-* `settleDeferred_all_settled`: `settle_deferred` leaves every set-aside
-  entry settled. `drop_settles_nothing`: the `Drop` path (`abort_all_sync`),
-  the documented exception, settles nothing; it is definitional
-  (`abortAllSync` is the identity on receipts) and is there to name the gap.
-* `replayStep_inputFact`, `replayStep_decode`, `replayStep_cycle`: a refusal
-  that is a fact about the intent's input settles `failed`;
-  `unavailable_skips`, `unavailable_stops`: the transient arm. The current
-  step (`stepQ` over `stepFixed` over `stepInput`) hands these answers to
-  `replayStep`. It does not hand it a graph-dependent input refusal, which
-  `replayStep` stops on (`replayStep_sessionWide`, `History.lean`); the
-  current rule for the other non-transient errors is `stepInput_sessionWide`
-  and `fixed_sessionWide_stops` (`Replay.lean`).
-* `workerStep_atomic`, `workerStep_keys`: a write in a worker batch has its
-  consume beside it, and a batch names only its own job. They are stated
-  over `workerStep`, the worker step before #295, and carry over to the
-  current worker, whose batches are `workerStep`'s (`runW_log_refines`).
-* `retry_upgrades`: the one settled-to-settled change, a retried close
-  upgrading `close_unflushed` (about `deferEntry`, so it holds of the current
-  close; `closeW_retry_upgradesW`).
-* `load_seq_order`, `load_epoch_seq_order`: the load order applies one
-  process's rows in sequence (admission) order as long as no later admission
-  carries an earlier issue time. Ties across epochs (equal `issued_ms` and
-  `lane_seq`) are unspecified in SQL, while `loadOrder` keeps input order for
-  them; no theorem depends on how they break. Since #295 the load is
-  `fixedLoad` (`Replay.lean`), which needs no clock assumption.
-
-Boundary: not modelled are concurrency and the cancellation-safety custody of handles
+Boundary: concurrency is out of scope. Each worker step (run, commit with its
+consume, settle) and each replay step is atomic, and an aborted worker is a
+job not run; a replayed write's receipt waits for the store to confirm its
+span. A crash leaves a prefix of the batch log durable, except on a
+deterministic rejection (`Flush.replayRecoveryLog`). Why a run fails is not
+modelled: its result is an input per write, and the drain and probe budgets
+are abstract. The Rust's put is an upsert on (`session_id`, `receipt`) where
+the model's appends; results over arbitrary rows cover the Rust's case. The
+`Drop` path (`abort_all_sync`) aborts the workers without joining them and
+settles nothing: a receipt pending when a `Memory` is dropped without
+`close()` stays pending. Not modelled: the custody of handles
 (`WorkerCustody`, `ReplayCustody`); `stop_replay` running before the quiesce;
-admission and its caps (`Receipts.lean`); receipt retention, eviction, the
-undelivered queue, delivery destinations and the live entry a replay inserts;
-the stale consumed-row skip at seeding; the adapters' lazy purge of consumed
-rows older than the retention window (sqlite `write_rows.rs`, inside the
-consume; it deletes only consumed rows, so it never touches a pending one);
-counters, the ledger and logging; the
-lease fence at the flush (a fenced flush is refused at the store, so a
-consume appended after a lost lease never lands); `calibration.rs` (drain
-does not depend on it). Why a run fails is not modelled: a run's result is an
-input per write.
+receipt retention, eviction, the undelivered queue, delivery destinations and
+the live entry a replay inserts; the stale consumed-row skip at seeding; the
+adapters' purge of old consumed rows (never a pending one); counters, the
+ledger and logging; the lease fence at the flush (a fenced flush is refused
+at the store); `calibration.rs`.
 -/
 
 import LamboProofs.Receipts
@@ -140,12 +50,9 @@ open Lambo.Receipts (Answer Entry settle Lane)
 
 /-! ## Writes, run results, the mutation log -/
 
-/-- A queued write (`Job`, `admission.rs`), reduced to what drain and replay
-read: the receipt's per-process sequence number (`ReceiptId::seq`, stored as
-`WriteIntent::lane_seq`), the agent whose lane it is on, the receipt's issue
-time in Unix milliseconds (`issued_ms`, from the pipeline's wall clock), and
-whether it is an image derive (`JobPayload::DeriveImage`), and the random
-epoch of the process that issued it (`ReceiptId::epoch`). -/
+/-- A queued write (`Job`, `admission.rs`) as drain and replay read it: its
+receipt's sequence number (`ReceiptId::seq`, `WriteIntent::lane_seq`), agent,
+issue time in ms, whether it is an image derive, and epoch (`ReceiptId::epoch`). -/
 structure Job where
   rid : Nat
   agent : Nat
@@ -154,28 +61,15 @@ structure Job where
   epoch : Nat
   deriving DecidableEq, Repr
 
-/-- What identifies a write across processes: the receipt id
-`lwr1.{epoch}.{ms}.{seq}` (`ReceiptId`'s `Display`), here its (epoch, issue
-time, sequence) triple. The adapters key intent rows by that string (`WHERE
-session_id = ? AND receipt = ?`), and every process's sequence starts at 1, so
-the sequence alone is not a key once a backlog holds two crashed processes'
-intents. -/
+/-- The receipt id `lwr1.{epoch}.{ms}.{seq}`, by which the adapters key intent
+rows; the sequence alone is not a key, as every process's starts at 1. -/
 abbrev Key := Nat × Int × Nat
 
 def Job.key (j : Job) : Key := (j.epoch, j.ms, j.rid)
 
-/-- The classes of `LamboError` that `WriteCtx::run` can fail with, as the
-worker and the replay tell them apart. `cycle` is a `StoreError::Invariant`
-for which `is_cycle_refusal` holds. `inputRefusal` is a non-cycle `Invariant`
-refusing the write's input against the graph it met (#294): a repeated
-`Observation`, a second `Hierarchical` parent, a `parent_of` pair whose ends
-resolve to one canonical key or one concept. Before #294 the Rust raised it as
-a plain `Invariant` the replay could not tell from `store`, and `replayStep`
-treats it so. `store` is every other `Store` error (an `Invariant` that can
-mean an inconsistent graph or store, `NotFound` such as a vanished
-interaction, a backend error). `lookupTimeout` is an `EmbedUnavailable` for
-which `is_lookup_timeout` holds; `unavailable` is every other
-`EmbedUnavailable`. -/
+/-- The classes of `LamboError` a run fails with: `cycle` and `inputRefusal`
+are `Invariant`s for which `is_cycle_refusal` or `is_input_refusal` holds,
+`lookupTimeout` is `is_lookup_timeout`, `store` and `unavailable` the rest. -/
 inductive Err where
   | embed
   | unavailable
@@ -220,36 +114,19 @@ inductive Tag where
   | appliedAfterRestart
   deriving DecidableEq, Repr
 
-/-- One entry of the write-behind mutation log, as far as drain and replay
-touch it: `PutWriteIntent` (recorded at admission), the graph mutations of an
-applied write (one `write` stands for all of them), and
-`ConsumeWriteIntent`. -/
+/-- A write-behind log entry: `PutWriteIntent`, an applied write's graph
+mutations (one `write` for all), `ConsumeWriteIntent`. -/
 inductive Mut where
   | put (j : Job)
   | write (k : Key)
   | consume (k : Key) (t : Tag)
   deriving DecidableEq, Repr
 
-/-- What is appended under one hold of the graph write lock. The flush drain
-takes that same lock, so a flush carries whole batches, and a batch is one
-store transaction (`Graph::consume_write_intent`'s doc). -/
+/-- What one hold of the graph write lock appends: a flush carries whole
+batches, each one store transaction (`Graph::consume_write_intent`). -/
 abbrev Batch := List Mut
 
-/-! ## The lane worker's step and the receipt store (`spawn_worker`, `execution.rs`)
-
-`workerStep` is one job through the lane worker **before #295**: an
-in-session `EmbedUnavailable` (an outage or a lookup timeout) answered
-`failed`, left the intent owed, and let the agent's next write run. The
-current worker holds such a write instead (`pending_replay`, retried with
-backoff), settles a single lookup timeout `failed` with its intent consumed,
-and holds a first-attempt lookup timeout once a run of them has reached the
-limit (the third, and every later one until a write applies). It is
-modelled by `stepW`/`runW` (`Worker.lean`), and its close, crash and
-shutdown accounting in `Close.lean`. `workerStep` is here because the
-current worker's batches are still its batches (`runW_log_refines`); the
-worker loop before #295 (`work`, `close`) and the theorems over it are in
-`History.lean`. The receipt store (`RStore`, `settleOne`) and what admission
-leaves behind are shared by both layers. -/
+/-! ## The receipt store and admission -/
 
 /-- The receipt store's entries, keyed by receipt id (`Job.key`). -/
 abbrev RStore := List (Key × Entry)
@@ -264,24 +141,17 @@ def update (s : RStore) (r : Key) (f : Entry → Entry) : RStore :=
   s.map (fun p => if p.1 = r then (p.1, f p.2) else p)
 
 /-- `settle_one` (`receipts.rs`): `Entry::settle` on the job's entry; a
-missing entry is skipped. The undelivered queue and the retention sweep are
-not modelled. -/
+missing entry is skipped. -/
 def settleOne (s : RStore) (r : Key) (a : Answer) (now : Int) : RStore :=
   update s r (fun e => (settle e a now).1)
 
-/-- What admission leaves behind for the jobs it accepted: a `Pending` entry
-each, and a `PutWriteIntent` each, on its own hold. -/
+/-- What admission (`WritePipeline::admit`) leaves for the jobs it accepted: a
+`Pending` entry each, and a `PutWriteIntent` each, on its own hold. -/
 def admitStore (js : List Job) : RStore := js.map (fun j => (j.key, ⟨.pending, none⟩))
 
 def admitLog (js : List Job) : List Batch := js.map (fun j => [.put j])
 
-/-! ## Close (`drain.rs`)
-
-`CloseFlush`, `deferEntry`, `pendingIds` and `settleDeferred` are
-`settle_deferred` and `abort_workers`' set-aside as they are today, shared by
-both worker layers. The current close is `closeW`, over `runW`
-(`Close.lean`); `close`, which composes them with the worker **before #295**
-(`work`), is in `History.lean`. -/
+/-! ## `settle_deferred`'s set-aside (`drain.rs`) -/
 
 /-- `CloseFlush`: how `close()`'s final flush ended. -/
 inductive CloseFlush where
@@ -289,10 +159,9 @@ inductive CloseFlush where
   | incomplete
   deriving DecidableEq, Repr
 
-/-- `settle_deferred` on one entry. `Durable`: `intent_durable`, upgrading a
-`close_unflushed` left by an earlier failed attempt of the close (the one
-settled-to-settled change, bypassing `Entry::settle`). `Incomplete`:
-`close_unflushed`, through `Entry::settle`. -/
+/-- `settle_deferred` on one entry: `Durable` answers `intent_durable`, also over
+a `close_unflushed` an earlier attempt left (bypassing `Entry::settle`);
+`Incomplete` answers `close_unflushed`. -/
 def deferEntry (flush : CloseFlush) (now : Int) (e : Entry) : Entry :=
   match flush with
   | .durable =>
@@ -317,13 +186,8 @@ structure Intent where
   outcome : Option Tag
   deriving DecidableEq, Repr
 
-/-- One mutation applied to the `write_intents` table: a put inserts an
-unconsumed row; a consume updates every row with that receipt (the adapters'
-`UPDATE ... WHERE receipt = ?`, so a later consume overwrites an earlier one);
-graph writes do not touch the table. The Rust's put is an upsert on
-(`session_id`, `receipt`), so the table never holds two rows with one key,
-where the model's put appends; the replay theorems take arbitrary rows, so
-they cover the Rust's case as a special one. -/
+/-- One mutation on the `write_intents` table: a put inserts an unconsumed row,
+a consume updates every row of its receipt (`UPDATE ... WHERE receipt = ?`). -/
 def applyMut (acc : List Intent) : Mut → List Intent
   | .put j => acc ++ [⟨j, none⟩]
   | .write _ => acc
@@ -345,16 +209,11 @@ def loadOrder : List Intent → List Intent
   | [] => []
   | x :: xs => insertK x (loadOrder xs)
 
-/-! ## Replay (`spawn_replay`, `replay.rs`) -/
+/-! ## The replay's step (`spawn_replay`, `replay.rs`) -/
 
-/-- What the replay meets at one intent. `halt`: the lease is lost or the
-pipeline sealed before it (the loop's `break` at its head). `badId`: its
-receipt id does not parse (`continue`); since #295's review, any id that does
-not parse other than `unknownFormat`. `unknownFormat`: an id that starts
-`lwr<digits>.` with a version other than 1, as a newer build would write; the
-code before that review did not tell it from `badId`. `decodeRefused`: the
-stored payload does not decode into a job (#129). `run r`: `WriteCtx::run`
-returned `r`. -/
+/-- What the replay meets at one intent: a lost lease or seal (`halt`), an id
+that does not parse (`badId`) or is of another version (`unknownFormat`,
+`lwr<n>.`, n ≠ 1), a payload that does not decode, or `WriteCtx::run`'s result. -/
 inductive RR where
   | halt
   | badId
@@ -419,9 +278,9 @@ def replayStep (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
     | .imageIdTaken => (.failed, { s with transient := 0 })
     | .reference => (.failed, s)
     | .cycle => (.failed, s)
-    -- Before #294: a plain `Invariant`, so the "anything else" arm below.
+    -- The "anything else" arm: the current step (`stepInput`) answers it first.
     | .inputRefusal => (.stop .other, s)
-    -- #22: an image derive this configuration cannot apply.
+    -- An image derive this configuration cannot apply.
     | .config => (.stop (if image then .imageConfig else .other), s)
     -- "Anything else (store/lease/config)".
     | .store => (.stop .other, s)
@@ -429,9 +288,8 @@ def replayStep (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
     | .softLock => (.stop .other, s)
     | .other => (.stop .other, s)
 
-/-- What a replay did: restart-map inserts in order, the batches it appended,
-the jobs it applied and settled failed, and the block reason if it stopped
-before the end of the backlog. -/
+/-- What a replay did: restart-map inserts, batches appended, jobs applied and
+failed, and the block reason if it stopped before the end of the backlog. -/
 structure ROut where
   answers : List (Key × Answer)
   log : List Batch
@@ -449,34 +307,7 @@ def pendingOf (intents : List Intent) : List Intent := intents.filter (fun i => 
 def applyLog (intents : List Intent) (log : List Batch) : List Intent :=
   log.flatten.foldl applyMut intents
 
-/-! ## The receipt store -/
-
-/-! ## `settle_deferred`: deferred, or answered `close_unflushed`
-
-The `deferEntry` and `settleDeferred` lemmas here are about `settle_deferred`
-as it is today and serve the current close (`closeW`, `Close.lean`). The
-theorems about `close` (`close_settles_all`, `close_final`, `close_answer`)
-are over the worker **before #295**, in `History.lean`; their current
-counterparts are `shutdown_no_silent_lossW`, `held_at_closeW` and
-`closeW_retry_upgradesW`. -/
-
-/-! ## The intent table -/
-
-/-! ## Load order -/
-
-/-! ## Draining a lane to completion
-
-`drainLane` pops a lane until its queue is empty. What it takes is the lane's order, which the lane worker, before #295 and since, takes its writes in (`Receipts.lane_fifo`). -/
-
-/-! ## `settle_deferred` settles every set-aside entry -/
-
-/-! ## The restart map's seed (`spawn_replay`)
-
-Before a replay runs, `spawn_replay` seeds the restart map with one answer per stored row: `pending_replay` for an unconsumed one, `failed` or `applied_after_restart` for a consumed one, by its tag. -/
-
-/-! ## The replay step's arms
-
-`replayStep` is the match on a run's result in `spawn_replay`. The current step (`stepQ` over `stepFixed` over `stepInput`, `Replay.lean`) overrides it for an unknown receipt format, an unparseable id and a graph-dependent input refusal and hands every other answer to it, so these arms are the current replay's. -/
+/-! ## Results -/
 
 /-- A refusal that is a fact about the intent's own input settles `failed`. -/
 abbrev Spec.replayStep_inputFact : Prop :=
@@ -485,7 +316,7 @@ abbrev Spec.replayStep_inputFact : Prop :=
     (replayStep img (.run (.err e)) s).1 = .failed
 
 /-- A transient embed answer below the threshold is a `skip`: the intent is
-left unconsumed (the loop since #295, `loopD`, then defers its agent). -/
+left unconsumed (and `loopD` defers its agent). -/
 abbrev Spec.unavailable_skips : Prop :=
   ∀ (img : Bool) (s : Streaks),
     s.transient + 1 < sickThreshold →

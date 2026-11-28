@@ -1,17 +1,4 @@
-/-
-# Write-queue drain: proofs for `Spec/Base.lean`
-
-Proofs of the propositions `Drain/Spec/Base.lean` states (the receipt store,
-`settle_deferred`, the intent table, the load order, the lane drain and the
-replay step's arms), each as `theorem <name> : Spec.<name>`, and the lemmas
-those proofs need. A lemma here is stated in full and is there because a proof
-uses it: it is not part of the specification, and a docs anchor may not cite
-it. A definition here is one only the proofs use.
-
-Boundary: this file states nothing about the Rust that `Drain/Spec/Base.lean`
-does not, so what the model covers and what it leaves out are in that file's
-header. A theorem's doc comment is on its `Spec` proposition.
--/
+/- Proofs of `Drain/Spec/Base.lean`. -/
 
 import LamboProofs.Drain.Spec.Base
 
@@ -19,23 +6,9 @@ namespace Lambo.Drain
 
 open Lambo.Receipts (Answer Entry settle Lane)
 
-/-- One job through the lane worker **before #295**: its receipt answer and
-the batch it appends. `fenced` is the lease-lost fence, checked before the
-run.
-
-* lease lost: `failed`, nothing written, the intent deliberately not consumed;
-* `Ok`: `applied`; the write and `ConsumeWriteIntent(applied)` under one lock
-  hold (`WriteCtx::run`, "Same lock hold as the commit");
-* `EmbedUnavailable` (outage or lookup timeout): `failed`, intent left
-  unconsumed for the next serve;
-* any other error: `failed`, intent consumed `failed` on its own hold.
-
-The current worker (`finishW`, `startW`) differs on the third arm: an outage,
-or a first-attempt lookup timeout once a run of them has reached the limit,
-holds the write (`pending_replay`, nothing appended), and any other lookup
-timeout settles `failed` with its intent consumed. Its batches are still `workerStep`'s
-(`runW_log_refines`), so the batch lemmas below (`workerStep_keys`,
-`workerStep_atomic`) carry over to it. -/
+/-- The answer and batch of one job through `spawn_worker`'s arms (`fenced`:
+the lease-lost fence), an `EmbedUnavailable` answering `failed` with nothing
+appended; the current worker's batches are these (`runW_log_refines`). -/
 def workerStep (fenced : Bool) (j : Job) (r : RunResult) : Answer × Batch :=
   if fenced then (.failed, [])
   else
@@ -96,9 +69,7 @@ theorem lookup_admit {js : List Job} {j : Job} (hj : j ∈ js) :
       obtain ⟨e, he, ha⟩ := ih hj'
       exact ⟨e, by simp [lookup, hk, he], ha⟩
 
-/-- A worker batch mentions only its own job. Stated over `workerStep` (the
-worker before #295); it holds of the current worker's batches through
-`runW_log_refines`. -/
+/-- A worker batch mentions only its own job. -/
 theorem workerStep_keys {f : Bool} {j : Job} {r : RunResult} {m : Mut}
     (hm : m ∈ (workerStep f j r).2) : m = .write j.key ∨ ∃ t, m = .consume j.key t := by
   unfold workerStep at hm
@@ -113,10 +84,8 @@ theorem workerStep_keys {f : Bool} {j : Job} {r : RunResult} {m : Mut}
       | inr h => exact Or.inr ⟨_, h⟩
     | err e => cases e <;> simp [Err.transient] at hm <;> exact Or.inr ⟨_, hm⟩
 
-/-- **The commit carries its consume.** A worker batch that writes also
-consumes the intent as `applied`, in the same batch, so the same flush. Stated
-over `workerStep` (the worker before #295); it holds of the current worker's
-batches through `runW_log_refines`, which `crash_never_reappliesW` uses. -/
+/-- A worker batch that writes also consumes the intent as `applied`, in the
+same batch, so the same flush. -/
 theorem workerStep_atomic {f : Bool} {j : Job} {r : RunResult} {q : Key}
     (hm : Mut.write q ∈ (workerStep f j r).2) : Mut.consume q .applied ∈ (workerStep f j r).2 := by
   unfold workerStep at hm ⊢
@@ -130,7 +99,7 @@ theorem workerStep_atomic {f : Bool} {j : Job} {r : RunResult} {q : Key}
       simp
     | err e => cases e <;> simp [Err.transient] at hm
 
-/-! ## `settle_deferred`: deferred, or answered `close_unflushed` -/
+/-! ## `settle_deferred` -/
 
 theorem deferEntry_durable (now : Int) (e : Entry) :
     deferEntry .durable now e =
@@ -247,12 +216,8 @@ theorem eq_of_key {js : List Job} (hnd : (js.map (·.key)).Nodup) {a b : Job} (h
         exact absurd (h.symm ▸ List.mem_map_of_mem ha') hnd.1
       | inr hb' => exact ih hnd.2 ha' hb'
 
-/-- A retried close upgrades `close_unflushed` to `intent_durable` once its
-flush lands: the one settled-to-settled change, made by `settle_deferred`
-outside `Entry::settle` (#117). About one entry and `deferEntry`, which is
-`settle_deferred` as it is today, so it describes the current close as well;
-`closeW_retry_upgradesW` states it over `closeW` and a session of the current
-worker. -/
+/-- A retried close upgrades one entry's `close_unflushed` to
+`intent_durable` once its flush lands. -/
 theorem retry_upgrades (now now' : Int) (e : Entry) (h : e.answer.isSettled = false) :
     (deferEntry .durable now' (deferEntry .incomplete now e)).answer = .intentRecorded := by
   have h' : ¬ e.answer.isSettled = true := by rw [h]; decide
@@ -454,10 +419,8 @@ theorem loadOrder_sorted : ∀ (l : List Intent),
   | nil => exact List.Pairwise.nil
   | cons x xs ih => exact pairwise_insertK x _ ih
 
-/-- `load_seq_order` for a backlog of several processes: the hypothesis and
-the conclusion compare only rows of the same epoch. Across epochs the load
-order is issue-time order; sequence numbers of different processes are not
-comparable. -/
+/-- While no later admission of a process carries an earlier issue time, the
+load is that process's sequence order. -/
 theorem load_epoch_seq_order (l : List Intent)
     (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.epoch = b.job.epoch → a.job.rid < b.job.rid →
       a.job.ms ≤ b.job.ms) :
@@ -468,21 +431,13 @@ theorem load_epoch_seq_order (l : List Intent)
   have hm := hmono b (mem_loadOrder.mp hb) a (mem_loadOrder.mp ha) he.symm
   omega
 
-/-! ## Admission's batches
-
-Admission's batches hold only puts. Used by the crash theorems:
-`crash_never_reappliesW` (`Close.lean`) and, before #295,
-`crash_never_reapplies` (`History.lean`). -/
+/-! ## Admission's batches -/
 
 theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
     (hm : m ∈ ((admitLog all).take n).flatten) : ∃ j, m = .put j := by
   obtain ⟨b, hb, hmb⟩ := List.mem_flatten.mp hm
   obtain ⟨j, _, rfl⟩ := List.mem_map.mp ((List.take_sublist n _).subset hb)
   exact ⟨j, List.mem_singleton.mp hmb⟩
-
-/-! ## Draining a lane to completion -/
-
-/-! ## `settle_deferred` settles every set-aside entry -/
 
 theorem settleDeferred_all_settled (flush : CloseFlush) (now : Int) :
     ∀ (ids : List Key) (s : RStore), (∀ p ∈ s, p.1 ∉ ids → p.2.answer.isSettled = true) →
