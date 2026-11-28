@@ -7,14 +7,6 @@ namespace Lambo.Drain
 
 open Lambo.Receipts (Answer Entry settle Lane)
 
-/-- The writes applied so far keep each agent's writes of one process in
-sequence order, and none is later in sequence than a write of its agent and
-process still owed in `rows`. -/
-def OrderInv (rows : List Intent) (applied : List Job) : Prop :=
-  applied.Pairwise (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) ∧
-  ∀ x ∈ applied, ∀ i ∈ rows, i.outcome = none → x.agent = i.job.agent →
-    x.epoch = i.job.epoch → x.rid ≤ i.job.rid
-
 /-! ## Input refusals -/
 
 theorem stepInput_agrees : Spec.stepInput_agrees := by
@@ -721,13 +713,8 @@ theorem applyLog_sorted (rows : List Intent) (log : List Batch) (hnp : NoPut log
   rw [← show (applyLog rows log).map (·.job) = rows.map (·.job) from h] at hs'
   exact List.pairwise_map.mp hs'
 
-/-- **A serve with the retry pass keeps the order invariant**: both passes
-are runs of `loopD` over per-process-sorted rows. -/
-theorem replayP_preserves (step : Bool → RR → Streaks → Step × Streaks) (live : Bool)
-    (rout rout' : Job → RR) (s' : Streaks) (rows : List Intent) (A : List Job)
-    (hnd : (rows.map (·.job.key)).Nodup) (hs : EpochSorted rows) (hI : OrderInv rows A) :
-    OrderInv (applyLog rows (replayP step live rout rout' s' rows).log)
-      (A ++ (replayP step live rout rout' s' rows).applied) := by
+theorem replayP_preserves : Spec.replayP_preserves := by
+  intro step live rout rout' s' rows A hnd hs hI
   have h1 := replayD_preserves step live rout rows A hnd hs hI
   unfold replayP
   dsimp only

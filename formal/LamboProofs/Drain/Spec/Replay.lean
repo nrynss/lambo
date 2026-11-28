@@ -20,6 +20,7 @@ Results:
   while the clock behaves the load is the adapters'.
 * `stepQ_skip`: only a transient answer or a quarantined id defers an agent.
 * `replayP_progress`: if the retry pass gets an answer for every write, nothing stays owed.
+* `replayP_preserves`: a serve applies each agent's writes in order, none after one left owed.
 * `replay_dead_letter_two_restarts`: a rejected mixed batch settles the bad intent and
   leaves its neighbour owed once.
 * `fixed_sessionWide_stops`: a non-transient error that is not an input refusal stops the replay.
@@ -240,6 +241,26 @@ def replayP (step : Bool → RR → Streaks → Step × Streaks) (live : Bool) (
       applied := r1.applied ++ r2.applied
       failed := r1.failed ++ r2.failed
       block := r2.block }
+
+/-- The writes applied so far keep each agent's writes of one process in
+sequence order, and none is later in sequence than a write of its agent and
+process still owed in `rows`. -/
+def OrderInv (rows : List Intent) (applied : List Job) : Prop :=
+  applied.Pairwise (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) ∧
+  ∀ x ∈ applied, ∀ i ∈ rows, i.outcome = none → x.agent = i.job.agent →
+    x.epoch = i.job.epoch → x.rid ≤ i.job.rid
+
+/-- **A serve keeps each agent's order through both passes**: what it applies
+stays in sequence order per agent and process, and none of it is later than a
+write of its agent and process left owed. -/
+abbrev Spec.replayP_preserves : Prop :=
+  ∀ (step : Bool → RR → Streaks → Step × Streaks) (live : Bool) (rout rout' : Job → RR)
+    (s' : Streaks) (rows : List Intent) (A : List Job),
+    (rows.map (·.job.key)).Nodup →
+    EpochSorted rows →
+    OrderInv rows A →
+    OrderInv (applyLog rows (replayP step live rout rout' s' rows).log)
+      (A ++ (replayP step live rout rout' s' rows).applied)
 
 /-- What the loop met at each intent it deferred an agent at, in order. -/
 def skipsOf (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR) :

@@ -887,7 +887,7 @@ If the store rejects the ordinary prefix or a standalone outcome update, recover
 
 When the embedder answers one of an agent's replayed writes with an outage, that write and the agent's later replayed writes wait while the replay goes on with other agents' writes; at the end the replay tries each waiting agent once more, from its oldest owed write. What still waits after that is left, in the order you sent it, for the next start, and `write_queue_replay_blocked` says `embedder` (it is `null` only while the replay runs or once nothing is owed). It says `image_config` when an owed image derive meets a server that cannot apply one (its `match_strategy` is not `hybrid`, or its store has no vector search); serve the session with both to drain it.
 
-{/* lean: Drain.Spec.loopD_no_overtake, Drain.Spec.stepQ_skip, Drain.Spec.sessionW_then_serve_order, Drain.Spec.serveR_reported */}
+{/* lean: Drain.Spec.loopD_no_overtake, Drain.Spec.stepQ_skip, Drain.Spec.replayP_preserves, Drain.Spec.serveR_reported */}
 {/* code: src/writeq/replay.rs WritePipeline::spawn_replay (the deferred set and the one retry pass); src/writeq/counters.rs ReplayBlockReason::ImageConfig */}
 {/* test: src/memory/tests/replay.rs a_transient_answer_at_replay_defers_the_agent_instead_of_reordering_it, a_deferred_agent_is_retried_once_at_the_end_of_the_pass; src/writeq/tests/receipts.rs replay_blocked_names_the_reason_or_is_none; src/memory/tests/image.rs a_replayed_image_intent_this_process_cannot_apply_names_its_block_reason */}
 

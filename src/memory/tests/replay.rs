@@ -2832,7 +2832,7 @@ fn two_of_a_one_of_b(
 /// not wait for the next serve. Here the retry applies A's two writes, in
 /// order, after B's; nothing is owed and nothing is blocked.
 ///
-/// Mirrors `Drain.replayP_progress` and `Drain.sessionW_then_serve_order`.
+/// Mirrors `Drain.replayP_progress` and `Drain.replayP_preserves`.
 #[cfg(feature = "fixtures")]
 #[tokio::test]
 async fn a_deferred_agent_is_retried_once_at_the_end_of_the_pass() {
