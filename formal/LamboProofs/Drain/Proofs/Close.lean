@@ -1245,46 +1245,6 @@ theorem closeD_retryD : Spec.closeD_retryD := by
     rw [lookup_settleDeferred, ite_eq_left hm] at hr
     exact hr
 
-/-! ### What the Rust keeps of the dead-lettered puts -/
-
-theorem consumedIn_false {log : List Batch} {k : Key} (h : Untouched k log) :
-    consumedIn log k = false := by
-  unfold consumedIn
-  rw [List.any_eq_false]
-  intro m hm
-  cases m with
-  | put _ => simp
-  | write _ => simp
-  | consume k' t =>
-    simp only [decide_eq_true_eq]
-    intro hk
-    subst hk
-    exact h t hm
-
-theorem setAside_untouched {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
-    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
-    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
-    {j : Job} (hj : j ∈ st.running ++ st.held ++ st.queue) : Untouched j.key st.log := by
-  subst hst
-  have hI := sessionW_inv c sz now all evs hnd hall
-  simp only [List.mem_append] at hj
-  rcases hj with (hj | hj) | hj
-  · exact (hI.live j (List.mem_append_left _ hj)).2
-  · exact (hI.held j hj).2
-  · exact (hI.live j (List.mem_append_right _ hj)).2
-
-theorem closeD_keptDropped : Spec.closeD_keptDropped := by
-  intro c sz now all evs st hst hnd hall flush dropped now' j hj
-  rw [closeD_setAside hst hnd hall flush _ now' hj, closeD_setAside hst hnd hall flush _ now' hj]
-  have hc := consumedIn_false (setAside_untouched hst hnd hall hj)
-  have hm : j.key ∈ keptDropped st.log dropped ↔ j.key ∈ dropped := by
-    unfold keptDropped
-    simp [hc]
-  unfold flushFor
-  by_cases hd : j.key ∈ dropped
-  · rw [ite_eq_left (hm.mpr hd), ite_eq_left hd]
-  · rw [ite_eq_right (fun h => hd (hm.mp h)), ite_eq_right hd]
-
 /-! ## Worker panics and the dead-lettered set (#345 review) -/
 
 theorem keptAtConsume_vouches_after_panic : Spec.keptAtConsume_vouches_after_panic := by

@@ -517,18 +517,16 @@ rust = [
 ]
 
 # Replay: the replay loop, its deferral, retry pass, quarantine of another
-# receipt format, block reason and load order (#294, #295), and the in-session hold's first model (`workH`), which reads the
-# lane worker.
+# receipt format, block reason and load order (#294, #295).
 [[model]]
 lean = "formal/LamboProofs/Drain/Spec/Replay.lean"
 read_against = "e9b647cf"
-read_digest = "v2:sha256:0282dfdcbe187b7abde5c1ee5e33199353fab810f149006ac65d262e557b3a02"
+read_digest = "v2:sha256:0d5c22a209c36663d866446741d1bac2c9c20e257055f89b4ea81fbcd732b383"
 rust = [
   "src/writeq/replay.rs",
   "src/store/replay_flush.rs",
   "src/writeq/receipts.rs#ReceiptId",
   "src/writeq/counters.rs#ReplayBlockReason",
-  "src/writeq/execution.rs#WritePipeline::spawn_worker",
   "src/store/sqlite/session_load.rs",
   "src/store/pg/session_load.rs",
   "src/types/mod.rs#is_cycle_refusal",

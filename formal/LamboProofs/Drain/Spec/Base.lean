@@ -603,30 +603,6 @@ abbrev Spec.drain_fifo : Prop :=
     (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).queue = [] ∧
       (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).taken = Lambo.Receipts.submitted ops
 
-/-- What the worker had taken when the drain began is a prefix of what the
-drain takes (`Receipts.lane_fifo` and `drain_fifo` agree). -/
-abbrev Spec.drain_extends_taken : Prop :=
-  ∀ {α : Type} (l : Lane α),
-    ∃ rest, l.taken ++ rest = (drain l).taken
-
-/-! ## The `Drop` path (`abort_all_sync`)
-
-`abort_all_sync`, which only `Memory`'s `Drop` calls (`src/memory/shutdown.rs`), aborts the workers without joining them and settles nothing. -/
-
-/-- `abort_all_sync`, the `Drop` path: aborts without joining and settles
-nothing. -/
-def abortAllSync (s : RStore) : RStore := s
-
-/-- `abort_all_sync` (the `Drop` path) settles nothing: a receipt pending when
-a `Memory` is dropped without `close()` stays pending in a process that is
-going away. This is the documented exception to "no write is lost silently";
-the write survives only if an earlier flush took its intent. `abort_all_sync`
-is unchanged by #295 (it aborts the workers and settles nothing, held writes'
-receipts included), so this describes the current Rust. -/
-abbrev Spec.drop_settles_nothing : Prop :=
-  ∀ (s : RStore) (q : Key),
-    lookup (abortAllSync s) q = lookup s q
-
 /-! ## `settle_deferred` settles every set-aside entry -/
 
 /-- `settle_deferred` leaves no receipt pending: when every receipt outside the
@@ -665,18 +641,6 @@ abbrev Spec.replayStep_inputFact : Prop :=
   ∀ (img : Bool) (e : Err) (s : Streaks),
     e.inputFact = true →
     (replayStep img (.run (.err e)) s).1 = .failed
-
-/-- So does a stored payload this build refuses to decode (#129). -/
-abbrev Spec.replayStep_decode : Prop :=
-  ∀ (img : Bool) (s : Streaks),
-    replayStep img .decodeRefused s = (.failed, s)
-
-/-- A cycle refusal settles `failed` and leaves both streaks alone: it is
-decided before any embed, so it says nothing about the embedder
-(`StoreError::is_cycle_refusal`, #116). -/
-abbrev Spec.replayStep_cycle : Prop :=
-  ∀ (img : Bool) (s : Streaks),
-    replayStep img (.run (.err .cycle)) s = (.failed, s)
 
 /-- A transient embed answer below the threshold is a `skip`: the intent is
 left unconsumed (the loop since #295, `loopD`, then defers its agent). -/

@@ -390,16 +390,6 @@ theorem runW_caps : Spec.runW_caps := by
 
 /-! ### Held writes are retried without any new admission -/
 
-theorem stepW_caps_free : Spec.stepW_caps_free := by
-  intro c c' sz sz' now st ev h
-  cases ev with
-  | submit j => exact absurd rfl (h j)
-  | _ => rfl
-
-theorem refused_wakes : Spec.refused_wakes := by
-  intro c sz now st j hf hh
-  simp [stepW, hf, hh]
-
 theorem retry_settles_head : Spec.retry_settles_head := by
   intro c sz now st a h t r hheld hrun hf hr
   obtain ⟨d1, _, _, _⟩ := dropFirst_spec (fun _ => 0) a st.held h t hheld

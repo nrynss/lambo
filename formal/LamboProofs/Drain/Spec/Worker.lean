@@ -262,24 +262,6 @@ abbrev Spec.runW_caps : Prop :=
 
 /-! ### Held writes are retried without any new admission -/
 
-/-- **The caps cannot wedge a retry**: only admission reads them, so a retry
-(`wake`, `start`, `finish`) is the same under any bounds. It holds by
-definition; its point is that a retry never passes through admission. -/
-abbrev Spec.stepW_caps_free : Prop :=
-  ∀ (c c' : Caps) (sz sz' : Job → Nat) (now : Int) (st : WS) (ev : Ev),
-    (∀ j, ev ≠ .submit j) →
-    stepW c sz now st ev = stepW c' sz' now st ev
-
-/-- In the model, a refused admission for an agent with held writes wakes its
-retry: what the Rust did at `30b79824`. Since the review that followed, the
-Rust lets a refusal start no retry before the backoff has passed (see the
-section's header). -/
-abbrev Spec.refused_wakes : Prop :=
-  ∀ (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (j : Job),
-    fits c sz st j = false →
-    ofAgent j.agent st.held ≠ [] →
-    j.agent ∉ (stepW c sz now st (.submit j)).parked
-
 /-- **A retry needs no admission**: an agent with held writes and nothing
 running, once its retry is due (`wake`), settles its oldest held write when
 the embedder answers it, with no admission among the events. That the retry

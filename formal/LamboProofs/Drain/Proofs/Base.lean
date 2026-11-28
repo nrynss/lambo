@@ -471,19 +471,6 @@ theorem drain_fifo : Spec.drain_fifo := by
   rw [h2, Lambo.Receipts.run_history]
   rfl
 
-theorem drain_extends_taken : Spec.drain_extends_taken := by
-  intro α l
-  refine ⟨l.queue, ?_⟩
-  unfold drain
-  rw [(drainLane_spec _ l rfl).2]
-  rfl
-
-/-! ## The `Drop` path (`abort_all_sync`) -/
-
-theorem drop_settles_nothing : Spec.drop_settles_nothing := by
-  intro s q
-  exact rfl
-
 /-! ## `settle_deferred` settles every set-aside entry -/
 
 theorem settleDeferred_all_settled : Spec.settleDeferred_all_settled := by
@@ -512,14 +499,6 @@ theorem settleDeferred_all_settled : Spec.settleDeferred_all_settled := by
 theorem replayStep_inputFact : Spec.replayStep_inputFact := by
   intro img e s h
   cases e <;> simp_all [Err.inputFact, replayStep]
-
-theorem replayStep_decode : Spec.replayStep_decode := by
-  intro img s
-  exact rfl
-
-theorem replayStep_cycle : Spec.replayStep_cycle := by
-  intro img s
-  exact rfl
 
 theorem unavailable_skips : Spec.unavailable_skips := by
   intro img s h

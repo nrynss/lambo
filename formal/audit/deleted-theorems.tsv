@@ -1,4 +1,4 @@
-# Theorems deleted from the models on purpose, in four groups. First, those
+# Theorems deleted from the models on purpose, in five groups. First, those
 # the audit in formal/audit/unreferenced-theorems.md found nothing referencing
 # (no proof in the dump's `uses`, no other declaration naming them, no example,
 # docs anchor, claims ledger row, Rust comment, oracle or README mention, and
@@ -16,8 +16,18 @@
 # that a theorem of the fixed model now states in general (named in the third
 # column); their Audit.lean lines, README, claims ledger and header mentions
 # went with them, and the reason names the theorem that states the fixed
-# behaviour. Tab-separated: name, reason, the kept theorem that states the
-# same thing or more (`-` when there is none). Read by
+# behaviour. Fifth, the rows whose reason starts "#350 Spec review": when the
+# drain model was put in Spec and Proofs form, a Spec proposition was kept
+# only for a guarantee about current Rust, and these were neither that nor
+# used by a proof: rfl unfoldings of a definition's arms, the model compared
+# with itself, statements about a loop, worker or rule the Rust no longer
+# runs (the first in-session hold model `workH`, the replay without its retry
+# pass, a superseded rule), and the lemmas and definitions only they used
+# (a definition is listed only when nothing left mentions it); their
+# Audit.lean lines, README, claims ledger, docs anchor, Rust comment and
+# header mentions went with them, and the reason names the current
+# counterpart where there is one. Tab-separated: name, reason, the kept
+# theorem that states the same thing or more (`-` when there is none). Read by
 # scripts/formal/check-decl-equivalence.py --deletions and by
 # scripts/formal/audit-theorems.py.
 Lambo.BatchQueue.lengthChunks_nil	dead helper: an undocumented rfl unfolding of lengthChunks on [] that nothing uses or names	-
@@ -117,3 +127,52 @@ Lambo.BatchQueue.lone_transient_fault_permanent	#310 fixed: a run of the pre-fix
 Lambo.BatchQueue.paired_transient_fault_recovers	#310 fixed: the two-text case of the recovery, which transient_fault_recovers now states for every chunk, a lone text included	Lambo.BatchQueue.transient_fault_recovers
 Lambo.BatchQueue.test_lone_vs_pair	#310 fixed: its lone half ran the pre-fix Rust (a lone text answered Backend under a passing fault), false in the fixed model; the fixed behaviour is test_lone_rerun and transient_fault_recovers	-
 Lambo.BatchQueue.forwardIsolated_empty_quirk	#310 fixed: the texts.len() <= 1 branch it ran is gone, so forward_isolated answers no slot for no texts and the statement is false in the fixed model; forwardIsolated_length now covers the empty chunk	-
+Lambo.Drain.drain_extends_taken	#350 Spec review: a fact about the model's lane drain alone (what the worker had taken is a prefix of what the drain takes), used by no proof and stating nothing the Rust guarantees beyond drain_fifo	-
+Lambo.Drain.drop_settles_nothing	#350 Spec review: proved by rfl over abortAllSync, the identity; that the Drop path (abort_all_sync) settles nothing is now a line of Drain/Spec/Base.lean's boundary	-
+Lambo.Drain.abortAllSync	#350 Spec review: the identity on receipts, defined only to state drop_settles_nothing	-
+Lambo.Drain.replayStep_decode	#350 Spec review: an rfl restatement of replayStep's decodeRefused arm, which the definition states	-
+Lambo.Drain.replayStep_cycle	#350 Spec review: an rfl restatement of replayStep's cycle arm, which the definition states	-
+Lambo.Drain.loopWith_replayStep	#350 Spec review: the model compared with itself (loopWith given replayStep is loop), used only by replayWith_replayStep	-
+Lambo.Drain.replayWith_replayStep	#350 Spec review: the model compared with itself (replayWith given replayStep is replay)	-
+Lambo.Drain.replayWith	#350 Spec review: replay with its step as a parameter, used only by replayWith_replayStep; the examples run loopWith	-
+Lambo.Drain.stepInput_agrees	#350 Spec review: compares the #294 fix step with the step before #294, which the Rust no longer runs	-
+Lambo.Drain.stepInput_inputRefusal	#350 Spec review: an rfl unfolding of stepInput's first arm; stepInput_refusesInput states that every input refusal settles failed	-
+Lambo.Drain.fixed_input_goes_on	#350 Spec review: stated over the #294 loop (loopWith stepInput), which the Rust no longer runs; fixedD_input_goes_on states it over loopD	-
+Lambo.Drain.fixed_agrees_with_worker	#350 Spec review: proved by rfl, about the worker before #295 (workerStep); the current worker's batches are runW_log_refines's	-
+Lambo.Drain.stepFixed_badId	#350 Spec review: an rfl unfolding of stepFixed's badId arm, which the definition states	-
+Lambo.Drain.fixed_badId_settled	#350 Spec review: describes the #295 fix as first committed (stepFixed under loopD, settling every unparseable id); the current step is stepQ	-
+Lambo.Drain.fixed_epoch_seq_order	#350 Spec review: used by no proof: one serve of the replay without its retry pass (replayD), which the Rust no longer runs alone; the current order result is sessionW_then_serve_order	-
+Lambo.Drain.fixed_agent_order_load	#350 Spec review: used by no proof: two serves of the replay without its retry pass (replayD); the current order result is sessionW_then_serve_order	-
+Lambo.Drain.fixed_agent_order	#350 Spec review: used only by fixed_agent_order_load: two serves of the replay without its retry pass (replayD); the current order result is sessionW_then_serve_order	-
+Lambo.Drain.workH_split	#350 Spec review: the workH hold model, the first model of #295's in-session hold, before review; the current worker is stepW and runW, whose order results are runW_ord and sessionW_then_serve_order	-
+Lambo.Drain.hold_split	#350 Spec review: the workH hold model, before #295's review (see workH_split)	-
+Lambo.Drain.session_orderInv	#350 Spec review: the workH hold model, before #295's review (see workH_split); sessionW_orderInv states it of the current worker	-
+Lambo.Drain.hold_then_serve_order	#350 Spec review: the workH hold model, before #295's review (see workH_split); sessionW_then_serve_order states it of the current worker	-
+Lambo.Drain.arriveH_clears	#350 Spec review: the workH hold model, before #295's review (see workH_split); retry_settles_head states the current worker's progress	-
+Lambo.Drain.hold_then_serveQ_order	#350 Spec review: the workH hold model, before #295's review (see workH_split); sessionW_then_serve_order states it of the current worker and serve	-
+Lambo.Drain.drainHeld_split	#350 Spec review: a lemma of the workH hold model, deleted with it	-
+Lambo.Drain.drainHeld_clears	#350 Spec review: a lemma of the workH hold model, deleted with it	-
+Lambo.Drain.filter_agent_of_all	#350 Spec review: a lemma of the workH hold model, deleted with it	-
+Lambo.Drain.arriveH_split	#350 Spec review: a lemma of the workH hold model, deleted with it	-
+Lambo.Drain.drainHeld	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.HState	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.HState.mk	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.HState.store	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.HState.held	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.HState.log	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.HState.settled	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.HState.applied	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.HState.init	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.settleList	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.holdList	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.arriveH	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.workH	#350 Spec review: a definition of the workH hold model, deleted with it	-
+Lambo.Drain.stepQ_badId	#350 Spec review: an rfl unfolding of stepQ's badId arm; the docs cite the definition Drain.stepQ	-
+Lambo.Drain.stepQ_unknownFormat	#350 Spec review: an rfl unfolding of stepQ's unknownFormat arm; the docs cite the definition Drain.stepQ	-
+Lambo.Drain.stepW_caps_free	#350 Spec review: holds by definition (only admission reads the caps); that a retry needs no admission is retry_settles_head and retry_enabled	-
+Lambo.Drain.refused_wakes	#350 Spec review: describes the Rust at 30b79824, where a refused admission woke the retry at once; the current Rust starts no retry before its backoff (src/writeq/admission.rs, WritePipeline::admit)	-
+Lambo.Drain.closeD_keptDropped	#350 Spec review: about the consume-time pruning of 1b4d89e4, which the Rust no longer does, and sound only in a model with no worker panic; the current rule is settlePrune_never_vouches_dropped	-
+Lambo.Drain.setAside_untouched	#350 Spec review: a lemma only closeD_keptDropped used	-
+Lambo.Drain.consumedIn_false	#350 Spec review: a lemma only closeD_keptDropped used	-
+Lambo.Drain.keptDropped	#350 Spec review: a definition only closeD_keptDropped used	-
+Lambo.Drain.consumedIn	#350 Spec review: a definition only closeD_keptDropped and keptDropped used	-

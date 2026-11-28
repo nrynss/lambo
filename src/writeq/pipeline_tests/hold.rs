@@ -126,9 +126,9 @@ async fn submit_held(rig: &Rig, agent: &AgentId, n: usize, tag: &str) -> Vec<Rec
 /// Once the embedder is back, the held writes apply, in order, with no new
 /// write: the worker retries them on its backoff timer.
 ///
-/// Mirrors `Drain.retry_settles_head`, `Drain.retry_enabled` and
-/// `Drain.stepW_caps_free` (a retry needs no admission and never reads the
-/// caps; that it comes due is the worker's timer).
+/// Mirrors `Drain.retry_settles_head` and `Drain.retry_enabled` (a retry
+/// needs no admission and is never blocked by the caps; that it comes due is
+/// the worker's timer).
 #[tokio::test(start_paused = true)]
 async fn held_writes_are_retried_without_a_new_write_even_when_the_lane_is_full() {
     let embedder = Flaky::new();

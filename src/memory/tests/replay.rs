@@ -2102,7 +2102,7 @@ async fn attach_planted(
 /// (block reason `Other`): it and everything behind it stayed
 /// `pending_replay`, on every serve.
 ///
-/// Mirrors the Lean theorems `Drain.fixed_input_goes_on` (the replay settles
+/// Mirrors the Lean theorems `Drain.fixedD_input_goes_on` (the replay settles
 /// an input refusal `failed` and goes on) and `Drain.fixed_sessionWide_stops`
 /// (any other non-transient error still stops it); the code before the fix
 /// is `Drain.store_error_blocks_backlog` and
@@ -2281,8 +2281,8 @@ fn owed_receipt(epoch: u64, issued_ms: i64, seq: u64) -> crate::writeq::ReceiptI
 /// left (`embedder`), and the next serve applies A's two writes in order.
 ///
 /// Mirrors the Lean theorems `Drain.loopD_no_overtake` and
-/// `Drain.fixed_agent_order` (per-agent order across serves, whatever the
-/// embedder answers); the code before the fix is
+/// `Drain.sessionW_then_serve_order` (per-agent order across serves, whatever
+/// the embedder answers); the code before the fix is
 /// `Drain.transient_skip_reorders`.
 #[cfg(feature = "fixtures")]
 #[tokio::test]
@@ -2392,9 +2392,9 @@ async fn a_transient_answer_at_replay_defers_the_agent_instead_of_reordering_it(
 /// Observation, so whichever applies first wins and the other is refused
 /// (#294). Before the fix the second write won.
 ///
-/// Mirrors the Lean theorems `Drain.fixedLoad_sorted` and
-/// `Drain.fixed_epoch_seq_order` (per-process sequence order with no clock
-/// assumption); the code before the fix is `Drain.clock_step_reorders`.
+/// Mirrors the Lean theorem `Drain.fixedLoad_sorted` (per-process sequence
+/// order with no clock assumption); the code before the fix is
+/// `Drain.clock_step_reorders`.
 #[cfg(feature = "fixtures")]
 #[tokio::test]
 async fn a_clock_step_between_two_admissions_does_not_reorder_their_replay() {
@@ -2449,8 +2449,8 @@ async fn a_clock_step_between_two_admissions_does_not_reorder_their_replay() {
 /// `failed` (it can be neither applied nor looked up by its id), not skipped
 /// on every serve and counted owed forever.
 ///
-/// Mirrors the Lean theorem `Drain.fixed_badId_settled`; the code before the
-/// fix is `Drain.bad_id_never_settled`.
+/// Mirrors the Lean step `Drain.stepQ` (a malformed id settles `failed`); the
+/// code before the fix is `Drain.bad_id_never_settled`.
 #[cfg(feature = "fixtures")]
 #[tokio::test]
 async fn an_intent_with_an_unparseable_receipt_id_is_settled_failed() {
@@ -2875,8 +2875,8 @@ async fn a_deferred_agent_is_retried_once_at_the_end_of_the_pass() {
 /// id is still settled `failed`
 /// (`an_intent_with_an_unparseable_receipt_id_is_settled_failed`).
 ///
-/// Mirrors `Drain.stepQ_unknownFormat` and `Drain.serveQ_block`; the fix as
-/// first committed is `Drain.fixed_badId_settled`.
+/// Mirrors the Lean step `Drain.stepQ` (an id of another format defers its
+/// agent) and `Drain.serveQ_block`.
 #[cfg(feature = "fixtures")]
 #[tokio::test]
 async fn an_intent_in_another_receipt_format_is_quarantined_not_settled() {

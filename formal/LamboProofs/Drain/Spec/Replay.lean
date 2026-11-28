@@ -112,37 +112,6 @@ def loopWith (step : Bool → RR → Streaks → Step × Streaks) (rout : Job �
     | (.skip, s') => loopWith step rout s' rest
     | (.stop b, _) => { ROut.empty with block := some b }
 
-/-- `replay` with its step as a parameter. -/
-def replayWith (step : Bool → RR → Streaks → Step × Streaks) (live : Bool) (rout : Job → RR)
-    (intents : List Intent) : ROut :=
-  match pendingOf intents with
-  | [] => ROut.empty
-  | p => if live then loopWith step rout ⟨0, 0⟩ p else { ROut.empty with block := some .embedder }
-
-/-- The generalisation agrees with the loop as it was. -/
-abbrev Spec.loopWith_replayStep : Prop :=
-  ∀ (rout : Job → RR),
-    ∀ (l : List Intent) (s : Streaks),
-      loopWith replayStep rout s l = loop rout s l
-
-/-- The replay loop with its step as a parameter (`loopWith`) is the replay
-before #294 when given `replayStep`: #294 changed the step, not the loop. -/
-abbrev Spec.replayWith_replayStep : Prop :=
-  ∀ (live : Bool) (rout : Job → RR) (intents : List Intent),
-    replayWith replayStep live rout intents = replay live rout intents
-
-/-- **Nothing else changes.** On every result but an input refusal the fixed
-step is the old one. -/
-abbrev Spec.stepInput_agrees : Prop :=
-  ∀ (img : Bool) (rr : RR) (s : Streaks),
-    rr ≠ .run (.err .inputRefusal) →
-    stepInput img rr s = replayStep img rr s
-
-/-- An input refusal settles `failed` with both streaks unchanged. -/
-abbrev Spec.stepInput_inputRefusal : Prop :=
-  ∀ (img : Bool) (s : Streaks),
-    stepInput img (.run (.err .inputRefusal)) s = (.failed, s)
-
 /-- **The fixed replay settles every input refusal `failed`**: `Embed`,
 `ImageIdTaken`, `Reference`, a cycle refusal, and the graph-dependent
 refusals #294 names. -/
@@ -160,18 +129,6 @@ abbrev Spec.stepInput_sessionWide : Prop :=
     e.transient = false →
     ∃ b, (stepInput img (.run (.err e)) s).1 = .stop b
 
-/-- **The fixed replay never stops on an input refusal**: the intent is
-consumed `failed` and the loop goes on to the next one. -/
-abbrev Spec.fixed_input_goes_on : Prop :=
-  ∀ (rout : Job → RR) (s : Streaks) (i : Intent) (rest : List Intent) (e : Err),
-    rout i.job = .run (.err e) →
-    e.refusesInput = true →
-    ∃ s', loopWith stepInput rout s (i :: rest) =
-      { loopWith stepInput rout s' rest with
-        answers := (i.job.key, .failed) :: (loopWith stepInput rout s' rest).answers
-        log := [.consume i.job.key .failed] :: (loopWith stepInput rout s' rest).log
-        failed := i.job :: (loopWith stepInput rout s' rest).failed }
-
 /-- **The fixed replay still stops on every other non-transient error**, the
 intent and every later one left unconsumed. -/
 abbrev Spec.fixed_sessionWide_stops : Prop :=
@@ -180,16 +137,6 @@ abbrev Spec.fixed_sessionWide_stops : Prop :=
     e.refusesInput = false →
     e.transient = false →
     ∃ b, loopWith stepInput rout s (i :: rest) = { ROut.empty with block := some b }
-
-/-- The fixed replay and the in-session worker now agree on an input
-refusal: both consume the intent `failed`. Stated with `workerStep`, the worker
-before #295; it holds of the current worker too, whose `finishW` settles an
-input refusal `failed` with the same `[consume failed]` batch (an input
-refusal does not hold, `holdsS`). -/
-abbrev Spec.fixed_agrees_with_worker : Prop :=
-  ∀ (img : Bool) (j : Job) (s : Streaks),
-    (stepInput img (.run (.err .inputRefusal)) s).1 = .failed ∧
-      workerStep false j (.err .inputRefusal) = (.failed, [.consume j.key .failed])
 
 /-! ## The fix for #295: per-agent order, a clock-free load order, bad ids
 
@@ -258,13 +205,6 @@ def replayD (step : Bool → RR → Streaks → Step × Streaks) (live : Bool) (
   | [] => ROut.empty
   | p => if live then loopD step rout ⟨0, 0⟩ [] p else { ROut.empty with block := some .embedder }
 
-/-! ### The steps -/
-
-/-- An unparseable id settles `failed`, both streaks unchanged. -/
-abbrev Spec.stepFixed_badId : Prop :=
-  ∀ (img : Bool) (s : Streaks),
-    stepFixed img .badId s = (.failed, s)
-
 /-! ### The loop -/
 
 /-- **No write overtakes an earlier one of its agent within a serve.** If the
@@ -284,38 +224,6 @@ abbrev Spec.loopD_no_overtake : Prop :=
 /-- Per-epoch sequence order of a list of rows. -/
 abbrev EpochSorted (l : List Intent) : Prop :=
   l.Pairwise (fun a b => a.job.epoch = b.job.epoch → a.job.rid ≤ b.job.rid)
-
-/-- **Per-agent order across serves, whatever the embedder answers.** Two
-serves of the fixed replay: the first over a backlog `L1` loaded in per-epoch
-sequence order, the second over any per-epoch-sorted load `L2` of the rows
-the first left. Whatever each run returned (transient embedder answers
-included), the writes the two serves applied, in the order they applied
-them, keep each agent's writes of one process in sequence (admission) order:
-the per-agent promise (`WriteIntent::agent`, `docs/reference/mcp.mdx`) that
-`transient_skip_reorders` shows the code before #295 breaking. Holds for any
-step; rows are keyed by receipt id (`hnd`). -/
-abbrev Spec.fixed_agent_order : Prop :=
-  ∀ (step : Bool → RR → Streaks → Step × Streaks) (live live' : Bool) (rout rout' : Job → RR)
-    (L1 L2 : List Intent),
-    (L1.map (·.job.key)).Nodup →
-    EpochSorted L1 →
-    EpochSorted L2 →
-    (∀ i ∈ L2, i ∈ applyLog L1 (replayD step live rout L1).log) →
-    ((replayD step live rout L1).applied ++ (replayD step live' rout' L2).applied).Pairwise
-      (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid)
-
-/-- **An unparseable receipt id is settled, not skipped forever**: the fixed
-loop consumes its row `failed` and goes on (`bad_id_never_settled` is the code
-before #295). -/
-abbrev Spec.fixed_badId_settled : Prop :=
-  ∀ (rout : Job → RR) (s : Streaks) (d : List Nat) (i : Intent) (rest : List Intent),
-    rout i.job = .badId →
-    i.job.agent ∉ d →
-    loopD stepFixed rout s d (i :: rest) =
-      { loopD stepFixed rout s d rest with
-        answers := (i.job.key, .failed) :: (loopD stepFixed rout s d rest).answers
-        log := [.consume i.job.key .failed] :: (loopD stepFixed rout s d rest).log
-        failed := i.job :: (loopD stepFixed rout s d rest).failed }
 
 /-- **#294 still holds in the fixed loop**: an input refusal is consumed
 `failed` and the loop goes on. -/
@@ -387,26 +295,6 @@ abbrev Spec.fixedLoad_agrees : Prop :=
       a.job.ms ≤ b.job.ms) →
     fixedLoad l = loadOrder l
 
-/-- One serve of the fixed replay over the fixed load applies each process's
-writes in sequence order: `replay_epoch_seq_order` without its clock
-hypothesis. -/
-abbrev Spec.fixed_epoch_seq_order : Prop :=
-  ∀ (live : Bool) (rout : Job → RR) (l : List Intent),
-    (replayD stepFixed live rout (fixedLoad l)).applied.Pairwise
-      (fun a b => a.epoch = b.epoch → a.rid ≤ b.rid)
-
-/-- **The two fixes together, across two serves**: rows keyed by receipt id,
-loaded by the fixed load at each serve; whatever the embedder answers, the
-writes the two serves apply keep each agent's writes of one process in
-admission order. -/
-abbrev Spec.fixed_agent_order_load : Prop :=
-  ∀ (live live' : Bool) (rout rout' : Job → RR) (rows : List Intent),
-    (rows.map (·.job.key)).Nodup →
-    let L1 := fixedLoad rows
-    let r1 := replayD stepFixed live rout L1
-    ((r1.applied ++ (replayD stepFixed live' rout' (fixedLoad (applyLog L1 r1.log))).applied)).Pairwise
-      (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid)
-
 /-! ## Order across passes: the invariant the order proofs carry
 
 `fixed_agent_order` compares two serves. The in-session hold and the replay's
@@ -445,140 +333,6 @@ abbrev Spec.replayD_preserves : Prop :=
     OrderInv (applyLog rows (replayD step live rout rows).log)
       (A ++ (replayD step live rout rows).applied)
 
-/-! ## The in-session hold (#295)
-
-Before, a write the lane worker met during an embedder outage answered
-`failed`, its intent was left owed, and the worker went on to the agent's next
-write, which applied ahead of it; the next serve then applied the first
-(`outage_then_replay_reorders`). Now the worker keeps the agent's owed writes
-(`held`): at each later write of the agent it first runs the held ones,
-oldest first, then the new one, and stops at the first that meets an outage.
-That one and every later write of the agent stay owed: their intents
-unconsumed, their receipts `pending_replay` (unsettled, so a close sets them
-aside and answers `intent_durable`, and the next serve replays them in
-order). A held write that is later applied in this serve answers `applied`,
-a refused one `failed`; so the receipt of a write met by an outage no longer
-says `failed` first and something else later.
-
-`out t` is what a run at the `t`-th arrival returns, so a retry can answer
-differently from the first attempt. The lease fence is not modelled here: it
-refuses the arriving write without running anything, as before, and runs no
-held one. -/
-
-/-- Run an agent's owed jobs, oldest first, until one meets an embedder
-outage: what was settled (job and answer, in order), the batches appended,
-and the jobs still owed (that one and every later one). -/
-def drainHeld (o : Job → RunResult) : List Job → List (Job × Answer) × List Batch × List Job
-  | [] => ([], [], [])
-  | j :: js =>
-    match o j with
-    | .ok =>
-      let r := drainHeld o js
-      ((j, .applied) :: r.1, [.write j.key, .consume j.key .applied] :: r.2.1, r.2.2)
-    | .err e =>
-      if e.transient then ([], [], j :: js)
-      else
-        let r := drainHeld o js
-        ((j, .failed) :: r.1, [.consume j.key .failed] :: r.2.1, r.2.2)
-
-/-- The in-session workers' state: receipts, the held jobs (every agent's, in
-arrival order), the batches appended, and what was settled, in order. -/
-structure HState where
-  store : RStore
-  held : List Job
-  log : List Batch
-  settled : List (Job × Answer)
-
-def settleList (now : Int) (s : RStore) (xs : List (Job × Answer)) : RStore :=
-  xs.foldl (fun s p => settleOne s p.1.key p.2 now) s
-
-def holdList (now : Int) (s : RStore) (js : List Job) : RStore :=
-  js.foldl (fun s j => settleOne s j.key .pendingReplay now) s
-
-/-- One write `j` taken off its lane: the agent's held writes, then `j`. -/
-def arriveH (o : Job → RunResult) (now : Int) (st : HState) (j : Job) : HState :=
-  let r := drainHeld o (st.held.filter (fun k => k.agent = j.agent) ++ [j])
-  { store := holdList now (settleList now st.store r.1) r.2.2
-    held := st.held.filter (fun k => k.agent ≠ j.agent) ++ r.2.2
-    log := st.log ++ r.2.1
-    settled := st.settled ++ r.1 }
-
-/-- The workers over the writes they take, in the order they take them. -/
-def workH (out : Nat → Job → RunResult) (now : Int) : Nat → HState → List Job → HState
-  | _, st, [] => st
-  | t, st, j :: js => workH out now (t + 1) (arriveH (out t) now st j) js
-
-/-- The writes applied in session, in the order they were applied. -/
-def HState.applied (st : HState) : List Job :=
-  (st.settled.filter (fun p => p.2 = .applied)).map (·.1)
-
-/-- **The hold, over a whole serve.** For every agent, the writes it settled
-in session (applied or failed) followed by the writes it still has held are
-exactly its writes, in the order its lane delivered them (admission order): a
-held write is never followed by a settled one, so no write of the agent is
-applied while an earlier one is owed. -/
-abbrev Spec.workH_split : Prop :=
-  ∀ (out : Nat → Job → RunResult) (now : Int) (a : Nat),
-    ∀ (js : List Job) (t : Nat) (st : HState),
-    ((workH out now t st js).settled.map (·.1)).filter (fun k => k.agent = a) ++
-        (workH out now t st js).held.filter (fun k => k.agent = a) =
-      (st.settled.map (·.1)).filter (fun k => k.agent = a) ++
-        st.held.filter (fun k => k.agent = a) ++ js.filter (fun k => k.agent = a)
-
-/-- A serve that starts with nothing held. -/
-def HState.init (s : RStore) : HState := ⟨s, [], [], []⟩
-
-/-- `workH_split` for a serve that starts with nothing settled and nothing
-held: for every agent, the writes the in-session hold settled followed by
-those it still holds are that agent's writes in the order they were taken. -/
-abbrev Spec.hold_split : Prop :=
-  ∀ (out : Nat → Job → RunResult) (now : Int) (s : RStore) (js : List Job) (a : Nat),
-    ((workH out now 0 (HState.init s) js).settled.map (·.1)).filter (fun k => k.agent = a) ++
-        (workH out now 0 (HState.init s) js).held.filter (fun k => k.agent = a) =
-      js.filter (fun k => k.agent = a)
-
-/-- **In session, each agent's writes apply in admission order, and none
-before an earlier write of its agent still owed.** Writes of one process
-(epoch `e`), its lanes delivering each agent's writes in sequence order. The
-writes applied in session satisfy the order invariant against any rows whose
-owed writes of this process are the ones still held: so the next serve,
-whatever it does, keeps the order (`hold_then_serve_order`). -/
-abbrev Spec.session_orderInv : Prop :=
-  ∀ (out : Nat → Job → RunResult) (now : Int) (s : RStore) (js : List Job) (e : Nat),
-    (∀ j ∈ js, j.epoch = e) →
-    js.Pairwise (fun a b => a.agent = b.agent → a.rid < b.rid) →
-    ∀ (rows : List Intent),
-    (∀ i ∈ rows, i.outcome = none → i.job.epoch = e →
-      i.job ∈ (workH out now 0 (HState.init s) js).held) →
-    OrderInv rows (workH out now 0 (HState.init s) js).applied
-
-/-- **Per-agent order in session and across the next serve.** The writes
-applied in session, then those the next serve's fixed replay applies from the
-rows left (every owed row of this process being one still held), keep each
-agent's writes of one process in admission order, whatever the embedder
-answered at any point. The fix for `outage_then_replay_reorders`. -/
-abbrev Spec.hold_then_serve_order : Prop :=
-  ∀ (out : Nat → Job → RunResult) (now : Int) (s : RStore) (js : List Job) (e : Nat),
-    (∀ j ∈ js, j.epoch = e) →
-    js.Pairwise (fun a b => a.agent = b.agent → a.rid < b.rid) →
-    ∀ (rows : List Intent),
-    (rows.map (·.job.key)).Nodup →
-    (∀ i ∈ rows, i.outcome = none → i.job.epoch = e →
-      i.job ∈ (workH out now 0 (HState.init s) js).held) →
-    ∀ (live : Bool) (rout : Job → RR),
-    ((workH out now 0 (HState.init s) js).applied ++
-        (replayD stepFixed live rout (fixedLoad rows)).applied).Pairwise
-      (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid)
-
-/-- **Progress in session**: at a write of an agent whose held writes and the
-new one all get an answer other than an outage, nothing of that agent stays
-held. -/
-abbrev Spec.arriveH_clears : Prop :=
-  ∀ (o : Job → RunResult) (now : Int) (st : HState) (j : Job),
-    (∀ k ∈ st.held.filter (fun k => k.agent = j.agent) ++ [j], ∀ e, o k = .err e →
-      e.transient = false) →
-    (arriveH o now st j).held.filter (fun k => k.agent = j.agent) = []
-
 /-! ## The replay's retry pass, quarantine and block reason (#295)
 
 Three changes to the fixed replay, after review.
@@ -606,17 +360,6 @@ def stepQ (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
   match rr with
   | .unknownFormat => (.skip, s)
   | rr => stepFixed image rr s
-
-/-- A malformed id in this build's format is still settled `failed`. -/
-abbrev Spec.stepQ_badId : Prop :=
-  ∀ (img : Bool) (s : Streaks),
-    stepQ img .badId s = (.failed, s)
-
-/-- An id in another format is quarantined: left owed, its agent deferred,
-the streaks untouched. -/
-abbrev Spec.stepQ_unknownFormat : Prop :=
-  ∀ (img : Bool) (s : Streaks),
-    stepQ img .unknownFormat s = (.skip, s)
 
 /-- Only a transient answer or a quarantined id defers an agent. -/
 abbrev Spec.stepQ_skip : Prop :=
@@ -695,23 +438,6 @@ abbrev Spec.replayP_progress : Prop :=
     (replayD step live rout rows).block = none →
     (∀ j s, (step j.image (rout' j) s).1 = .applied ∨ (step j.image (rout' j) s).1 = .failed) →
     pendingOf (applyLog rows (replayP step live rout rout' s' rows).log) = []
-
-/-- **Per-agent order across the hold, a serve with its retry pass, and
-quarantine**: the writes applied in session, then by the next serve (both of
-its passes), keep each agent's writes of one process in admission order,
-whatever the embedder answers. -/
-abbrev Spec.hold_then_serveQ_order : Prop :=
-  ∀ (out : Nat → Job → RunResult) (now : Int) (s : RStore) (js : List Job) (e : Nat),
-    (∀ j ∈ js, j.epoch = e) →
-    js.Pairwise (fun a b => a.agent = b.agent → a.rid < b.rid) →
-    ∀ (rows : List Intent),
-    (rows.map (·.job.key)).Nodup →
-    (∀ i ∈ rows, i.outcome = none → i.job.epoch = e →
-      i.job ∈ (workH out now 0 (HState.init s) js).held) →
-    ∀ (live : Bool) (rout rout' : Job → RR) (s' : Streaks),
-    ((workH out now 0 (HState.init s) js).applied ++
-        (serveQ live rout rout' s' (fixedLoad rows)).applied).Pairwise
-      (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid)
 
 /-- #324. After a mixed batch is rejected, the confirmed failure consume
 leaves the bad receipt settled and its neighbor owed. The second restart

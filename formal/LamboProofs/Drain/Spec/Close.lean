@@ -732,51 +732,6 @@ abbrev Spec.closeD_retryD : Prop :=
           (closeD .incomplete dropped now1 st)) j.key =
         some (if j.key ∈ dropped then .closeUnflushed else .intentRecorded)
 
-/-! ### What the Rust keeps of the dead-lettered puts
-
-`keptDropped` is the set a first version of the #345 review fix kept
-(`1b4d89e4`): `Graph::consume_write_intent` forgot a receipt once its
-write's consume was appended, so the set held the dropped puts whose writes
-the log had not consumed. In this model a set-aside write's intent is never
-consumed (`InvW`), so forgetting the consumed ones changes no answer
-(`closeD_keptDropped`). **That premise is the model's, not the Rust's:** a
-lane worker that panics after its commit and before its settle leaves a
-consumed write unsettled, and the close sets it aside. `stepW` has no
-panic, so `closeD_keptDropped` does not see it; the section "Worker panics
-and the dead-lettered set" models it, shows the consume-time pruning
-vouching for a dropped put there (`keptAtConsume_vouches_after_panic`), and
-proves the current Rust's rule, pruning at the settle
-(`settlePrune_never_vouches_dropped`). -/
-
-/-- Whether the log consumes receipt `k`. -/
-def consumedIn (log : List Batch) (k : Key) : Bool :=
-  log.flatten.any (fun m => match m with
-    | .consume k' _ => decide (k' = k)
-    | _ => false)
-
-/-- The dead-lettered puts the Rust still holds at close
-(`Graph::dead_lettered_intents`): those whose write the log has not
-consumed. -/
-def keptDropped (log : List Batch) (dropped : List Key) : List Key :=
-  dropped.filter (fun k => !consumedIn log k)
-
-/-- **Forgetting consumed receipts changes no set-aside write's answer**, in
-this model: the close over the kept set answers every set-aside write as the
-close over all the dead-lettered puts does. It rests on `InvW` (a set-aside
-write's intent is unconsumed), which a lane worker that panics after its
-commit breaks in the Rust; `stepW` has no panic. With one, consume-time
-pruning vouches for a dropped put (`keptAtConsume_vouches_after_panic`); the
-current Rust prunes at the settle (`settlePrune_never_vouches_dropped`). -/
-abbrev Spec.closeD_keptDropped : Prop :=
-  ∀ {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job} {evs : List Ev} {st : WS},
-    st = runW c sz now (WS.init (admitStore all)) evs →
-    (st.admitted.map (·.key)).Nodup →
-    (∀ j ∈ st.admitted, j ∈ all) →
-    ∀ (flush : CloseFlush) (dropped : List Key) (now' : Int) {j : Job},
-    j ∈ st.running ++ st.held ++ st.queue →
-    ansOf (closeD flush (keptDropped st.log dropped) now' st) j.key =
-      ansOf (closeD flush dropped now' st) j.key
-
 /-! ## Worker panics and the dead-lettered set (#345 review)
 
 `stepW` has no panic. In the Rust a lane worker can panic after its commit

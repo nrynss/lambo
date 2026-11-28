@@ -30,8 +30,8 @@ Boundary: not modelled are the one settled-to-settled upgrade `CloseUnflushed
 (`drain.rs`); replay; the restart map; the in-serve hold (#295: `hold_one`,
 `Lanes::held`, `DropReason::HeldLane`); the lookup-timeout streak; and the
 answers' `describe` text. The drain model (`Drain/`) covers the hold
-(`hold_then_serve_order`, `sessionW_orderInv`, the caps in `Caps`), the streak
-(`Drain.streakNew_eq_runSince`) and when a close answers `CloseUnflushed`
+(`Drain.runW_ord`, `Drain.sessionW_then_serve_order`, the caps in `Drain.runW_caps`),
+the streak (`Drain.heldNew_iff`) and when a close answers `CloseUnflushed`
 (`Drain.closeD`).
 -/
 

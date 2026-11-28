@@ -23,35 +23,6 @@ open Lambo.Receipts (Answer Entry settle Lane)
 
 /-! ## The fix for #294: graph-dependent input refusals settle `failed` -/
 
-theorem loopWith_replayStep : Spec.loopWith_replayStep := by
-  intro rout
-  intro l
-  induction l with
-  | nil => intro s; rfl
-  | cons i rest ih =>
-    intro s
-    simp only [loopWith, loop]
-    cases replayStep i.job.image (rout i.job) s with
-    | mk st s' => cases st <;> simp [ih]
-
-theorem replayWith_replayStep : Spec.replayWith_replayStep := by
-  intro live rout intents
-  unfold replayWith replay
-  cases pendingOf intents with
-  | nil => rfl
-  | cons p ps => cases live <;> simp [loopWith_replayStep]
-
-theorem stepInput_agrees : Spec.stepInput_agrees := by
-  intro img rr s h
-  unfold stepInput
-  split
-  · exact absurd rfl h
-  · rfl
-
-theorem stepInput_inputRefusal : Spec.stepInput_inputRefusal := by
-  intro img s
-  exact rfl
-
 theorem stepInput_refusesInput : Spec.stepInput_refusesInput := by
   intro img e s h
   cases e <;> simp_all [Err.refusesInput, Err.inputFact, stepInput, replayStep]
@@ -59,18 +30,6 @@ theorem stepInput_refusesInput : Spec.stepInput_refusesInput := by
 theorem stepInput_sessionWide : Spec.stepInput_sessionWide := by
   intro img e s h1 h2
   cases e <;> simp_all [Err.refusesInput, Err.inputFact, Err.transient, stepInput, replayStep]
-
-theorem fixed_input_goes_on : Spec.fixed_input_goes_on := by
-  intro rout s i rest e he hf
-  have h := stepInput_refusesInput i.job.image e s hf
-  refine ⟨(stepInput i.job.image (rout i.job) s).2, ?_⟩
-  simp only [loopWith, he]
-  cases hs : stepInput i.job.image (.run (.err e)) s with
-  | mk st s' =>
-    rw [hs] at h
-    simp only at h
-    subst h
-    rfl
 
 theorem fixed_sessionWide_stops : Spec.fixed_sessionWide_stops := by
   intro rout s i rest e he h1 h2
@@ -84,10 +43,6 @@ theorem fixed_sessionWide_stops : Spec.fixed_sessionWide_stops := by
     subst hb
     rfl
 
-theorem fixed_agrees_with_worker : Spec.fixed_agrees_with_worker := by
-  intro img j s
-  exact ⟨rfl, rfl⟩
-
 /-! ## The fix for #295: per-agent order, a clock-free load order, bad ids -/
 
 /-! ### The steps -/
@@ -100,10 +55,6 @@ theorem stepFixed_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .badId
   · exact absurd rfl h
   · exact absurd rfl h'
   · rfl
-
-theorem stepFixed_badId : Spec.stepFixed_badId := by
-  intro img s
-  exact rfl
 
 /-- #294 still holds: every input refusal settles `failed`. -/
 theorem stepFixed_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
@@ -364,82 +315,6 @@ theorem mem_eq_of_key {L : List Intent} (hnd : (L.map (·.job.key)).Nodup) {a b 
         exact absurd (h.symm ▸ List.mem_map_of_mem (f := (·.job.key)) ha') hnd.1
       | inr hb' => exact ih hnd.2 ha' hb'
 
-theorem fixed_agent_order : Spec.fixed_agent_order := by
-  intro step live live' rout rout' L1 L2 hnd hs1 hs2 hL2
-  obtain ⟨f1, _, fnp, fcons⟩ := replayD_facts step live rout L1
-  have hp1 : EpochSorted (pendingOf L1) := hs1.sublist List.filter_sublist
-  have hsorted : ∀ (L : List Intent) (x : List Job), EpochSorted L →
-      x.Sublist ((pendingOf L).map (·.job)) →
-      x.Pairwise (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) := by
-    intro L x hL hx
-    have hpl : ((pendingOf L).map (·.job)).Pairwise
-        (fun a b => a.epoch = b.epoch → a.rid ≤ b.rid) :=
-      List.pairwise_map.mpr (hL.sublist List.filter_sublist)
-    exact (hpl.sublist hx).imp
-      (fun {a b} (h : a.epoch = b.epoch → a.rid ≤ b.rid) (_ : a.agent = b.agent) => h)
-  refine List.pairwise_append.mpr ⟨hsorted L1 _ hs1 f1,
-    hsorted L2 _ hs2 (replayD_facts step live' rout' L2).1, ?_⟩
-  intro x hx y hy hag hep
-  -- `y` is a row the first serve left unconsumed.
-  obtain ⟨iy, hiy, hiyj, hiyo⟩ := replayD_applied_pending hy
-  have hiy' := hL2 iy hiy
-  -- A key the first serve consumed has no unconsumed row after it.
-  have hgone : ∀ z : Job, (∃ t, Mut.consume z.key t ∈ (replayD step live rout L1).log.flatten) →
-      z.key ≠ y.key := by
-    intro z hz hzy
-    exact foldl_consumed _ L1 fnp (Or.inl hz) iy hiy' (by rw [hiyj, hzy]) hiyo
-  obtain ⟨i, hi, hij⟩ := foldl_rows _ L1 fnp hiy'
-  have hio : i.outcome = none := by
-    cases ho : i.outcome with
-    | none => rfl
-    | some t =>
-      exfalso
-      refine foldl_consumed _ L1 fnp (Or.inr ?_) iy hiy' rfl hiyo
-      intro k hk hkk
-      have hki : k = i := mem_eq_of_key hnd hk hi (by rw [hkk, hij])
-      rw [hki, ho]
-      exact Option.some_ne_none t
-  have hip : i ∈ pendingOf L1 := List.mem_filter.mpr ⟨hi, by simp [hio]⟩
-  -- `x` was applied by the loop over the pending rows.
-  have hr : replayD step live rout L1 = loopD step rout ⟨0, 0⟩ [] (pendingOf L1) := by
-    rcases replayD_cases step live rout L1 with h | h | h
-    · rw [h] at hx; simp [ROut.empty] at hx
-    · rw [h] at hx; simp [ROut.empty] at hx
-    · exact h
-  have hxl : x ∈ (loopD step rout ⟨0, 0⟩ [] (pendingOf L1)).applied := hr ▸ hx
-  obtain ⟨ix, hixp, hixj⟩ := List.mem_map.mp (f1.subset hx)
-  obtain ⟨pre, post, hsplit⟩ := List.append_of_mem hixp
-  have hndp : ((pendingOf L1).map (·.job)).Nodup := by
-    have hk : ((pendingOf L1).map (·.job.key)).Nodup := hnd.sublist (List.filter_sublist.map _)
-    unfold List.Nodup at hk ⊢
-    rw [List.pairwise_map] at hk ⊢
-    exact hk.imp (fun h e => h (by rw [e]))
-  rw [hsplit] at hip hp1 hxl hndp
-  rw [← hixj] at hxl
-  have hy' : i.job = y := by rw [← hij, hiyj]
-  rcases List.mem_append.mp hip with hpre | hpost
-  · -- An earlier row of the same agent: the no-overtake theorem settled it.
-    exfalso
-    have hsettled := loopD_no_overtake step rout pre ix post ⟨0, 0⟩ [] hndp hxl i hpre
-      (by rw [hy', hixj]; exact hag.symm)
-    apply hgone y _ rfl
-    apply fcons
-    rw [hr, hsplit, ← hy']
-    exact hsettled
-  · cases List.mem_cons.mp hpost with
-    | inl e =>
-      exfalso
-      apply hgone x (fcons x (Or.inl hx))
-      rw [← hy', e, hixj]
-    | inr hpost' =>
-      have hrel := List.rel_of_pairwise_cons (List.pairwise_append.mp hp1).2.1 hpost'
-      rw [hixj, hy'] at hrel
-      exact hrel hep
-
-theorem fixed_badId_settled : Spec.fixed_badId_settled := by
-  intro rout s d i rest he hd
-  exact loopD_failed hd (by rw [he]; rfl)
-
 theorem fixedD_input_goes_on : Spec.fixedD_input_goes_on := by
   intro rout s d i rest e he hf hd
   have h := stepFixed_refusesInput i.job.image e s hf
@@ -654,19 +529,6 @@ theorem fixedLoad_agrees : Spec.fixedLoad_agrees := by
   intro l hmono
   exact regroupN_of_sorted _ _ (load_epoch_seq_order l hmono)
 
-theorem fixed_epoch_seq_order : Spec.fixed_epoch_seq_order := by
-  intro live rout l
-  have hs := (replayD_facts stepFixed live rout (fixedLoad l)).1
-  apply List.Pairwise.sublist hs
-  exact List.pairwise_map.mpr ((fixedLoad_sorted l).sublist List.filter_sublist)
-
-theorem fixed_agent_order_load : Spec.fixed_agent_order_load := by
-  intro live live' rout rout' rows hnd
-  intro L1 r1
-  have hnd1 : (L1.map (·.job.key)).Nodup := ((fixedLoad_perm rows).map _).nodup_iff.mpr hnd
-  exact fixed_agent_order stepFixed live live' rout rout' L1 _ hnd1 (fixedLoad_sorted rows)
-    (fixedLoad_sorted _) (fun i hi => (fixedLoad_perm _).mem_iff.mp hi)
-
 /-! ## Order across passes: the invariant the order proofs carry -/
 
 /-- Reloading the rows in another order keeps the invariant. -/
@@ -773,103 +635,6 @@ theorem replayD_preserves : Spec.replayD_preserves := by
 
 /-! ## The in-session hold (#295) -/
 
-theorem drainHeld_split (o : Job → RunResult) : ∀ (l : List Job),
-    (drainHeld o l).1.map (·.1) ++ (drainHeld o l).2.2 = l := by
-  intro l
-  induction l with
-  | nil => rfl
-  | cons j js ih =>
-    unfold drainHeld
-    cases o j with
-    | ok => simp [ih]
-    | err e =>
-      by_cases h : e.transient = true
-      · simp [h]
-      · simp [h, ih]
-
-/-- With the embedder answering every held write, the agent's held writes all
-settle. -/
-theorem drainHeld_clears (o : Job → RunResult) : ∀ (l : List Job),
-    (∀ k ∈ l, ∀ e, o k = .err e → e.transient = false) → (drainHeld o l).2.2 = [] := by
-  intro l
-  induction l with
-  | nil => intro _; rfl
-  | cons j js ih =>
-    intro h
-    have ht := h j List.mem_cons_self
-    have hr := ih (fun k hk => h k (List.mem_cons_of_mem _ hk))
-    unfold drainHeld
-    cases hj : o j with
-    | ok => simpa using hr
-    | err e =>
-      have := ht e hj
-      simp [this, hr]
-
-theorem filter_agent_of_all {l : List Job} {b : Nat} (hl : ∀ k ∈ l, k.agent = b) (a : Nat) :
-    l.filter (fun k => k.agent = a) = if b = a then l else [] := by
-  by_cases hab : b = a
-  · simp only [hab, ite_true]
-    exact List.filter_eq_self.mpr (fun k hk => by simp [hl k hk, hab])
-  · simp only [hab, ite_false]
-    exact List.filter_eq_nil_iff.mpr (fun k hk => by simp [hl k hk, hab])
-
-/-- One arrival moves only its agent's writes: those settled and those held
-are, together, that agent's held writes before it and the arriving one, in
-order; every other agent is untouched. -/
-theorem arriveH_split (o : Job → RunResult) (now : Int) (st : HState) (j : Job) (a : Nat) :
-    ((arriveH o now st j).settled.map (·.1)).filter (fun k => k.agent = a) ++
-        (arriveH o now st j).held.filter (fun k => k.agent = a) =
-      (st.settled.map (·.1)).filter (fun k => k.agent = a) ++
-        st.held.filter (fun k => k.agent = a) ++ [j].filter (fun k => k.agent = a) := by
-  have hsplit := drainHeld_split o (st.held.filter (fun k => k.agent = j.agent) ++ [j])
-  have hall : ∀ k ∈ st.held.filter (fun k => k.agent = j.agent) ++ [j], k.agent = j.agent := by
-    intro k hk
-    rcases List.mem_append.mp hk with hk | hk
-    · simpa using (List.mem_filter.mp hk).2
-    · rw [List.mem_singleton.mp hk]
-  have hM := filter_agent_of_all hall a
-  rw [← hsplit, List.filter_append] at hM
-  simp only [arriveH, List.map_append, List.filter_append, List.append_assoc]
-  by_cases hab : j.agent = a
-  · subst hab
-    simp only [ite_true] at hM
-    have ho : (st.held.filter (fun k => k.agent ≠ j.agent)).filter (fun k => k.agent = j.agent)
-        = [] := by
-      rw [List.filter_filter]
-      exact List.filter_eq_nil_iff.mpr (fun k _ => by by_cases h : k.agent = j.agent <;> simp [h])
-    rw [ho, List.nil_append, hM, hsplit]
-    simp
-  · simp only [hab, ite_false] at hM
-    have h1 := (List.append_eq_nil_iff.mp hM).1
-    have h2 := (List.append_eq_nil_iff.mp hM).2
-    rw [h1, h2, List.filter_filter]
-    simp only [hab, List.nil_append, List.append_nil, List.filter_cons, List.filter_nil,
-      decide_false, Bool.false_eq_true, ite_false]
-    congr 1
-    apply List.filter_congr
-    intro k _
-    by_cases h : k.agent = a
-    · have : ¬ a = j.agent := fun e => hab e.symm
-      simp [h, this]
-    · simp [h]
-
-theorem workH_split : Spec.workH_split := by
-  intro out now a
-  intro js
-  induction js with
-  | nil => intro t st; simp [workH]
-  | cons j js ih =>
-    intro t st
-    simp only [workH]
-    rw [ih, arriveH_split]
-    rw [show j :: js = [j] ++ js from rfl, List.filter_append]
-    simp only [List.append_assoc]
-
-theorem hold_split : Spec.hold_split := by
-  intro out now s js a
-  rw [workH_split]
-  simp [HState.init]
-
 /-- A list whose every agent's sub-list is ordered is ordered for each agent. -/
 theorem pairwise_of_agent_filters {P : Job → Job → Prop} :
     ∀ (l : List Job), (∀ a, (l.filter (fun k => k.agent = a)).Pairwise P) →
@@ -891,58 +656,6 @@ theorem pairwise_of_agent_filters {P : Job → Job → Prop} :
         exact (List.pairwise_cons.mp hx).2
       · simpa [List.filter_cons, hxa] using hx
 
-theorem session_orderInv : Spec.session_orderInv := by
-  intro out now s js e he hjs rows hrows
-  let st := workH out now 0 (HState.init s) js
-  have hsplit := hold_split out now s js
-  have hsub : st.applied.Sublist (st.settled.map (·.1)) :=
-    (List.filter_sublist).map _
-  -- Each agent's writes, in lane order, are in sequence order.
-  have hja : ∀ a, (js.filter (fun k => k.agent = a)).Pairwise (fun x y => x.rid < y.rid) := by
-    intro a
-    apply List.Pairwise.imp_of_mem _ (hjs.sublist List.filter_sublist)
-    intro x y hx hy hxy
-    exact hxy (by rw [(by simpa using (List.mem_filter.mp hx).2 : x.agent = a),
-      (by simpa using (List.mem_filter.mp hy).2 : y.agent = a)])
-  have hsettled_mem : ∀ x ∈ st.settled.map (·.1), x ∈ js := by
-    intro x hx
-    have : x ∈ (st.settled.map (·.1)).filter (fun k => k.agent = x.agent) :=
-      List.mem_filter.mpr ⟨hx, by simp⟩
-    have h2 := hsplit x.agent
-    have : x ∈ js.filter (fun k => k.agent = x.agent) := by
-      rw [← h2]; exact List.mem_append_left _ this
-    exact (List.mem_filter.mp this).1
-  refine ⟨?_, ?_⟩
-  · apply List.Pairwise.sublist hsub
-    apply pairwise_of_agent_filters
-    intro a
-    have hpre : ((st.settled.map (·.1)).filter (fun k => k.agent = a)).Sublist
-        (js.filter (fun k => k.agent = a)) := by
-      rw [← hsplit a]; exact List.sublist_append_left _ _
-    exact ((hja a).sublist hpre).imp
-      (fun {x y} (h : x.rid < y.rid) (_ : x.epoch = y.epoch) => Nat.le_of_lt h)
-  · intro x hx i hi hio hag hep
-    have hxs := hsub.subset hx
-    have hxe : x.epoch = e := he x (hsettled_mem x hxs)
-    have hih := hrows i hi hio (hep ▸ hxe)
-    have hpa := (hja x.agent)
-    rw [← hsplit x.agent] at hpa
-    have hcross := (List.pairwise_append.mp hpa).2.2
-    exact Nat.le_of_lt (hcross x (List.mem_filter.mpr ⟨hxs, by simp⟩) i.job
-      (List.mem_filter.mpr ⟨hih, by simp [hag]⟩))
-
-theorem hold_then_serve_order : Spec.hold_then_serve_order := by
-  intro out now s js e he hjs rows hnd hrows live rout
-  have hI := orderInv_perm (fixedLoad_perm rows) (session_orderInv out now s js e he hjs rows hrows)
-  have hnd' : ((fixedLoad rows).map (·.job.key)).Nodup :=
-    ((fixedLoad_perm rows).map _).nodup_iff.mpr hnd
-  exact (replayD_preserves stepFixed live rout _ _ hnd' (fixedLoad_sorted rows) hI).1
-
-theorem arriveH_clears : Spec.arriveH_clears := by
-  intro o now st j h
-  simp only [arriveH, drainHeld_clears o _ h, List.append_nil, List.filter_filter]
-  exact List.filter_eq_nil_iff.mpr (fun k _ => by by_cases hk : k.agent = j.agent <;> simp [hk])
-
 /-! ## The replay's retry pass, quarantine and block reason (#295) -/
 
 theorem stepQ_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .unknownFormat) :
@@ -951,14 +664,6 @@ theorem stepQ_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .unknownFo
   split
   · exact absurd rfl h
   · rfl
-
-theorem stepQ_badId : Spec.stepQ_badId := by
-  intro img s
-  exact rfl
-
-theorem stepQ_unknownFormat : Spec.stepQ_unknownFormat := by
-  intro img s
-  exact rfl
 
 theorem stepQ_skip : Spec.stepQ_skip := by
   intro img rr s h
@@ -1074,14 +779,6 @@ theorem replayP_progress : Spec.replayP_progress := by
   · refine Or.inr ?_
     intro k hk' hkk hko
     exact hk ⟨k, hk', hkk, hko⟩
-
-theorem hold_then_serveQ_order : Spec.hold_then_serveQ_order := by
-  intro out now s js e he hjs rows hnd hrows live rout rout' s'
-  have hI := orderInv_perm (fixedLoad_perm rows) (session_orderInv out now s js e he hjs rows hrows)
-  have hnd' : ((fixedLoad rows).map (·.job.key)).Nodup :=
-    ((fixedLoad_perm rows).map _).nodup_iff.mpr hnd
-  rw [(serveQ_log live rout rout' s' _).2]
-  exact (replayP_preserves stepQ live rout rout' s' _ _ hnd' (fixedLoad_sorted rows) hI).1
 
 theorem replay_dead_letter_two_restarts : Spec.replay_dead_letter_two_restarts := by
   intro bad good hne

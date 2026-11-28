@@ -84,9 +84,6 @@ example :
       (lookup (settleDeferred .durable 1 [j1.key] c.1) j1.key).map (·.answer) = some .intentRecorded := by
   decide
 
-/-- `drop_settles_nothing`: the `Drop` path leaves a pending receipt pending. -/
-example : (lookup (abortAllSync (admitStore [j1])) j1.key).map (·.answer) = some .pending := by decide
-
 /-- `crash_never_reapplies` (before #295): the process dies after flushing
 `j1`'s commit; the next replay applies only `j2`. -/
 example :
@@ -295,11 +292,11 @@ example :
     let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩, ⟨j3, none⟩]
     let rout : Job → RR := fun j => if j.rid = 2 then .run (.err .inputRefusal) else .run .ok
     let old := replay true rout ints
-    let r := replayWith stepInput true rout ints
+    let r := loopWith stepInput rout ⟨0, 0⟩ (pendingOf ints)
     old.applied = [j1] ∧ old.block = some .other ∧
       replay true rout (applyLog ints old.log) = { ROut.empty with block := some .other } ∧
       r.applied = [j1, j3] ∧ r.failed = [j2] ∧ r.block = none ∧
-      replayWith stepInput true rout (applyLog ints r.log) = ROut.empty := by
+      loopWith stepInput rout ⟨0, 0⟩ (pendingOf (applyLog ints r.log)) = ROut.empty := by
   decide
 
 /-- The fixed replay still stops on a store error that is not an input
@@ -307,8 +304,8 @@ refusal (the scenario of `store_error_blocks_backlog`). -/
 example :
     let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩]
     let rout : Job → RR := fun j => if j.rid = 1 then .run (.err .store) else .run .ok
-    replayWith stepInput true rout ints = replay true rout ints ∧
-      (replayWith stepInput true rout ints).block = some .other := by
+    loopWith stepInput rout ⟨0, 0⟩ (pendingOf ints) = replay true rout ints ∧
+      (loopWith stepInput rout ⟨0, 0⟩ (pendingOf ints)).block = some .other := by
   decide
 
 /-! ### Finding 5: an intent with an unparseable receipt id is never settled
@@ -395,33 +392,6 @@ example :
     let rout : Job → RR := fun j => if j.rid = 2 then .run (.err .inputRefusal) else .run .ok
     let r := replayD stepFixed true rout ints
     r.applied = [j1, j3] ∧ r.failed = [j2] ∧ r.block = none := by
-  decide
-
-/-! ### The in-session hold on the issue's scenario -/
-
-/-- `outage_then_replay_reorders` fixed. `j1` meets an outage; when `j2`
-arrives the embedder is still down, so `j1` is retried, fails again, and
-`j2` is held behind it, unrun. Both receipts say `pending_replay`; agent 1's
-`k1` applies meanwhile. The next serve applies `j1`, then `j2`. -/
-example :
-    let out : Nat → Job → RunResult := fun _ j =>
-      if j.agent = 0 then .err .unavailable else .ok
-    let st := workH out 0 0 (HState.init (admitStore [j1, j2, k1])) [j1, j2, k1]
-    let rows : List Intent := [⟨j1, none⟩, ⟨j2, none⟩, ⟨k1, some .applied⟩]
-    st.applied = [k1] ∧ st.held = [j1, j2] ∧
-      [j1.key, j2.key, k1.key].map (fun r => (lookup st.store r).map (·.answer)) =
-        [some .pendingReplay, some .pendingReplay, some .applied] ∧
-      (replayD stepFixed true okAll (fixedLoad rows)).applied = [j1, j2] := by
-  decide
-
-/-- The embedder is back when `j2` arrives: the held `j1` applies first, then
-`j2`, in this serve. -/
-example :
-    let out : Nat → Job → RunResult := fun t _ => if t = 0 then .err .unavailable else .ok
-    let st := workH out 0 0 (HState.init (admitStore [j1, j2])) [j1, j2]
-    st.applied = [j1, j2] ∧ st.held = [] ∧
-      [j1.key, j2.key].map (fun r => (lookup st.store r).map (·.answer)) =
-        [some .applied, some .applied] := by
   decide
 
 /-! ### The retry pass, quarantine and the block reason -/
