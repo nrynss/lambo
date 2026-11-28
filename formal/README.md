@@ -365,7 +365,7 @@ may map to one new one), and then the new one must have the old one's
 statement. A theorem may be missing only when `--deletions FILE` lists it
 (`formal/audit/deleted-theorems.tsv`: name, reason, and the kept theorem
 that states the same thing or more). Both files keep every move and deletion,
-so against a later base a row made before it is counted, not compared. A
+so against a later base a row made before it is counted, not compared (a move's NEW must then be declared at the base, or the row could add it unchecked). A
 declaration that went private or public is listed in `--renames` under its
 own name (`Drain.kP`, made public in #350). The constants Lean generates (`foo.match_1`, `foo._proof_1`,
 `_auxLemma.N`) are compared by what they are, not by name, since their names

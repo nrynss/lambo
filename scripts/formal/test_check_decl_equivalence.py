@@ -228,6 +228,16 @@ class Equivalence(unittest.TestCase):
         code, out = self.run_check(BASE, BASE + [decl("Lambo.Old.helper")], listed)
         self.assertEqual(code, 1)
 
+    def test_a_move_before_the_base_needs_its_new_at_the_base(self):
+        # A row declared on neither side would otherwise pass as a move made
+        # before the base, and let its NEW be added at HEAD unchecked.
+        sneak = decl("Lambo.A.sneak")
+        code, out = self.run_check(BASE, BASE + [sneak], "Lambo.Ghost.x\tLambo.A.sneak\n")
+        self.assertEqual(code, 1)
+        self.assertIn("Lambo.Ghost.x: listed as moved before the base, but Lambo.A.sneak is not declared "
+                      "at the base", out)
+        self.assertIn("Lambo.A.sneak: theorem added at HEAD", out)
+
     def test_listed_move_must_keep_the_statement(self):
         lib = decl("Lambo.Lib.List.helper", type_="True", module="LamboProofs.Lib.List")
         head = [d for d in BASE if d["name"] != "Lambo.A.helper"] + [lib]

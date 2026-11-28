@@ -21,8 +21,9 @@ not the source text), and compares the two by fully qualified name:
   NEW must exist at HEAD with OLD's kind and type, and several OLD names may
   map to one NEW (duplicates merged). Names in FILE rewrite references in the
   compared bodies too. FILE keeps every move, so an OLD declared neither at
-  the base nor at HEAD, with its NEW declared at HEAD, was moved before the
-  base and is not compared. A line whose OLD and NEW are the same name lists a
+  the base nor at HEAD, with its NEW declared at both, was moved before the
+  base and is not compared; with its NEW declared at HEAD only, it is an
+  error, since it would let NEW be added unchecked. A line whose OLD and NEW are the same name lists a
   declaration that went private or public, which otherwise fails (below);
 * a theorem may be missing at HEAD only when `--deletions FILE` lists it,
   one `NAME<TAB>REASON<TAB>KEPT` per line (a line starting with `#` is a
@@ -383,7 +384,9 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
     deletions = deletions or {}
     errors, notes = [], []
     restated = [] if restated is None else restated
-    targets = set(renames.values())
+    # Only a move made in this diff may add its NEW; a move made before the
+    # base has its NEW declared there already.
+    targets = {new for old, new in renames.items() if old in base}
     for name, (reason, kept) in sorted(deletions.items()):
         b = base.get(name)
         if b is None and name in head:
@@ -452,6 +455,8 @@ def compare(bd, hd, renames, deletions=None, spec_form=False, restated=None):
     for old, new in renames.items():
         if old not in base and (old in head or new not in head):
             errors.append(f"{old}: listed as moved, but not declared at the base")
+        elif old not in base and new not in base:
+            errors.append(f"{old}: listed as moved before the base, but {new} is not declared at the base")
         # Otherwise, gone before the base with NEW in its place: FILE keeps
         # every move, so a later base has some already made.
     for name, h in sorted(head.items()):
