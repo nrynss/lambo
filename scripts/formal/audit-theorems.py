@@ -117,6 +117,14 @@ def spec_name(name):
     return ".".join(parts[:2] + ["Spec"] + parts[2:]) if len(parts) > 2 else None
 
 
+def statement_shape(d):
+    """What a theorem states, by shape: for one in Spec form its proposition's
+    body (`stmt_shape`), since its type names only its own proposition, so two
+    theorems proving one statement through two `Spec` names would not match;
+    its type's `shape` otherwise."""
+    return d["stmt_shape"] if d.get("spec") and d.get("stmt_shape") else d["shape"]
+
+
 def is_spec_module(module):
     """Whether a module is a `Spec` file (`LamboProofs.Drain.Spec.Base`,
     `LamboProofs.Score.Spec`)."""
@@ -672,7 +680,7 @@ def main(argv=None):
         groups = defaultdict(list)
         for n, d in m.user.items():
             if d["kind"] == "theorem":
-                groups[d["shape"]].append(n)
+                groups[statement_shape(d)].append(n)
         dups = [v for v in groups.values() if len(v) > 1]
         for v in sorted(dups):
             print("  ".join(sorted(v)))
@@ -696,7 +704,7 @@ def main(argv=None):
 
     shapes = defaultdict(list)
     for n, d in m.theorems.items():
-        shapes[d["shape"]].append(n)
+        shapes[statement_shape(d)].append(n)
     per_file = defaultdict(list)
     counts = Counter()
     for n, d in m.theorems.items():
@@ -709,7 +717,7 @@ def main(argv=None):
             continue
         p = module_path(repo, d["module"]).resolve()
         src = m.text[p]
-        twins = sorted(x for x in shapes[d["shape"]] if x != n and any(refs[k].get(x) for k in SIGNALS))
+        twins = sorted(x for x in shapes[statement_shape(d)] if x != n and any(refs[k].get(x) for k in SIGNALS))
         cls, why = classify(m, n, d, src.split("\n"), header_of(src), readme, changelog, doc_mentions, twins,
                             referenced=lambda x: any(refs[k].get(x) for k in SIGNALS), review=reviewed.get(n))
         per_file[rel].append((d["line"], local_name(n), cls, why))

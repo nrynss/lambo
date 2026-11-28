@@ -388,6 +388,24 @@ class SpecForm(unittest.TestCase):
         # A theorem in Spec form needs no proof to use it.
         self.assertNotIn("g_id is a lemma", out)
 
+    def test_theorems_proving_one_statement_through_two_propositions_are_duplicates(self):
+        # Each type names its own proposition, so the two `shape`s differ;
+        # what they state is the propositions' bodies (`stmt_shape`), which
+        # match each other and a theorem stating the same thing outright.
+        decls = [dict(d, stmt_shape="Eq (g 0) 0") if d["name"] in ("Lambo.L.g_id", "Lambo.L.listed") else d
+                 for d in LDECLS] + [ldecl("plain", 7, "Eq (g 0) 0", "LamboProofs.L.Proofs")]
+        self.write_dump(decls)
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()) as out:
+            code = at.main(["--repo", str(self.root), "--dump", str(self.dump), "--duplicates"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue().split(), ["Lambo.L.g_id", "Lambo.L.listed", "Lambo.L.plain"])
+        report = self.root / "report.md"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(at.main(["--repo", str(self.root), "--dump", str(self.dump), "--out", str(report)]), 0)
+        text = report.read_text(encoding="utf-8")
+        self.assertIn("## Statements proved twice", text)
+        self.assertIn("`L.g_id`", text.split("## Statements proved twice")[1])
+
     def test_a_proposition_declared_in_a_proofs_file_fails(self):
         self.write_dump(LDECLS + [ldecl("Spec.stray", 9, "Prop", "LamboProofs.L.Proofs", kind="def")])
         code, out = self.check()
