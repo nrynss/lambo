@@ -372,6 +372,28 @@ class SpecForm(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("L/Spec.lean:19: stray is a theorem in a Spec file", out)
 
+    def test_a_proofs_lemma_no_proof_uses_fails_even_with_a_doc_comment(self):
+        proofs = PROOFS.replace("end Lambo.L", "/-- One is one. -/\ntheorem helper : g 1 = 1 := rfl\n\nend Lambo.L")
+        (self.root / "formal" / "LamboProofs" / "L" / "Proofs.lean").write_text(proofs, encoding="utf-8")
+        helper = ldecl("helper", 8, "Eq (g 1) 1", "LamboProofs.L.Proofs", span=[7, 8])
+        self.write_dump(LDECLS + [helper])
+        code, out = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("L/Proofs.lean:8: helper is a lemma of a Proofs file that no proof uses", out)
+        # A proof that uses it settles it.
+        decls = [dict(d, uses=["Lambo.L.helper"]) if d["name"] == "Lambo.L.g_id" else d for d in LDECLS]
+        self.write_dump(decls + [helper])
+        code, out = self.check()
+        self.assertNotIn("helper is a lemma", out)
+        # A theorem in Spec form needs no proof to use it.
+        self.assertNotIn("g_id is a lemma", out)
+
+    def test_a_proposition_declared_in_a_proofs_file_fails(self):
+        self.write_dump(LDECLS + [ldecl("Spec.stray", 9, "Prop", "LamboProofs.L.Proofs", kind="def")])
+        code, out = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("L/Proofs.lean:9: Spec.stray is a Spec proposition declared in a Proofs file", out)
+
 
 if __name__ == "__main__":
     unittest.main()

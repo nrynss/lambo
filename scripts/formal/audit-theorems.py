@@ -70,7 +70,11 @@ file is stale (a kept theorem no longer declared, a `deleted` one still
 declared or missing from `deleted-theorems.tsv`); or when the Spec form is
 broken: a `Spec` proposition that the theorem of its name does not prove (a
 result stated and not proved), a theorem stated as another name's
-proposition, or a theorem declared in a `Spec` file. CI runs it.
+proposition, a theorem declared in a `Spec` file, a `Spec` proposition
+declared in a `Proofs` file, or a lemma of a `Proofs` file that no proof
+uses (formal/README.md's rule: a `Spec` proposition exists only for a
+guarantee about the Rust, and anything else a proof does not use is
+deleted). CI runs it.
 
 `--duplicates` lists theorems that state the same thing (the same `shape`:
 binders named by depth, universe parameters by position) in more than one
@@ -117,6 +121,12 @@ def is_spec_module(module):
     """Whether a module is a `Spec` file (`LamboProofs.Drain.Spec.Base`,
     `LamboProofs.Score.Spec`)."""
     return "Spec" in module.split(".")[1:]
+
+
+def is_proofs_module(module):
+    """Whether a module is a `Proofs` file (`LamboProofs.Drain.Proofs.Base`,
+    `LamboProofs.Score.Proofs`)."""
+    return "Proofs" in module.split(".")[1:]
 
 
 def build_dump(repo, out):
@@ -592,12 +602,21 @@ def check(m, reviewed, deleted):
         if is_spec_module(d["module"]):
             form.append(f"{where}: {local_name(n)} is a theorem in a Spec file: a Spec file states, "
                         f"its Proofs file proves")
+        if is_proofs_module(d["module"]) and not d.get("spec") and n not in used:
+            form.append(f"{where}: {local_name(n)} is a lemma of a Proofs file that no proof uses: state it "
+                        f"in Spec form, if it is a guarantee about the Rust, or delete it")
         if d.get("spec"):
             if d["spec"] != spec_name(n):
                 form.append(f"{where}: {local_name(n)} is stated as {local_name(d['spec'])}, not as its own "
                             f"proposition {local_name(spec_name(n))}")
             else:
                 proved.add(d["spec"])
+    for n in sorted(m.spec_props):
+        d = m.user[n]
+        if is_proofs_module(d["module"]):
+            form.append(f"{module_path(m.repo, d['module']).relative_to(m.repo).as_posix()}:{d['line']}: "
+                        f"{local_name(n)} is a Spec proposition declared in a Proofs file: it belongs in "
+                        f"its Spec file")
     for n in sorted(m.spec_props - proved):
         d = m.user[n]
         form.append(f"{module_path(m.repo, d['module']).relative_to(m.repo).as_posix()}:{d['line']}: "
