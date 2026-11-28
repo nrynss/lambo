@@ -894,7 +894,7 @@ impl Embedder for SwitchEmbedder {
 /// set and the close answered `intent_durable`.
 ///
 /// Mirrors `Drain.keptAtConsume_vouches_after_panic` (the bug) and
-/// `Drain.settlePrune_never_vouches_dropped` (the fix).
+/// `Drain.settlePrune_exact` (the fix).
 #[tokio::test(start_paused = true)]
 async fn a_worker_that_panics_after_its_commit_does_not_get_intent_durable() {
     let inner = Arc::new(MemoryStore::new());

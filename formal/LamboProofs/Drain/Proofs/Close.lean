@@ -1336,14 +1336,6 @@ theorem runP_inv : ∀ (evs : List DEv) (s : DS), PInv s → DOk s evs → PInv 
   | [], _, hI, _ => hI
   | e :: es, s, hI, ⟨he, hr⟩ => runP_inv es (stepP s e) (stepP_inv s e hI he) hr
 
-theorem settlePrune_never_vouches_dropped : Spec.settlePrune_never_vouches_dropped := by
-  intro evs h k hd
-  have hI := runP_inv evs DS.init pinv_init h
-  unfold vouches
-  by_cases hs : k ∈ (evs.foldl stepP DS.init).settled
-  · simp [hs]
-  · simp [hI.sound k hd hs]
-
 theorem settlePrune_exact : Spec.settlePrune_exact := by
   intro evs h k hs
   have hI := runP_inv evs DS.init pinv_init h

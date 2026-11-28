@@ -566,7 +566,6 @@ open Lambo
 #print axioms Lambo.Drain.closeD_retryD
 #print axioms Lambo.Drain.keptAtConsume_vouches_after_panic
 #print axioms Lambo.Drain.runP_inv
-#print axioms Lambo.Drain.settlePrune_never_vouches_dropped
 #print axioms Lambo.Drain.settlePrune_exact
 #print axioms Lambo.Drain.settlePrune_unsettled_bounded
 #print axioms Lambo.Drain.settlePrune_settled_forgotten

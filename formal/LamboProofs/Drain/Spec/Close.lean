@@ -1,21 +1,18 @@
 /-
 # Write-queue drain: the close, a crash, and the lookup-timeout streak
 
-What `close()` answers for each admitted write after any trace of
-`Worker.lean`'s worker, given the puts a dead letter dropped (`closeD`, which
-with none is `closeW`); what the serve after a crash applies;
-the dead-lettered set's bookkeeping with worker panics (`stepP`); and how the
+What `close()` answers for each admitted write after any trace of `Worker.lean`'s worker, given
+the puts a dead letter dropped (`closeD`, which with none is `closeW`); what the serve after a
+crash applies; the dead-lettered set's bookkeeping with worker panics (`stepP`); and how the
 lookup-timeout streak counts (`streakNew`).
 
-Rust: `quiesce`, `abort_workers`, `settle_deferred` (`src/writeq/drain.rs`);
-`Memory::close`, `Memory::finish_close`, `Memory::close_fenced`
-(`src/memory/shutdown.rs`); `consume_write_intent`
-(`src/graph/graph/mutation_log.rs`); `Graph::note_dead_lettered_intents`,
+Rust: `quiesce`, `abort_workers`, `settle_deferred` (`src/writeq/drain.rs`); `Memory::close`,
+`Memory::finish_close`, `Memory::close_fenced` (`src/memory/shutdown.rs`);
+`consume_write_intent` (`src/graph/graph/mutation_log.rs`); `Graph::note_dead_lettered_intents`,
 `intent_dead_lettered`, `mark_consumed_unsettled`, `settled_write`
-(`src/graph/graph/unflushed.rs`); `FlushLoop::drain_and_flush`
-(`src/store/flush.rs`); `WriteCtx::run`, `WorkerCommit`, `spawn_worker`
-(`src/writeq/execution.rs`); `Lanes` (`src/writeq/admission.rs`);
-`settle_one` (`src/writeq/receipts.rs`).
+(`src/graph/graph/unflushed.rs`); `FlushLoop::drain_and_flush` (`src/store/flush.rs`);
+`WriteCtx::run`, `WorkerCommit`, `spawn_worker` (`src/writeq/execution.rs`); `Lanes`
+(`src/writeq/admission.rs`); `settle_one` (`src/writeq/receipts.rs`).
 
 Results:
 * `shutdown_no_silent_lossD`: after a close every admitted write is applied, failed,
@@ -25,32 +22,23 @@ Results:
 * `heldErrW_holds`, `lookupTimeout_settlesW`, `lookupTimeout_run_holdsW`, `heldNew_iff`,
   `timeout_after_commit_settlesW`: a lookup timeout settles `failed` unless it is a first
   attempt at least the limit-th since the last commit, which holds.
-* `serveR_applied_pending`, `crash_never_reappliesW`: the serve applies only unconsumed
-  rows, so never a write that survived a crash.
+* `serveR_applied_pending`, `crash_never_reappliesW`: the serve applies only unconsumed rows.
 * `closeD_agrees`, `closeD_durable_iff`, `closeD_vouches_only_committed`,
-  `closeD_never_vouches_dropped`, `closeD_retryD`: the close vouches exactly for
-  committed puts, retried or not.
-* `settlePrune_never_vouches_dropped`, `settlePrune_exact`, `settlePrune_unsettled_bounded`,
-  `settlePrune_settled_forgotten`: the dead-lettered set never lets the close vouch for a
-  dropped put, panics included.
+  `closeD_never_vouches_dropped`, `closeD_retryD`: the close vouches exactly for committed puts.
+* `settlePrune_exact`, `settlePrune_unsettled_bounded`, `settlePrune_settled_forgotten`: the
+  dead-lettered set holds exactly the dropped puts of the writes not settled.
 
-Boundary: each step is atomic. Which batches the store committed is an input
-(`Landed`): the flush loop is `Flush/`, and the verdict also rests on the
-flush task's join (`Flush.close_after_flush_panic_cannot_vouch`); the lease
-fence at the flush is not modelled, and a degraded or fenced session's drops
-are not in the history (the Rust passes `Incomplete` for both). The model gives every job of `all` a
-`pending` receipt and a put, one admission refuses included, where the Rust
-answers `dropped` with no intent; the results speak only of admitted writes.
-`stepW` has no seal, so a trace standing for the drain may retry a held write
-after `quiesce` seals the lanes, which the Rust cannot: the model has more
-traces than the Rust, never fewer. The flush outcome is a parameter, so a
-fenced session's `closeW .durable` answers `intent_durable`, which the Rust's
-`close_fenced` (always `Incomplete`) never does: that a fenced close answers
-`close_unflushed` is code-backed, not proved. `stepW` has no panic; a worker
-that panics between its commit and its settle is the `DEv` model's.
-`Memory::close` is `closeD`; `closeW` is it only when no put was
-dead-lettered (`closeD_agrees`), so the results over `closeW` speak of such
-a session.
+Boundary: as in `Base.lean` and `Worker.lean`. Which batches the store committed is an input
+(`Landed`): the flush loop is `Flush/`, the verdict also rests on the flush task's join
+(`Flush.close_after_flush_panic_cannot_vouch`), and a degraded or fenced session's drops are not
+in the history (the Rust passes `Incomplete` for both). Every job of `all` gets a `pending`
+receipt and a put, where the Rust answers a refused admission `dropped` with no intent, so the
+results speak only of admitted writes. `stepW` has no seal, so a trace standing for the drain
+may retry a held write after `quiesce` seals the lanes: more traces than the Rust, never fewer.
+The flush outcome is a parameter, so that a fenced close (`close_fenced`, always `Incomplete`)
+answers `close_unflushed` is code-backed, not proved. `Memory::close` is `closeD`; `closeW` is
+it when no put was dead-lettered (`closeD_agrees`), so the results over `closeW` speak of such a
+session.
 -/
 
 import LamboProofs.Drain.Spec.Worker
@@ -394,10 +382,6 @@ def stepP (s : DS) : DEv → DS
     { s with dropped := ks ++ s.dropped,
              dl := ks.filter (fun k => k ∉ s.consumed ∨ k ∈ s.cu) ++ s.dl }
 
-/-- What a close whose final flush completed answers a set-aside receipt `k`
-(one not settled), given the set. -/
-def vouches (s : DS) (k : Key) : Bool := decide (k ∉ s.settled) && decide (k ∉ s.dl)
-
 /-- A worker never consumes a write it already settled. -/
 def DEv.ok (s : DS) : DEv → Prop
   | .consume k => k ∉ s.settled
@@ -408,17 +392,9 @@ def DOk : DS → List DEv → Prop
   | _, [] => True
   | s, e :: es => e.ok s ∧ DOk (stepP s e) es
 
-/-- **The set never lets the close vouch for a dropped put**, panicked workers
-included. Rust test
+/-- **For a write not settled, the set holds it exactly when its put was
+dropped**, panicked workers included. Rust test
 `a_worker_that_panics_after_its_commit_does_not_get_intent_durable`. -/
-abbrev Spec.settlePrune_never_vouches_dropped : Prop :=
-  ∀ (evs : List DEv),
-    DOk DS.init evs →
-    ∀ (k : Key),
-    k ∈ (evs.foldl stepP DS.init).dropped →
-    vouches (evs.foldl stepP DS.init) k = false
-
-/-- For a write not settled, the set holds it exactly when its put was dropped. -/
 abbrev Spec.settlePrune_exact : Prop :=
   ∀ (evs : List DEv),
     DOk DS.init evs →

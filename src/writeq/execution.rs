@@ -165,7 +165,7 @@ impl ConsumeStamp {
 /// settles (`Graph::settled_write`, in the worker's settle), not at its
 /// consume, and the flush's note skips a put only when its write is consumed
 /// and no longer in the record, that is, settled (Lean:
-/// `Drain.settlePrune_never_vouches_dropped`; pruning at the consume,
+/// `Drain.settlePrune_exact`; pruning at the consume,
 /// `Drain.keptAtConsume_vouches_after_panic`). The replay passes no
 /// `WorkerCommit`: its writes are earlier processes', whose puts are not in
 /// this process's log.

@@ -126,8 +126,7 @@ first bound, forgetting a receipt at its write's consume
 found by re-review to vouch for a dropped put when a lane worker panics
 after its commit and before its settle
 (`keptAtConsume_vouches_after_panic`); the set now forgets a receipt at
-its write's settle (`settlePrune_never_vouches_dropped`,
-`settlePrune_exact`), and no claim row depended on the consume-time rule.
+its write's settle (`settlePrune_exact`), and no claim row depended on the consume-time rule.
 
 **Drain model split (2026-11-23).** `Drain.lean` has since been split by
 subsystem into `formal/LamboProofs/Drain/`: `Base.lean`, `Replay.lean`,

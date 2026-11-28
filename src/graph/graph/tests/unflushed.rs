@@ -161,8 +161,7 @@ fn worker_consume(g: &mut Graph, receipt: &str) {
 /// stays in the set; its settle forgets it, so the set does not grow for the
 /// life of the process.
 ///
-/// Mirrors `Drain.settlePrune_never_vouches_dropped`,
-/// `Drain.settlePrune_settled_forgotten`.
+/// Mirrors `Drain.settlePrune_exact`, `Drain.settlePrune_settled_forgotten`.
 #[test]
 fn a_settled_write_leaves_the_dead_lettered_intents() {
     let (mut g, iid, _cid) = small_graph();
@@ -195,7 +194,7 @@ fn a_settled_write_leaves_the_dead_lettered_intents() {
 /// panicked after the commit) is noted, consume in the batch or in the log.
 ///
 /// Mirrors `Drain.keptAtConsume_vouches_after_panic` (both cases) and
-/// `Drain.settlePrune_never_vouches_dropped`.
+/// `Drain.settlePrune_exact`.
 #[test]
 fn only_a_put_settled_before_the_dead_letter_is_skipped() {
     let (mut g, iid, _cid) = small_graph();

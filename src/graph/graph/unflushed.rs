@@ -60,10 +60,10 @@
 //!   that is, settled.
 //!
 //! A dropped put whose write is not settled therefore stays in the set,
-//! panics included (Lean: `Drain.settlePrune_never_vouches_dropped`,
-//! `Drain.settlePrune_exact`). What stays is one receipt per dead-lettered
-//! write held, queued or running, or whose worker panicked, or refused after
-//! a lost lease (whose close answers `close_unflushed` anyway); the record
+//! panics included (Lean: `Drain.settlePrune_exact`). What stays is one
+//! receipt per dead-lettered write held, queued or running, or whose worker
+//! panicked, or refused after a lost lease (whose close answers
+//! `close_unflushed` anyway); the record
 //! holds one per worker between its commit and its settle, plus one per
 //! panicked worker (`Drain.settlePrune_unsettled_bounded`).
 

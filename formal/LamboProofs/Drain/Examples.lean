@@ -637,6 +637,10 @@ def stepK (s : DS) : DEv → DS
 
 def kP : Key := (0, 1000, 1)
 
+/-- What a close whose final flush completed answers a set-aside receipt `k`
+(one not settled), given the set. -/
+def vouches (s : DS) (k : Key) : Bool := decide (k ∉ s.settled) && decide (k ∉ s.dl)
+
 /-- **#345 review: pruning at the consume vouches for a dropped put after a
 worker panic.** The write's put is dead-lettered while it is queued; it
 commits (its consume is appended, which forgets it); its worker panics

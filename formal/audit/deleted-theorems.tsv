@@ -22,7 +22,8 @@
 # used by a proof: rfl unfoldings of a definition's arms, the model compared
 # with itself, statements about a loop, worker or rule the Rust no longer
 # runs (the first in-session hold model `workH`, the replay without its retry
-# pass, a superseded rule), and the lemmas and definitions only they used
+# pass, a superseded rule), a result a kept one states (third column), and
+# the lemmas and definitions only they used
 # (a definition is listed only when nothing left mentions it); their
 # Audit.lean lines, README, claims ledger, docs anchor, Rust comment and
 # header mentions went with them, and the reason names the current
@@ -175,3 +176,4 @@ Lambo.Drain.setAside_untouched	#350 Spec review: a lemma only closeD_keptDropped
 Lambo.Drain.consumedIn_false	#350 Spec review: a lemma only closeD_keptDropped used	-
 Lambo.Drain.keptDropped	#350 Spec review: a definition only closeD_keptDropped used	-
 Lambo.Drain.consumedIn	#350 Spec review: a definition only closeD_keptDropped and keptDropped used	-
+Lambo.Drain.settlePrune_never_vouches_dropped	#350 Spec review: settlePrune_exact states it: for a write not settled the set holds its put exactly when it was dropped, so vouches (not settled and not in the set) is false for every dropped put; vouches moved to Drain/Examples.lean, the only place left that uses it	Lambo.Drain.settlePrune_exact
