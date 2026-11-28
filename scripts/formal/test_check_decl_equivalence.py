@@ -457,6 +457,28 @@ class SpecForm(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("Lambo.A.f (body changed)", out)
 
+    def test_every_definition_merged_into_a_reached_one_is_compared(self):
+        # `p` and `q` both move to `r`: `t : p ≤ q` reads as `r ≤ r`, so each
+        # of `p` and `q` must equal `r`, not only the first row's.
+        def nat(name, value):
+            return decl(name, kind="def", type_="Nat", value=value)
+        stmt = "LE.le.{0} Nat instLENat Lambo.A.p Lambo.A.q"
+        rows = "Lambo.A.p\tLambo.Lib.r\nLambo.A.q\tLambo.Lib.r\n"
+        head = in_spec_form(BASE + [nat("Lambo.Lib.r", "0")],
+                            stmt="LE.le.{0} Nat instLENat Lambo.Lib.r Lambo.Lib.r")
+        base = [dict(d, type=stmt) if d["name"] == "Lambo.A.t" else d for d in BASE]
+        for flag in ("--only-form-changes", "--spec-form"):
+            with self.subTest(flag=flag):
+                code, out = self.run_check(base + [nat("Lambo.A.p", "0"), nat("Lambo.A.q", "1")], head, rows,
+                                           flags=[flag])
+                self.assertEqual(code, 1, out)
+                self.assertIn("Lambo.A.q" + (" -> Lambo.Lib.r (body changed)" if flag == "--only-form-changes"
+                                             else ": definition body changed"), out)
+                # Both equal to `r`, the merge passes.
+                code, out = self.run_check(base + [nat("Lambo.A.p", "0"), nat("Lambo.A.q", "0")], head, rows,
+                                           flags=[flag])
+                self.assertEqual(code, 0, out)
+
     def test_each_sides_proposition_contributes_its_own_uses(self):
         # The printed statement names no definition (a generated constant is
         # normalised to a hash), but the proposition's body uses `g`. Whichever

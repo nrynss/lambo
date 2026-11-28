@@ -305,8 +305,11 @@ def reached_definitions(dump, roots):
 
 
 def statement_roots(dump, stmt, extra=()):
-    """The constants of `dump` that a normalised statement names, and `extra`."""
+    """The constants of `dump` that a normalised statement names, and `extra`.
+    A move's NEW in the statement stands for every OLD that `dump` renames to
+    it."""
     roots = {tok.rstrip(".") for tok in NAME_TOKEN.findall(stmt or "")}
+    roots |= {old for old, new in dump.renames.items() if new in roots}
     return {n for n in roots | set(extra) if n in dump.all}
 
 
@@ -324,23 +327,34 @@ def changed_definitions(bd, hd, bstmt, hstmt, b, h):
     hprop = hd.all.get(h.get("spec") or "")
     base = reached_definitions(bd, statement_roots(bd, bstmt, (bprop or {}).get("uses") or ()))
     head = reached_definitions(hd, statement_roots(hd, hstmt, (hprop or {}).get("uses") or ()))
+    # (base name, HEAD name) pairs: each reached base constant with where it
+    # went (`bd.renames` holds only the moves made in this diff), then each
+    # reached HEAD constant no reached base one went to, with every base
+    # constant that went there (None when there is none). Several OLDs merged
+    # into one NEW are each compared with it.
+    pairs = {(x, bd.renames.get(x, x)) for x in base}
+    went = {n for _, n in pairs}
+    for n in head - went:
+        olds = [x for x, y in bd.renames.items() if y == n]
+        if n in bd.all and n not in bd.renames:
+            olds.append(n)
+        pairs |= {(x, n) for x in olds or [None]}
     out = []
-    for n in sorted({bd.renames.get(x, x) for x in base} | head):
-        # `bd.renames` holds only the moves made in this diff.
-        old = next((x for x, y in bd.renames.items() if y == n), n)
-        b, a = bd.all.get(old), hd.all.get(n)
+    for old, n in sorted(pairs, key=lambda p: (p[1], p[0] or "")):
+        b, a = bd.all.get(old) if old else None, hd.all.get(n)
         if (b or a) and not (b or a)["user"]:
             # A generated constant (a matcher, an equation lemma) is compared
             # through the user declaration it belongs to.
             continue
+        label = n if old in (None, n) else f"{old} -> {n}"
         if b is None or a is None:
-            out.append(f"{n} (declared at {'HEAD' if b is None else 'the base'} only)")
+            out.append(f"{label} (declared at {'HEAD' if b is None else 'the base'} only)")
         elif b["kind"] != a["kind"]:
-            out.append(f"{n} (kind changed)")
+            out.append(f"{label} (kind changed)")
         elif bd.norm(b["type"]) != hd.norm(a["type"]):
-            out.append(f"{n} (type changed)")
+            out.append(f"{label} (type changed)")
         elif bd.norm(b["value"]) != hd.norm(a["value"]):
-            out.append(f"{n} (body changed)")
+            out.append(f"{label} (body changed)")
     return out
 
 
