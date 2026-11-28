@@ -224,14 +224,6 @@ def OrdW (st : WS) : Prop :=
   ∀ b, ofAgent b (st.settled.map (·.1)) ++ ofAgent b st.running ++ ofAgent b st.held ++
       ofAgent b st.queue = ofAgent b st.admitted ∧ (ofAgent b st.running).length ≤ 1
 
-/-- One event of the lane worker (`spawn_worker`, or an admission) keeps
-`OrdW`: each agent's settled, running, held and queued writes stay, in that
-order, its admitted writes in admission order, with at most one running. -/
-abbrev Spec.stepW_ord : Prop :=
-  ∀ (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (ev : Ev),
-    OrdW st →
-    OrdW (stepW c sz now st ev)
-
 /-- Any sequence of worker events keeps `OrdW`, so an agent's writes are
 settled in admission order, held writes and retries included. -/
 abbrev Spec.runW_ord : Prop :=
@@ -244,14 +236,6 @@ abbrev Spec.runW_ord : Prop :=
 def CapsW (c : Caps) (sz : Job → Nat) (st : WS) : Prop :=
   (∀ b, (ofAgent b st.load).length ≤ c.lane) ∧ st.load.length ≤ c.total ∧
     (st.load.map sz).sum ≤ c.bytes
-
-/-- **The caps hold at every step**: queued, running and held writes, and
-their bytes, never exceed the bounds. A held write stays counted from its
-admission until it settles, through every retry, bytes included. -/
-abbrev Spec.stepW_caps : Prop :=
-  ∀ (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (ev : Ev),
-    CapsW c sz st →
-    CapsW c sz (stepW c sz now st ev)
 
 /-- The lane, queue and byte caps of `Lanes` hold over queued, running and
 held writes after any sequence of worker events, and a retry never reads them
@@ -303,21 +287,6 @@ abbrev Spec.fence_stops_applies : Prop :=
       (runW c sz now st evs).applied = st.applied ∧ (runW c sz now st evs).log = st.log
 
 /-! ### Order across the session and the next serve -/
-
-/-- **Per-agent order in session, with admission and retries.** The writes
-applied in session satisfy the order invariant against any rows whose owed
-writes of this process are still running, held or queued. -/
-abbrev Spec.sessionW_orderInv : Prop :=
-  ∀ (c : Caps) (sz : Job → Nat) (now : Int) (s : RStore) (evs : List Ev) (e : Nat),
-    (∀ j ∈ (runW c sz now (WS.init s) evs).admitted, j.epoch = e) →
-    (runW c sz now (WS.init s) evs).admitted.Pairwise
-      (fun a b => a.agent = b.agent → a.rid < b.rid) →
-    ∀ (rows : List Intent),
-    (∀ i ∈ rows, i.outcome = none → i.job.epoch = e →
-      i.job ∈ (runW c sz now (WS.init s) evs).running ∨
-      i.job ∈ (runW c sz now (WS.init s) evs).held ∨
-      i.job ∈ (runW c sz now (WS.init s) evs).queue) →
-    OrderInv rows (runW c sz now (WS.init s) evs).applied
 
 /-! ### The replay's block reason after a halt -/
 

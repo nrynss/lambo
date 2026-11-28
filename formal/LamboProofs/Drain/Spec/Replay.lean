@@ -112,23 +112,6 @@ def loopWith (step : Bool → RR → Streaks → Step × Streaks) (rout : Job �
     | (.skip, s') => loopWith step rout s' rest
     | (.stop b, _) => { ROut.empty with block := some b }
 
-/-- **The fixed replay settles every input refusal `failed`**: `Embed`,
-`ImageIdTaken`, `Reference`, a cycle refusal, and the graph-dependent
-refusals #294 names. -/
-abbrev Spec.stepInput_refusesInput : Prop :=
-  ∀ (img : Bool) (e : Err) (s : Streaks),
-    e.refusesInput = true →
-    (stepInput img (.run (.err e)) s).1 = .failed
-
-/-- **And still stops on everything else that is not transient**: a store
-error that can mean an inconsistent graph or store, `Config`, a lost lease,
-anything else. -/
-abbrev Spec.stepInput_sessionWide : Prop :=
-  ∀ (img : Bool) (e : Err) (s : Streaks),
-    e.refusesInput = false →
-    e.transient = false →
-    ∃ b, (stepInput img (.run (.err e)) s).1 = .stop b
-
 /-- **The fixed replay still stops on every other non-transient error**, the
 intent and every later one left unconsumed. -/
 abbrev Spec.fixed_sessionWide_stops : Prop :=
@@ -302,37 +285,6 @@ retry pass add more passes, so the argument is stated once as an invariant
 over the rows left owed and the writes applied so far, and each pass is shown
 to keep it. -/
 
-/-- The writes applied so far keep each agent's writes of one process in
-sequence order, and none is later in sequence than a write of its agent and
-process still owed in `rows`. -/
-def OrderInv (rows : List Intent) (applied : List Job) : Prop :=
-  applied.Pairwise (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) ∧
-  ∀ x ∈ applied, ∀ i ∈ rows, i.outcome = none → x.agent = i.job.agent →
-    x.epoch = i.job.epoch → x.rid ≤ i.job.rid
-
-/-- **One pass of the fixed loop keeps the invariant**, for any step, any
-streaks and any run results, over rows keyed by receipt id and loaded in
-per-process sequence order. -/
-abbrev Spec.loopD_preserves : Prop :=
-  ∀ (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR) (s : Streaks)
-    (rows : List Intent) (A : List Job),
-    (rows.map (·.job.key)).Nodup →
-    EpochSorted rows →
-    OrderInv rows A →
-    OrderInv (applyLog rows (loopD step rout s [] (pendingOf rows)).log)
-      (A ++ (loopD step rout s [] (pendingOf rows)).applied)
-
-/-- The same for a whole serve of the fixed replay (the liveness gate
-included). -/
-abbrev Spec.replayD_preserves : Prop :=
-  ∀ (step : Bool → RR → Streaks → Step × Streaks) (live : Bool) (rout : Job → RR)
-    (rows : List Intent) (A : List Job),
-    (rows.map (·.job.key)).Nodup →
-    EpochSorted rows →
-    OrderInv rows A →
-    OrderInv (applyLog rows (replayD step live rout rows).log)
-      (A ++ (replayD step live rout rows).applied)
-
 /-! ## The replay's retry pass, quarantine and block reason (#295)
 
 Three changes to the fixed replay, after review.
@@ -407,24 +359,6 @@ def serveQ (live : Bool) (rout rout' : Job → RR) (s' : Streaks) (intents : Lis
       block := some (if (skipsOf stepQ rout' s' [] left).contains (.run (.err .unavailable))
         then .embedder else .other) }
   else r
-
-/-- **The block reason is never null while writes are owed** after a serve
-that did not stop: `write_queue_replay_blocked` names why. -/
-abbrev Spec.serveQ_block : Prop :=
-  ∀ (live : Bool) (rout rout' : Job → RR) (s' : Streaks) (intents : List Intent),
-    pendingOf (applyLog intents (serveQ live rout rout' s' intents).log) ≠ [] →
-    (serveQ live rout rout' s' intents).block ≠ none
-
-/-- **A serve with the retry pass keeps the order invariant**: both passes
-are runs of the fixed loop over per-process-sorted rows. -/
-abbrev Spec.replayP_preserves : Prop :=
-  ∀ (step : Bool → RR → Streaks → Step × Streaks) (live : Bool) (rout rout' : Job → RR)
-    (s' : Streaks) (rows : List Intent) (A : List Job),
-    (rows.map (·.job.key)).Nodup →
-    EpochSorted rows →
-    OrderInv rows A →
-    OrderInv (applyLog rows (replayP step live rout rout' s' rows).log)
-      (A ++ (replayP step live rout rout' s' rows).applied)
 
 /-- **Progress from the retry pass.** If the first pass did not stop and the
 retry gets an answer for every write it runs (applied or refused: the

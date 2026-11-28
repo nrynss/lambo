@@ -177,8 +177,7 @@ impl ConsumeStamp {
 /// falls before both or after both. Reset later (the `Ok` arm, or the settle
 /// block before that), a timeout another lane met in between counted toward
 /// the old run (Lean: `Drain.streak_okArm_counts_across_commit`,
-/// `Drain.streak_old_counts_across_commit`; the fix,
-/// `Drain.streakNew_eq_runSince`).
+/// `Drain.streak_old_counts_across_commit`; the fix, `Drain.heldNew_iff`).
 ///
 /// Lock order: graph write, then lanes, as admission nests them
 /// (`WritePipeline::admit`); no path takes the lanes lock and then the

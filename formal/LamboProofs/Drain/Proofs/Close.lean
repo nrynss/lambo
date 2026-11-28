@@ -21,6 +21,29 @@ namespace Lambo.Drain
 
 open Lambo.Receipts (Answer Entry settle Lane)
 
+/-- No batch of the log consumes `k`. -/
+def Untouched (k : Key) (log : List Batch) : Prop := ∀ t, Mut.consume k t ∉ log.flatten
+
+/-- What every reachable state of the current workers keeps: each settled
+write's receipt holds its answer and its batch (or, refused after the fence,
+no consume at all); each queued or running write's receipt is unsettled and
+its intent untouched; each held write answers `pending_replay` with its
+intent untouched; and a write of `all` not admitted is still `pending` and
+untouched (`fresh`). That last clause covers alike a write not yet submitted
+and one admission refused: the model gives both a `pending` receipt and a put,
+where the Rust answers a refused write `dropped` and records no intent for it
+(the gap in the section header). -/
+structure InvW (all : List Job) (st : WS) : Prop where
+  settled : ∀ p ∈ st.settled, ansOf st.store p.1.key = some p.2 ∧
+    ((p.2 = .applied ∧ [Mut.write p.1.key, .consume p.1.key .applied] ∈ st.log) ∨
+     (p.2 = .failed ∧ [Mut.consume p.1.key .failed] ∈ st.log) ∨
+     (p.2 = .failed ∧ st.fenced = true ∧ Untouched p.1.key st.log))
+  live : ∀ j ∈ st.running ++ st.queue,
+    (∃ a, ansOf st.store j.key = some a ∧ a.isSettled = false) ∧ Untouched j.key st.log
+  held : ∀ j ∈ st.held, ansOf st.store j.key = some .pendingReplay ∧ Untouched j.key st.log
+  fresh : ∀ j ∈ all, j.key ∉ st.admitted.map (·.key) →
+    ansOf st.store j.key = some .pending ∧ Untouched j.key st.log
+
 /-! ## The close, crash and shutdown over the current worker (#295 on) -/
 
 /-- Every write the workers hold: settled, running, held, queued. -/
@@ -592,9 +615,12 @@ theorem runW_inv (c : Caps) (sz : Job → Nat) (now : Int) (all : List Job) :
       intro j hj; apply hall; simp only [runW]; rw [hl]; exact List.mem_append_left _ hj
     exact ih _ (stepW_ord c sz now st e hO) (stepW_inv c sz now st e hO hI hnd1 hall1) hnd hall
 
-theorem sessionW_inv : Spec.sessionW_inv := by
-  intro c sz now all evs hnd hall
-  exact runW_inv c sz now all evs _ (ordW_init _) (invW_init all) hnd hall
+/-- The current workers' reachable states keep `InvW`. -/
+theorem sessionW_inv (c : Caps) (sz : Job → Nat) (now : Int) (all : List Job) (evs : List Ev)
+    (hnd : ((runW c sz now (WS.init (admitStore all)) evs).admitted.map (·.key)).Nodup)
+    (hall : ∀ j ∈ (runW c sz now (WS.init (admitStore all)) evs).admitted, j ∈ all) :
+    InvW all (runW c sz now (WS.init (admitStore all)) evs) :=
+  runW_inv c sz now all evs _ (ordW_init _) (invW_init all) hnd hall
 
 /-! ### The close -/
 
@@ -646,8 +672,34 @@ theorem owedW_of {all : List Job} {st : WS} {j : Job} (hj : j ∈ all) (hu : Unt
   rw [List.flatten_append, List.foldl_append, ← intentsOf, intentsOf_admit]
   exact foldl_keeps_owed _ _ (List.mem_map.mpr ⟨j, hj, rfl⟩) hu
 
-theorem shutdown_no_silent_lossW : Spec.shutdown_no_silent_lossW := by
-  intro c sz now all evs st hst hnd hall flush now' j hj
+/-- **Shutdown accounting over the current worker.** After any session of the
+current workers (admission, holds, retries, the fence) and a `close()`, every
+admitted write is one of: applied (its write and consume in one batch);
+failed with its intent consumed `failed`; failed after the fence, never run,
+its intent left unconsumed (the session's current holder's to apply, if an
+earlier flush took it); `intent_durable` after a completed final flush, owed
+in the flushed log (its row is unconsumed, so the next serve's replay owes
+it), whether it was running, held or queued when the close began; or
+`close_unflushed` after an incomplete flush. None is left `pending` or
+`pending_replay`. `shutdown_exactly_oneW` adds that exactly one of these
+holds. "Applied" means in this process's graph, its batch in the log: the
+batch is durable only once a flush takes it, and one committed after the
+fence is refused at the flush (`Flush/Loop.lean`). The current counterpart of
+`shutdown_no_silent_loss`. -/
+theorem shutdown_no_silent_lossW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (now' : Int) (j : Job) (hj : j ∈ st.admitted) :
+    ((j, Answer.applied) ∈ st.settled ∧ ansOf (closeW flush now' st) j.key = some .applied ∧
+      [Mut.write j.key, .consume j.key .applied] ∈ st.log) ∨
+    ((j, Answer.failed) ∈ st.settled ∧ ansOf (closeW flush now' st) j.key = some .failed ∧
+      [Mut.consume j.key .failed] ∈ st.log) ∨
+    ((j, Answer.failed) ∈ st.settled ∧ st.fenced = true ∧
+      ansOf (closeW flush now' st) j.key = some .failed ∧ OwedW all st j) ∨
+    (j ∈ st.running ++ st.held ++ st.queue ∧ flush = .durable ∧
+      ansOf (closeW flush now' st) j.key = some .intentRecorded ∧ OwedW all st j) ∨
+    (j ∈ st.running ++ st.held ++ st.queue ∧ flush = .incomplete ∧
+      ansOf (closeW flush now' st) j.key = some .closeUnflushed) := by
   subst hst
   have hO := runW_ord c sz now evs _ (ordW_init (admitStore all))
   have hI := sessionW_inv c sz now all evs hnd hall
@@ -741,8 +793,18 @@ theorem lookupTimeout_run_holdsW : Spec.lookupTimeout_run_holdsW := by
   simp only [he]
   exact outage_holdsW hst hnd hall a j t hrun
 
-theorem closeW_retry_upgradesW : Spec.closeW_retry_upgradesW := by
-  intro c sz now all evs st hst hnd hall j hj now1 now2
+/-- **A retried close upgrades `close_unflushed`.** A write the close set aside
+(running, held or queued) answers `close_unflushed` after an incomplete flush;
+a retried close whose flush completes settles the same set-aside ids
+(`close_deferred`, kept after an incomplete flush) and answers it
+`intent_durable`. `retry_upgrades` is the same fact for one entry. -/
+theorem closeW_retry_upgradesW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (j : Job) (hj : j ∈ st.running ++ st.held ++ st.queue) (now1 now2 : Int) :
+    ansOf (closeW .incomplete now1 st) j.key = some .closeUnflushed ∧
+      ansOf (settleDeferred .durable now2 (deferredW st) (closeW .incomplete now1 st)) j.key =
+        some .intentRecorded := by
   subst hst
   have hI := sessionW_inv c sz now all evs hnd hall
   have hu : ∃ a, ansOf (runW c sz now (WS.init (admitStore all)) evs).store j.key = some a ∧
@@ -810,8 +872,16 @@ theorem stepW_log (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (ev : Ev) 
   | wake a => exact Or.inl rfl
   | fence => exact Or.inl rfl
 
-theorem runW_log_refines : Spec.runW_log_refines := by
-  intro c sz now
+/-- **The refinement.** Every batch the current workers append is a batch the
+old worker (`workerStep`, unfenced) appends for some write and run result: an
+applied write's is `workerStep`'s success batch, a consumed failure's is its
+`[consume failed]` (for a lookup timeout the old worker appended nothing; the
+batch is the one it appends for a content refusal), and a hold or a fenced
+refusal appends none. So `workerStep_atomic` and `workerStep_keys` hold of the
+current worker's batches, which is what the crash argument needs. -/
+theorem runW_log_refines (c : Caps) (sz : Job → Nat) (now : Int) :
+    ∀ (evs : List Ev) (st : WS), (∀ b ∈ st.log, ∃ j r, b = (workerStep false j r).2) →
+      ∀ b ∈ (runW c sz now st evs).log, ∃ j r, b = (workerStep false j r).2 := by
   intro evs
   induction evs with
   | nil => intro st h; exact h
@@ -1361,8 +1431,8 @@ theorem streakNew_eq_runSince_rev : ∀ (r : List SEv),
     rw [List.reverse_cons, List.foldl_append, runSince_snoc, ← streakNew_eq_runSince_rev r]
     rfl
 
-theorem streakNew_eq_runSince : Spec.streakNew_eq_runSince := by
-  intro evs
+/-- **The fixed streak is the documented count**, over every trace. -/
+theorem streakNew_eq_runSince (evs : List SEv) : evs.foldl streakNew 0 = runSince evs := by
   have h := streakNew_eq_runSince_rev evs.reverse
   rwa [List.reverse_reverse] at h
 
@@ -1384,8 +1454,11 @@ theorem foldl_streakNew_zero : ∀ (mid : List SEv), (∀ e ∈ mid, e ≠ .time
     rw [List.foldl_cons, he]
     exact foldl_streakNew_zero mid (fun x hx => h x (List.mem_cons_of_mem _ hx))
 
-theorem streakNew_after_commit : Spec.streakNew_after_commit := by
-  intro pre mid hmid
+/-- **A timeout after an applied write counts as a first timeout** under the
+fixed streak, whatever came before the commit and whatever settles after it,
+as long as no other timeout came since. -/
+theorem streakNew_after_commit (pre mid : List SEv) (hmid : ∀ e ∈ mid, e ≠ .timeout) :
+    (pre ++ SEv.commit :: mid).foldl streakNew 0 = 0 := by
   rw [List.foldl_append, List.foldl_cons]
   exact foldl_streakNew_zero mid hmid
 

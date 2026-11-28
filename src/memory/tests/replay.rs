@@ -2651,7 +2651,7 @@ async fn pair_and_wait(
 /// `pending_replay`, a clean close keeps both as durable intents, and the
 /// next serve applies the first and refuses the second.
 ///
-/// Mirrors the Lean theorems `Drain.stepW_ord` and
+/// Mirrors the Lean theorems `Drain.runW_ord` and
 /// `Drain.sessionW_then_serve_order`; the code before the fix is
 /// `Drain.outage_then_replay_reorders`.
 #[tokio::test]
@@ -2696,7 +2696,7 @@ async fn an_outage_in_session_holds_the_agents_later_writes_behind_the_owed_one(
 /// the second is refused. Before the fix the first answered `failed` and the
 /// second applied ahead of it.
 ///
-/// Mirrors `Drain.retry_settles_head` and `Drain.stepW_ord`.
+/// Mirrors `Drain.retry_settles_head` and `Drain.runW_ord`.
 #[tokio::test]
 async fn a_held_write_applies_before_the_agents_next_write_once_the_embedder_is_back() {
     let inner = Arc::new(MemoryStore::new());
@@ -2830,7 +2830,7 @@ fn two_of_a_one_of_b(
 /// not wait for the next serve. Here the retry applies A's two writes, in
 /// order, after B's; nothing is owed and nothing is blocked.
 ///
-/// Mirrors `Drain.replayP_progress` and `Drain.replayP_preserves`.
+/// Mirrors `Drain.replayP_progress` and `Drain.sessionW_then_serve_order`.
 #[cfg(feature = "fixtures")]
 #[tokio::test]
 async fn a_deferred_agent_is_retried_once_at_the_end_of_the_pass() {
@@ -2876,7 +2876,7 @@ async fn a_deferred_agent_is_retried_once_at_the_end_of_the_pass() {
 /// (`an_intent_with_an_unparseable_receipt_id_is_settled_failed`).
 ///
 /// Mirrors the Lean step `Drain.stepQ` (an id of another format defers its
-/// agent) and `Drain.serveQ_block`.
+/// agent) and `Drain.serveR_reported`.
 #[cfg(feature = "fixtures")]
 #[tokio::test]
 async fn an_intent_in_another_receipt_format_is_quarantined_not_settled() {

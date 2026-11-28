@@ -201,8 +201,8 @@ theorem finishW_ord (now : Int) (a : Nat) (r : RunResult) (st : WS) (hI : OrdW s
         · simp [holdRun, d1]
       · exact sR _ _
 
-theorem stepW_ord : Spec.stepW_ord := by
-  intro c sz now st ev hI
+theorem stepW_ord (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (ev : Ev) (hI : OrdW st) :
+    OrdW (stepW c sz now st ev) := by
   cases ev with
   | submit j =>
     simp only [stepW]
@@ -354,8 +354,11 @@ theorem finishW_caps (c : Caps) (sz : Job → Nat) (now : Int) (a : Nat) (r : Ru
         · omega
       · exact sR _ _
 
-theorem stepW_caps : Spec.stepW_caps := by
-  intro c sz now st ev hC
+/-- **The caps hold at every step**: queued, running and held writes, and
+their bytes, never exceed the bounds. A held write stays counted from its
+admission until it settles, through every retry, bytes included. -/
+theorem stepW_caps (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (ev : Ev)
+    (hC : CapsW c sz st) : CapsW c sz (stepW c sz now st ev) := by
   obtain ⟨cl, ct, cb⟩ := hC
   cases ev with
   | submit j =>
@@ -463,8 +466,19 @@ theorem fence_stops_applies : Spec.fence_stops_applies := by
 
 /-! ### Order across the session and the next serve -/
 
-theorem sessionW_orderInv : Spec.sessionW_orderInv := by
-  intro c sz now s evs e he hjs rows hrows
+/-- **Per-agent order in session, with admission and retries.** The writes
+applied in session satisfy the order invariant against any rows whose owed
+writes of this process are still running, held or queued. -/
+theorem sessionW_orderInv (c : Caps) (sz : Job → Nat) (now : Int) (s : RStore) (evs : List Ev)
+    (e : Nat) (he : ∀ j ∈ (runW c sz now (WS.init s) evs).admitted, j.epoch = e)
+    (hjs : (runW c sz now (WS.init s) evs).admitted.Pairwise
+      (fun a b => a.agent = b.agent → a.rid < b.rid))
+    (rows : List Intent)
+    (hrows : ∀ i ∈ rows, i.outcome = none → i.job.epoch = e →
+      i.job ∈ (runW c sz now (WS.init s) evs).running ∨
+      i.job ∈ (runW c sz now (WS.init s) evs).held ∨
+      i.job ∈ (runW c sz now (WS.init s) evs).queue) :
+    OrderInv rows (runW c sz now (WS.init s) evs).applied := by
   let st := runW c sz now (WS.init s) evs
   have hO : OrdW st := runW_ord c sz now evs _ (ordW_init s)
   have hsub : st.applied.Sublist (st.settled.map (·.1)) := (List.filter_sublist).map _

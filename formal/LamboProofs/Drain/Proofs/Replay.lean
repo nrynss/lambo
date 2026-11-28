@@ -21,14 +21,28 @@ namespace Lambo.Drain
 
 open Lambo.Receipts (Answer Entry settle Lane)
 
+/-- The writes applied so far keep each agent's writes of one process in
+sequence order, and none is later in sequence than a write of its agent and
+process still owed in `rows`. -/
+def OrderInv (rows : List Intent) (applied : List Job) : Prop :=
+  applied.Pairwise (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) ∧
+  ∀ x ∈ applied, ∀ i ∈ rows, i.outcome = none → x.agent = i.job.agent →
+    x.epoch = i.job.epoch → x.rid ≤ i.job.rid
+
 /-! ## The fix for #294: graph-dependent input refusals settle `failed` -/
 
-theorem stepInput_refusesInput : Spec.stepInput_refusesInput := by
-  intro img e s h
+/-- **The fixed replay settles every input refusal `failed`**: `Embed`,
+`ImageIdTaken`, `Reference`, a cycle refusal, and the graph-dependent
+refusals #294 names. -/
+theorem stepInput_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
+    (stepInput img (.run (.err e)) s).1 = .failed := by
   cases e <;> simp_all [Err.refusesInput, Err.inputFact, stepInput, replayStep]
 
-theorem stepInput_sessionWide : Spec.stepInput_sessionWide := by
-  intro img e s h1 h2
+/-- **And still stops on everything else that is not transient**: a store
+error that can mean an inconsistent graph or store, `Config`, a lost lease,
+anything else. -/
+theorem stepInput_sessionWide (img : Bool) (e : Err) (s : Streaks) (h1 : e.refusesInput = false)
+    (h2 : e.transient = false) : ∃ b, (stepInput img (.run (.err e)) s).1 = .stop b := by
   cases e <;> simp_all [Err.refusesInput, Err.inputFact, Err.transient, stepInput, replayStep]
 
 theorem fixed_sessionWide_stops : Spec.fixed_sessionWide_stops := by
@@ -559,8 +573,14 @@ theorem foldl_jobs : ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
     rw [ih _ (fun x hx => hnp x (List.mem_cons_of_mem _ hx)),
       applyMut_jobs acc m (hnp m List.mem_cons_self)]
 
-theorem loopD_preserves : Spec.loopD_preserves := by
-  intro step rout s rows A hnd hs hI
+/-- **One pass of the fixed loop keeps the invariant**, for any step, any
+streaks and any run results, over rows keyed by receipt id and loaded in
+per-process sequence order. -/
+theorem loopD_preserves (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR)
+    (s : Streaks) (rows : List Intent) (A : List Job) (hnd : (rows.map (·.job.key)).Nodup)
+    (hs : EpochSorted rows) (hI : OrderInv rows A) :
+    OrderInv (applyLog rows (loopD step rout s [] (pendingOf rows)).log)
+      (A ++ (loopD step rout s [] (pendingOf rows)).applied) := by
   obtain ⟨f1, _, fnp, fcons, _⟩ := loopD_facts step rout (pendingOf rows) s []
   have hp1 : EpochSorted (pendingOf rows) := hs.sublist List.filter_sublist
   have hpa : (loopD step rout s [] (pendingOf rows)).applied.Pairwise
@@ -626,8 +646,13 @@ theorem loopD_preserves : Spec.loopD_preserves := by
           rw [hixj] at hrel
           exact hrel hep
 
-theorem replayD_preserves : Spec.replayD_preserves := by
-  intro step live rout rows A hnd hs hI
+/-- The same for a whole serve of the fixed replay (the liveness gate
+included). -/
+theorem replayD_preserves (step : Bool → RR → Streaks → Step × Streaks) (live : Bool)
+    (rout : Job → RR) (rows : List Intent) (A : List Job) (hnd : (rows.map (·.job.key)).Nodup)
+    (hs : EpochSorted rows) (hI : OrderInv rows A) :
+    OrderInv (applyLog rows (replayD step live rout rows).log)
+      (A ++ (replayD step live rout rows).applied) := by
   rcases replayD_cases step live rout rows with h | h | h <;> rw [h]
   · simpa [ROut.empty, applyLog] using hI
   · simpa [ROut.empty, applyLog] using hI
@@ -672,8 +697,11 @@ theorem stepQ_skip : Spec.stepQ_skip := by
   · rw [stepQ_agrees img rr s hq] at h
     exact Or.inl (stepFixed_skip h)
 
-theorem serveQ_block : Spec.serveQ_block := by
-  intro live rout rout' s' intents h
+/-- **The block reason is never null while writes are owed** after a serve
+that did not stop: `write_queue_replay_blocked` names why. -/
+theorem serveQ_block (live : Bool) (rout rout' : Job → RR) (s' : Streaks) (intents : List Intent)
+    (h : pendingOf (applyLog intents (serveQ live rout rout' s' intents).log) ≠ []) :
+    (serveQ live rout rout' s' intents).block ≠ none := by
   unfold serveQ at h ⊢
   by_cases hc : (replayP stepQ live rout rout' s' intents).block = none ∧
       pendingOf (applyLog intents (replayP stepQ live rout rout' s' intents).log) ≠ []
@@ -711,8 +739,13 @@ theorem applyLog_sorted (rows : List Intent) (log : List Batch) (hnp : NoPut log
   rw [← show (applyLog rows log).map (·.job) = rows.map (·.job) from h] at hs'
   exact List.pairwise_map.mp hs'
 
-theorem replayP_preserves : Spec.replayP_preserves := by
-  intro step live rout rout' s' rows A hnd hs hI
+/-- **A serve with the retry pass keeps the order invariant**: both passes
+are runs of the fixed loop over per-process-sorted rows. -/
+theorem replayP_preserves (step : Bool → RR → Streaks → Step × Streaks) (live : Bool)
+    (rout rout' : Job → RR) (s' : Streaks) (rows : List Intent) (A : List Job)
+    (hnd : (rows.map (·.job.key)).Nodup) (hs : EpochSorted rows) (hI : OrderInv rows A) :
+    OrderInv (applyLog rows (replayP step live rout rout' s' rows).log)
+      (A ++ (replayP step live rout rout' s' rows).applied) := by
   have h1 := replayD_preserves step live rout rows A hnd hs hI
   unfold replayP
   dsimp only

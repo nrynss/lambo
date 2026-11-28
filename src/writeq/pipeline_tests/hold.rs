@@ -197,7 +197,7 @@ async fn a_queue_full_of_held_writes_is_still_retried() {
 /// in the queue's byte gauge, which the byte cap checks, until each settles;
 /// once the embedder is back and they apply, the gauge returns to zero.
 ///
-/// Mirrors `Drain.stepW_caps`.
+/// Mirrors `Drain.runW_caps`.
 #[tokio::test(start_paused = true)]
 async fn held_writes_keep_their_bytes_counted_until_they_settle() {
     let embedder = Flaky::new();

@@ -251,30 +251,6 @@ worker loop before #295 (`work`, `close`) and the theorems over it are in
 `History.lean`. The receipt store (`RStore`, `settleOne`) and what admission
 leaves behind are shared by both layers. -/
 
-/-- One job through the lane worker **before #295**: its receipt answer and
-the batch it appends. `fenced` is the lease-lost fence, checked before the
-run.
-
-* lease lost: `failed`, nothing written, the intent deliberately not consumed;
-* `Ok`: `applied`; the write and `ConsumeWriteIntent(applied)` under one lock
-  hold (`WriteCtx::run`, "Same lock hold as the commit");
-* `EmbedUnavailable` (outage or lookup timeout): `failed`, intent left
-  unconsumed for the next serve;
-* any other error: `failed`, intent consumed `failed` on its own hold.
-
-The current worker (`finishW`, `startW`) differs on the third arm: an outage,
-or a first-attempt lookup timeout once a run of them has reached the limit,
-holds the write (`pending_replay`, nothing appended), and any other lookup
-timeout settles `failed` with its intent consumed. Its batches are still `workerStep`'s
-(`runW_log_refines`), so the batch lemmas below (`workerStep_keys`,
-`workerStep_atomic`) carry over to it. -/
-def workerStep (fenced : Bool) (j : Job) (r : RunResult) : Answer × Batch :=
-  if fenced then (.failed, [])
-  else
-    match r with
-    | .ok => (.applied, [.write j.key, .consume j.key .applied])
-    | .err e => if e.transient then (.failed, []) else (.failed, [.consume j.key .failed])
-
 /-- The receipt store's entries, keyed by receipt id (`Job.key`). -/
 abbrev RStore := List (Key × Entry)
 
@@ -506,23 +482,6 @@ def applyLog (intents : List Intent) (log : List Batch) : List Intent :=
 
 /-! ## The receipt store -/
 
-/-- A worker batch mentions only its own job. Stated over `workerStep` (the
-worker before #295); it holds of the current worker's batches through
-`runW_log_refines`. -/
-abbrev Spec.workerStep_keys : Prop :=
-  ∀ {f : Bool} {j : Job} {r : RunResult} {m : Mut},
-    m ∈ (workerStep f j r).2 →
-    m = .write j.key ∨ ∃ t, m = .consume j.key t
-
-/-- **The commit carries its consume.** A worker batch that writes also
-consumes the intent as `applied`, in the same batch, so the same flush. Stated
-over `workerStep` (the worker before #295); it holds of the current worker's
-batches through `runW_log_refines`, which `crash_never_reappliesW` uses. -/
-abbrev Spec.workerStep_atomic : Prop :=
-  ∀ {f : Bool} {j : Job} {r : RunResult} {q : Key},
-    Mut.write q ∈ (workerStep f j r).2 →
-    Mut.consume q .applied ∈ (workerStep f j r).2
-
 /-! ## `settle_deferred`: deferred, or answered `close_unflushed`
 
 The `deferEntry` and `settleDeferred` lemmas here are about `settle_deferred`
@@ -532,30 +491,7 @@ are over the worker **before #295**, in `History.lean`; their current
 counterparts are `shutdown_no_silent_lossW`, `held_at_closeW` and
 `closeW_retry_upgradesW`. -/
 
-/-- A retried close upgrades `close_unflushed` to `intent_durable` once its
-flush lands: the one settled-to-settled change, made by `settle_deferred`
-outside `Entry::settle` (#117). About one entry and `deferEntry`, which is
-`settle_deferred` as it is today, so it describes the current close as well;
-`closeW_retry_upgradesW` states it over `closeW` and a session of the current
-worker. -/
-abbrev Spec.retry_upgrades : Prop :=
-  ∀ (now now' : Int) (e : Entry),
-    e.answer.isSettled = false →
-    (deferEntry .durable now' (deferEntry .incomplete now e)).answer = .intentRecorded
-
 /-! ## The intent table -/
-
-/-- No `PutWriteIntent` in a mutation sequence. -/
-def NoPut (ms : List Mut) : Prop := ∀ m ∈ ms, ∀ j, m ≠ .put j
-
-/-- **A consume is never undone.** Once a mutation sequence with no puts
-carries a consume of `r`, or every row of `r` is already consumed, every row
-of `r` is consumed afterwards. -/
-abbrev Spec.foldl_consumed : Prop :=
-  ∀ {r : Key},
-    ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
-      ((∃ t, Mut.consume r t ∈ ms) ∨ ∀ i ∈ acc, i.job.key = r → i.outcome ≠ none) →
-      ∀ i ∈ ms.foldl applyMut acc, i.job.key = r → i.outcome ≠ none
 
 /-! ## Load order -/
 
@@ -571,16 +507,6 @@ abbrev Spec.load_seq_order : Prop :=
   ∀ (l : List Intent),
     (∀ a ∈ l, ∀ b ∈ l, a.job.rid < b.job.rid → a.job.ms ≤ b.job.ms) →
     (loadOrder l).Pairwise (fun a b => a.job.rid ≤ b.job.rid)
-
-/-- `load_seq_order` for a backlog of several processes: the hypothesis and
-the conclusion compare only rows of the same epoch. Across epochs the load
-order is issue-time order; sequence numbers of different processes are not
-comparable. -/
-abbrev Spec.load_epoch_seq_order : Prop :=
-  ∀ (l : List Intent),
-    (∀ a ∈ l, ∀ b ∈ l, a.job.epoch = b.job.epoch → a.job.rid < b.job.rid →
-      a.job.ms ≤ b.job.ms) →
-    (loadOrder l).Pairwise (fun a b => a.job.epoch = b.job.epoch → a.job.rid ≤ b.job.rid)
 
 /-! ## Draining a lane to completion
 
@@ -604,14 +530,6 @@ abbrev Spec.drain_fifo : Prop :=
       (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).taken = Lambo.Receipts.submitted ops
 
 /-! ## `settle_deferred` settles every set-aside entry -/
-
-/-- `settle_deferred` leaves no receipt pending: when every receipt outside the
-set-aside ids is already settled, every receipt is settled once it has run
-over those ids, whichever way the final flush ended. -/
-abbrev Spec.settleDeferred_all_settled : Prop :=
-  ∀ (flush : CloseFlush) (now : Int),
-    ∀ (ids : List Key) (s : RStore), (∀ p ∈ s, p.1 ∉ ids → p.2.answer.isSettled = true) →
-      ∀ p ∈ settleDeferred flush now ids s, p.2.answer.isSettled = true
 
 /-! ## The restart map's seed (`spawn_replay`)
 

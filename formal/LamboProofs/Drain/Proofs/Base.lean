@@ -19,6 +19,33 @@ namespace Lambo.Drain
 
 open Lambo.Receipts (Answer Entry settle Lane)
 
+/-- One job through the lane worker **before #295**: its receipt answer and
+the batch it appends. `fenced` is the lease-lost fence, checked before the
+run.
+
+* lease lost: `failed`, nothing written, the intent deliberately not consumed;
+* `Ok`: `applied`; the write and `ConsumeWriteIntent(applied)` under one lock
+  hold (`WriteCtx::run`, "Same lock hold as the commit");
+* `EmbedUnavailable` (outage or lookup timeout): `failed`, intent left
+  unconsumed for the next serve;
+* any other error: `failed`, intent consumed `failed` on its own hold.
+
+The current worker (`finishW`, `startW`) differs on the third arm: an outage,
+or a first-attempt lookup timeout once a run of them has reached the limit,
+holds the write (`pending_replay`, nothing appended), and any other lookup
+timeout settles `failed` with its intent consumed. Its batches are still `workerStep`'s
+(`runW_log_refines`), so the batch lemmas below (`workerStep_keys`,
+`workerStep_atomic`) carry over to it. -/
+def workerStep (fenced : Bool) (j : Job) (r : RunResult) : Answer × Batch :=
+  if fenced then (.failed, [])
+  else
+    match r with
+    | .ok => (.applied, [.write j.key, .consume j.key .applied])
+    | .err e => if e.transient then (.failed, []) else (.failed, [.consume j.key .failed])
+
+/-- No `PutWriteIntent` in a mutation sequence. -/
+def NoPut (ms : List Mut) : Prop := ∀ m ∈ ms, ∀ j, m ≠ .put j
+
 /-! ## The receipt store -/
 
 theorem update_cons (k : Key) (e : Entry) (s : RStore) (r : Key) (f : Entry → Entry) :
@@ -69,8 +96,11 @@ theorem lookup_admit {js : List Job} {j : Job} (hj : j ∈ js) :
       obtain ⟨e, he, ha⟩ := ih hj'
       exact ⟨e, by simp [lookup, hk, he], ha⟩
 
-theorem workerStep_keys : Spec.workerStep_keys := by
-  intro f j r m hm
+/-- A worker batch mentions only its own job. Stated over `workerStep` (the
+worker before #295); it holds of the current worker's batches through
+`runW_log_refines`. -/
+theorem workerStep_keys {f : Bool} {j : Job} {r : RunResult} {m : Mut}
+    (hm : m ∈ (workerStep f j r).2) : m = .write j.key ∨ ∃ t, m = .consume j.key t := by
   unfold workerStep at hm
   cases f with
   | true => simp at hm
@@ -83,8 +113,12 @@ theorem workerStep_keys : Spec.workerStep_keys := by
       | inr h => exact Or.inr ⟨_, h⟩
     | err e => cases e <;> simp [Err.transient] at hm <;> exact Or.inr ⟨_, hm⟩
 
-theorem workerStep_atomic : Spec.workerStep_atomic := by
-  intro f j r q hm
+/-- **The commit carries its consume.** A worker batch that writes also
+consumes the intent as `applied`, in the same batch, so the same flush. Stated
+over `workerStep` (the worker before #295); it holds of the current worker's
+batches through `runW_log_refines`, which `crash_never_reappliesW` uses. -/
+theorem workerStep_atomic {f : Bool} {j : Job} {r : RunResult} {q : Key}
+    (hm : Mut.write q ∈ (workerStep f j r).2) : Mut.consume q .applied ∈ (workerStep f j r).2 := by
   unfold workerStep at hm ⊢
   cases f with
   | true => simp at hm
@@ -213,8 +247,14 @@ theorem eq_of_key {js : List Job} (hnd : (js.map (·.key)).Nodup) {a b : Job} (h
         exact absurd (h.symm ▸ List.mem_map_of_mem ha') hnd.1
       | inr hb' => exact ih hnd.2 ha' hb'
 
-theorem retry_upgrades : Spec.retry_upgrades := by
-  intro now now' e h
+/-- A retried close upgrades `close_unflushed` to `intent_durable` once its
+flush lands: the one settled-to-settled change, made by `settle_deferred`
+outside `Entry::settle` (#117). About one entry and `deferEntry`, which is
+`settle_deferred` as it is today, so it describes the current close as well;
+`closeW_retry_upgradesW` states it over `closeW` and a session of the current
+worker. -/
+theorem retry_upgrades (now now' : Int) (e : Entry) (h : e.answer.isSettled = false) :
+    (deferEntry .durable now' (deferEntry .incomplete now e)).answer = .intentRecorded := by
   have h' : ¬ e.answer.isSettled = true := by rw [h]; decide
   rw [deferEntry_incomplete, Lambo.Receipts.settle_unsettled e _ now h', deferEntry_durable,
     ite_eq_left rfl]
@@ -290,8 +330,12 @@ theorem applyMut_consume_self (acc : List Intent) (r : Key) (t : Tag) :
   · simp [hq]
   · simp only [hq, ite_false] at hr
 
-theorem foldl_consumed : Spec.foldl_consumed := by
-  intro r
+/-- **A consume is never undone.** Once a mutation sequence with no puts
+carries a consume of `r`, or every row of `r` is already consumed, every row
+of `r` is consumed afterwards. -/
+theorem foldl_consumed {r : Key} : ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
+    ((∃ t, Mut.consume r t ∈ ms) ∨ ∀ i ∈ acc, i.job.key = r → i.outcome ≠ none) →
+    ∀ i ∈ ms.foldl applyMut acc, i.job.key = r → i.outcome ≠ none := by
   intro ms
   induction ms with
   | nil =>
@@ -418,8 +462,14 @@ theorem load_seq_order : Spec.load_seq_order := by
   have hm := hmono b (mem_loadOrder.mp hb) a (mem_loadOrder.mp ha)
   omega
 
-theorem load_epoch_seq_order : Spec.load_epoch_seq_order := by
-  intro l hmono
+/-- `load_seq_order` for a backlog of several processes: the hypothesis and
+the conclusion compare only rows of the same epoch. Across epochs the load
+order is issue-time order; sequence numbers of different processes are not
+comparable. -/
+theorem load_epoch_seq_order (l : List Intent)
+    (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.epoch = b.job.epoch → a.job.rid < b.job.rid →
+      a.job.ms ≤ b.job.ms) :
+    (loadOrder l).Pairwise (fun a b => a.job.epoch = b.job.epoch → a.job.rid ≤ b.job.rid) := by
   apply List.Pairwise.imp_of_mem _ (loadOrder_sorted l)
   intro a b ha hb hab he
   rw [keyLe_iff] at hab
@@ -473,8 +523,9 @@ theorem drain_fifo : Spec.drain_fifo := by
 
 /-! ## `settle_deferred` settles every set-aside entry -/
 
-theorem settleDeferred_all_settled : Spec.settleDeferred_all_settled := by
-  intro flush now
+theorem settleDeferred_all_settled (flush : CloseFlush) (now : Int) :
+    ∀ (ids : List Key) (s : RStore), (∀ p ∈ s, p.1 ∉ ids → p.2.answer.isSettled = true) →
+      ∀ p ∈ settleDeferred flush now ids s, p.2.answer.isSettled = true := by
   intro ids
   induction ids with
   | nil =>

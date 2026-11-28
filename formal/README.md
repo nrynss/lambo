@@ -107,25 +107,27 @@ A model in Spec and Proofs form is two layers. Its `Spec` file holds the definit
 A result that read
 
 ```lean
-/-- A retried close upgrades `close_unflushed` to `intent_durable` once its flush lands: ... -/
-theorem retry_upgrades (now now' : Int) (e : Entry) (h : e.answer.isSettled = false) :
-    (deferEntry .durable now' (deferEntry .incomplete now e)).answer = .intentRecorded := by
+/-- The third transient in a row with nothing answered between stops the
+replay as `embedder` (`EMBEDDER_SICK_THRESHOLD`). -/
+theorem unavailable_stops (img : Bool) (s : Streaks) (h : sickThreshold ≤ s.transient + 1) :
+    (replayStep img (.run (.err .unavailable)) s).1 = .stop .embedder := by
   ...
 ```
 
 is now, in `Drain/Spec/Base.lean` and `Drain/Proofs/Base.lean`:
 
 ```lean
-/-- A retried close upgrades `close_unflushed` to `intent_durable` once its flush lands: ... -/
-abbrev Spec.retry_upgrades : Prop :=
-  ∀ (now now' : Int) (e : Entry),
-    e.answer.isSettled = false →
-    (deferEntry .durable now' (deferEntry .incomplete now e)).answer = .intentRecorded
+/-- The third transient in a row with nothing answered between stops the
+replay as `embedder` (`EMBEDDER_SICK_THRESHOLD`). -/
+abbrev Spec.unavailable_stops : Prop :=
+  ∀ (img : Bool) (s : Streaks),
+    sickThreshold ≤ s.transient + 1 →
+    (replayStep img (.run (.err .unavailable)) s).1 = .stop .embedder
 ```
 
 ```lean
-theorem retry_upgrades : Spec.retry_upgrades := by
-  intro now now' e h
+theorem unavailable_stops : Spec.unavailable_stops := by
+  intro img s h
   ...
 ```
 

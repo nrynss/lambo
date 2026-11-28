@@ -229,9 +229,6 @@ def closeW (flush : CloseFlush) (now : Int) (st : WS) : RStore :=
 /-- The answer a receipt id holds in a store. -/
 def ansOf (s : RStore) (k : Key) : Option Answer := (lookup s k).map (·.answer)
 
-/-- No batch of the log consumes `k`. -/
-def Untouched (k : Key) (log : List Batch) : Prop := ∀ t, Mut.consume k t ∉ log.flatten
-
 /-- `j`'s intent is an unconsumed row of the session's whole log, admission's
 puts then the workers' batches, in the current load order (`fixedLoad`): owed
 by the next serve once that log is durable. It is about this process's whole
@@ -248,34 +245,7 @@ def OwedW (all : List Job) (st : WS) (j : Job) : Prop :=
 
 /-! ### The receipts and the log, as the workers leave them -/
 
-/-- What every reachable state of the current workers keeps: each settled
-write's receipt holds its answer and its batch (or, refused after the fence,
-no consume at all); each queued or running write's receipt is unsettled and
-its intent untouched; each held write answers `pending_replay` with its
-intent untouched; and a write of `all` not admitted is still `pending` and
-untouched (`fresh`). That last clause covers alike a write not yet submitted
-and one admission refused: the model gives both a `pending` receipt and a put,
-where the Rust answers a refused write `dropped` and records no intent for it
-(the gap in the section header). -/
-structure InvW (all : List Job) (st : WS) : Prop where
-  settled : ∀ p ∈ st.settled, ansOf st.store p.1.key = some p.2 ∧
-    ((p.2 = .applied ∧ [Mut.write p.1.key, .consume p.1.key .applied] ∈ st.log) ∨
-     (p.2 = .failed ∧ [Mut.consume p.1.key .failed] ∈ st.log) ∨
-     (p.2 = .failed ∧ st.fenced = true ∧ Untouched p.1.key st.log))
-  live : ∀ j ∈ st.running ++ st.queue,
-    (∃ a, ansOf st.store j.key = some a ∧ a.isSettled = false) ∧ Untouched j.key st.log
-  held : ∀ j ∈ st.held, ansOf st.store j.key = some .pendingReplay ∧ Untouched j.key st.log
-  fresh : ∀ j ∈ all, j.key ∉ st.admitted.map (·.key) →
-    ansOf st.store j.key = some .pending ∧ Untouched j.key st.log
-
 /-! The moves, one at a time. -/
-
-/-- The current workers' reachable states keep `InvW`. -/
-abbrev Spec.sessionW_inv : Prop :=
-  ∀ (c : Caps) (sz : Job → Nat) (now : Int) (all : List Job) (evs : List Ev),
-    ((runW c sz now (WS.init (admitStore all)) evs).admitted.map (·.key)).Nodup →
-    (∀ j ∈ (runW c sz now (WS.init (admitStore all)) evs).admitted, j ∈ all) →
-    InvW all (runW c sz now (WS.init (admitStore all)) evs)
 
 /-! ### The close -/
 
@@ -283,38 +253,6 @@ abbrev Spec.sessionW_inv : Prop :=
 def closeAnswer : CloseFlush → Answer
   | .durable => .intentRecorded
   | .incomplete => .closeUnflushed
-
-/-- **Shutdown accounting over the current worker.** After any session of the
-current workers (admission, holds, retries, the fence) and a `close()`, every
-admitted write is one of: applied (its write and consume in one batch);
-failed with its intent consumed `failed`; failed after the fence, never run,
-its intent left unconsumed (the session's current holder's to apply, if an
-earlier flush took it); `intent_durable` after a completed final flush, owed
-in the flushed log (its row is unconsumed, so the next serve's replay owes
-it), whether it was running, held or queued when the close began; or
-`close_unflushed` after an incomplete flush. None is left `pending` or
-`pending_replay`. `shutdown_exactly_oneW` adds that exactly one of these
-holds. "Applied" means in this process's graph, its batch in the log: the
-batch is durable only once a flush takes it, and one committed after the
-fence is refused at the flush (`Flush/Loop.lean`). The current counterpart of
-`shutdown_no_silent_loss`. -/
-abbrev Spec.shutdown_no_silent_lossW : Prop :=
-  ∀ {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job} {evs : List Ev} {st : WS},
-    st = runW c sz now (WS.init (admitStore all)) evs →
-    (st.admitted.map (·.key)).Nodup →
-    (∀ j ∈ st.admitted, j ∈ all) →
-    ∀ (flush : CloseFlush) (now' : Int) (j : Job),
-    j ∈ st.admitted →
-    ((j, Answer.applied) ∈ st.settled ∧ ansOf (closeW flush now' st) j.key = some .applied ∧
-      [Mut.write j.key, .consume j.key .applied] ∈ st.log) ∨
-    ((j, Answer.failed) ∈ st.settled ∧ ansOf (closeW flush now' st) j.key = some .failed ∧
-      [Mut.consume j.key .failed] ∈ st.log) ∨
-    ((j, Answer.failed) ∈ st.settled ∧ st.fenced = true ∧
-      ansOf (closeW flush now' st) j.key = some .failed ∧ OwedW all st j) ∨
-    (j ∈ st.running ++ st.held ++ st.queue ∧ flush = .durable ∧
-      ansOf (closeW flush now' st) j.key = some .intentRecorded ∧ OwedW all st j) ∨
-    (j ∈ st.running ++ st.held ++ st.queue ∧ flush = .incomplete ∧
-      ansOf (closeW flush now' st) j.key = some .closeUnflushed)
 
 /-- **A held write at close.** A write held in session (an outage, a run of
 lookup timeouts, or behind an earlier held write of its agent) answers
@@ -411,36 +349,7 @@ abbrev Spec.lookupTimeout_run_holdsW : Prop :=
     j ∈ st'.held ∧ ansOf st'.store j.key = some .pendingReplay ∧ st'.log = st.log ∧
       OwedW all st' j
 
-/-- **A retried close upgrades `close_unflushed`.** A write the close set aside
-(running, held or queued) answers `close_unflushed` after an incomplete flush;
-a retried close whose flush completes settles the same set-aside ids
-(`close_deferred`, kept after an incomplete flush) and answers it
-`intent_durable`. `retry_upgrades` is the same fact for one entry. -/
-abbrev Spec.closeW_retry_upgradesW : Prop :=
-  ∀ {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job} {evs : List Ev} {st : WS},
-    st = runW c sz now (WS.init (admitStore all)) evs →
-    (st.admitted.map (·.key)).Nodup →
-    (∀ j ∈ st.admitted, j ∈ all) →
-    ∀ (j : Job),
-    j ∈ st.running ++ st.held ++ st.queue →
-    ∀ (now1 now2 : Int),
-    ansOf (closeW .incomplete now1 st) j.key = some .closeUnflushed ∧
-      ansOf (settleDeferred .durable now2 (deferredW st) (closeW .incomplete now1 st)) j.key =
-        some .intentRecorded
-
 /-! ### Crash and the serve that follows -/
-
-/-- **The refinement.** Every batch the current workers append is a batch the
-old worker (`workerStep`, unfenced) appends for some write and run result: an
-applied write's is `workerStep`'s success batch, a consumed failure's is its
-`[consume failed]` (for a lookup timeout the old worker appended nothing; the
-batch is the one it appends for a content refusal), and a hold or a fenced
-refusal appends none. So `workerStep_atomic` and `workerStep_keys` hold of the
-current worker's batches, which is what the crash argument needs. -/
-abbrev Spec.runW_log_refines : Prop :=
-  ∀ (c : Caps) (sz : Job → Nat) (now : Int),
-    ∀ (evs : List Ev) (st : WS), (∀ b ∈ st.log, ∃ j r, b = (workerStep false j r).2) →
-      ∀ b ∈ (runW c sz now st evs).log, ∃ j r, b = (workerStep false j r).2
 
 /-- **The current serve applies only stored, unconsumed rows.** Every write
 `serveR` (both passes, the block reason after a halt) applies is a row it was
@@ -989,25 +898,12 @@ def streakBoth (s : Nat) : SEv → Nat
 def runSince (evs : List SEv) : Nat :=
   ((evs.reverse.takeWhile (fun e => e != .commit)).filter (fun e => e == .timeout)).length
 
-/-- **The fixed streak is the documented count**, over every trace. -/
-abbrev Spec.streakNew_eq_runSince : Prop :=
-  ∀ (evs : List SEv),
-    evs.foldl streakNew 0 = runSince evs
-
 /-- **The fixed worker holds a first-attempt lookup timeout exactly when the
 documented run reaches the limit.** -/
 abbrev Spec.heldNew_iff : Prop :=
   ∀ (evs : List SEv),
     holdsS (heldErrW false (evs.foldl streakNew 0) .lookupTimeout) = true ↔
       lookupTimeoutLimit ≤ runSince evs + 1
-
-/-- **A timeout after an applied write counts as a first timeout** under the
-fixed streak, whatever came before the commit and whatever settles after it,
-as long as no other timeout came since. -/
-abbrev Spec.streakNew_after_commit : Prop :=
-  ∀ (pre mid : List SEv),
-    (∀ e ∈ mid, e ≠ .timeout) →
-    (pre ++ SEv.commit :: mid).foldl streakNew 0 = 0
 
 /-- **In the worker model, that timeout settles `failed`**: the running write
 of agent `a` whose first attempt times out after a commit (no timeout since)

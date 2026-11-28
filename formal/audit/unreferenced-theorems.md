@@ -75,7 +75,7 @@ Precedence: a same-statement twin (b); a review verdict (a); a superseding count
 | `TopK.lean` | 55 | 40 | 5 | 5 | 0 | 0 |
 | **Total** | 2367 | 1428 | 245 | 245 | 0 | 0 |
 
-Other references, theorems with at least one: named 1395, simp 37, example 6, anchor 279, ledger 224, rust 236, audit 814.
+Other references, theorems with at least one: named 1395, simp 37, example 6, anchor 272, ledger 220, rust 234, audit 814.
 
 ## `BatchQueue/Pure.lean`
 
